@@ -29,7 +29,6 @@ __pycache__/
 .Python
 .venv/
 venv/
-env/
 ENV/
 env.bak/
 venv.bak/
@@ -42,14 +41,11 @@ develop-eggs/
 downloads/
 eggs/
 .eggs/
-lib/
-lib64/
 parts/
 sdist/
-var/
 wheels/
 share/python-wheels/
-MANIFEST
+/MANIFEST
 
 # Test, type-checker, and linter caches/reports
 .pytest_cache/
