@@ -1,0 +1,459 @@
+<template>
+  <div class="app-container sync-question-list-page">
+    <header class="page-heading">
+      <div>
+        <h2>同步题库任务</h2>
+        <p>从当前正式数据中选择一个版本和多本教材，在同一任务内抓取完整目录与题目快照。</p>
+      </div>
+      <div class="heading-actions">
+        <el-button :icon="Refresh" :loading="loading" @click="loadTasks">刷新</el-button>
+        <el-button v-hasPermi="['bank:sync:question:add', 'bank:sync:run']" type="primary" :icon="Plus" @click="openCreate">新增同步题库任务</el-button>
+      </div>
+    </header>
+
+    <el-alert class="state-alert" type="info" :closable="false" show-icon>
+      “采集完成”不等于“已发布”。后续应用必须基于任务不可变快照生成发布批次。
+    </el-alert>
+    <el-alert v-if="hasInterruptedTasks" class="state-alert" type="warning" :closable="false" show-icon>
+      采集中断任务的已有快照和断点保留，可断点续采；也可重试从头创建新任务。
+    </el-alert>
+    <el-alert v-if="errorMessage" class="state-alert" type="error" :closable="false" show-icon>{{ errorMessage }}</el-alert>
+
+    <section class="panel">
+      <el-form :inline="true" :model="filters" class="filter-form" @submit.prevent="searchTasks">
+        <el-form-item label="任务编号"><el-input v-model="filters.taskNo" clearable placeholder="请输入任务编号" @keyup.enter="searchTasks" /></el-form-item>
+        <el-form-item label="状态">
+          <el-select v-model="filters.status" clearable placeholder="全部状态" class="status-select">
+            <el-option v-for="item in syncTaskStatusOptions" :key="item.value" :label="item.label" :value="item.value" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="版本"><el-input v-model="filters.versionName" clearable placeholder="版本名称" @keyup.enter="searchTasks" /></el-form-item>
+        <el-form-item label="创建时间">
+          <el-date-picker v-model="filters.createTimeRange" type="daterange" value-format="YYYY-MM-DD" range-separator="至" start-placeholder="开始日期" end-placeholder="结束日期" clearable />
+        </el-form-item>
+        <el-form-item><el-button type="primary" :icon="Search" @click="searchTasks">查询</el-button><el-button :icon="RefreshLeft" @click="resetFilters">重置</el-button></el-form-item>
+      </el-form>
+
+      <div class="batch-toolbar">
+        <span class="selection-hint">{{ selectedRows.length ? `已选 ${selectedRows.length} 个终态任务` : '仅可选择已完成、失败、阻断、采集中断或已停止的任务' }}</span>
+        <el-button
+          v-hasPermi="['bank:sync:question:remove', 'bank:sync:run']"
+          type="danger"
+          plain
+          :icon="Delete"
+          :disabled="!selectedRows.length || batchDeleting"
+          :loading="batchDeleting"
+          @click="batchDeleteTasks"
+        >批量删除（{{ selectedRows.length }}）</el-button>
+      </div>
+
+      <el-table
+        ref="tableRef"
+        v-loading="loading"
+        :data="tasks"
+        :row-key="(row) => String(row.taskId)"
+        stripe
+        size="small"
+        class="task-table"
+        @selection-change="handleSelectionChange"
+      >
+        <el-table-column type="selection" width="48" align="center" :selectable="isSelectableTask" />
+        <el-table-column label="任务编号" min-width="150" show-overflow-tooltip>
+          <template #default="scope"><el-link type="primary" :underline="false" @click="openDetail(scope.row)">{{ scope.row.taskNo || scope.row.taskId }}</el-link></template>
+        </el-table-column>
+        <el-table-column label="状态" width="112" align="center"><template #default="scope"><el-tag size="small" :type="syncTaskStatusMeta(scope.row.status).type">{{ syncTaskStatusMeta(scope.row.status).label }}</el-tag></template></el-table-column>
+        <el-table-column label="选择版本" min-width="140" show-overflow-tooltip><template #default="scope">{{ scope.row.versionName || '—' }}</template></el-table-column>
+        <el-table-column label="教材范围" min-width="210" show-overflow-tooltip><template #default="scope">{{ textbookSummary(scope.row) }}</template></el-table-column>
+        <el-table-column prop="catalogCount" label="抓取目录" width="96" align="right" />
+        <el-table-column prop="questionCount" label="抓取题目" width="96" align="right" />
+        <el-table-column prop="newQuestionCount" label="新增题目" width="96" align="right" />
+        <el-table-column prop="changedQuestionCount" label="变化题目" width="96" align="right" />
+        <el-table-column label="创建人" min-width="105" show-overflow-tooltip><template #default="scope">{{ scope.row.createdBy || '—' }}</template></el-table-column>
+        <el-table-column label="创建时间" min-width="166" show-overflow-tooltip><template #default="scope">{{ formatTaskTime(scope.row.createTime) }}</template></el-table-column>
+        <el-table-column label="完成时间" min-width="166" show-overflow-tooltip><template #default="scope">{{ formatTaskTime(scope.row.completedAt) }}</template></el-table-column>
+        <el-table-column label="操作" width="280" fixed="right" align="center">
+          <template #default="scope">
+            <el-button v-hasPermi="['bank:sync:question:query', 'bank:sync:question:list', 'bank:sync:center:list']" link type="primary" :icon="View" @click="openDetail(scope.row)">查看详情</el-button>
+            <el-button v-if="canCancelSyncTask(scope.row.status)" v-hasPermi="['bank:sync:question:cancel', 'bank:sync:run']" link type="danger" :icon="VideoPause" :loading="actionId === scope.row.taskId" @click="stopTask(scope.row)">停止</el-button>
+            <el-button v-if="canResumeSyncTask(scope.row)" v-hasPermi="['bank:sync:question:resume', 'bank:sync:run']" link type="primary" :icon="RefreshRight" :loading="actionId === scope.row.taskId" :disabled="Boolean(actionId)" @click="resumeTask(scope.row)">断点续采</el-button>
+            <el-button v-if="canRetrySyncTask(scope.row.status)" v-hasPermi="['bank:sync:question:retry', 'bank:sync:question:add', 'bank:sync:run']" link type="warning" :icon="RefreshRight" :loading="actionId === scope.row.taskId" @click="retryTask(scope.row)">重试</el-button>
+            <el-button v-if="canDeleteSyncTask(scope.row.status)" v-hasPermi="['bank:sync:question:remove', 'bank:sync:run']" link type="danger" :icon="Delete" :loading="actionId === scope.row.taskId" @click="deleteTask(scope.row)">删除</el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+      <el-empty v-if="!loading && !tasks.length" :image-size="72" description="暂无同步题库任务" />
+      <footer class="table-footer">
+        <span>共 {{ total }} 个任务</span>
+        <el-pagination v-model:current-page="filters.pageNum" v-model:page-size="filters.pageSize" :total="total" :page-sizes="[10, 20, 50]" layout="sizes, prev, pager, next, total" background @size-change="loadTasks" @current-change="loadTasks" />
+      </footer>
+    </section>
+
+    <el-dialog v-model="createVisible" title="新增同步题库任务" width="720px" append-to-body @closed="resetCreate">
+      <el-alert v-if="optionError" class="dialog-alert" type="error" :closable="false" show-icon>{{ optionError }}</el-alert>
+      <el-form label-width="96px" v-loading="optionsLoading">
+        <el-form-item label="选择版本" required>
+          <el-select v-model="createForm.versionId" placeholder="请选择当前正式版本" filterable class="full-control" @change="handleVersionChange">
+            <el-option v-for="version in optionVersions" :key="String(version.versionId)" :label="version.versionName" :value="version.versionId" :disabled="version.disabled">
+              <div class="option-line"><span>{{ version.versionName }}</span><small v-if="version.disabled">{{ version.disabledReason || '缺少采集来源标识' }}</small></div>
+            </el-option>
+          </el-select>
+        </el-form-item>
+        <el-form-item label="选择教材" required>
+          <div class="textbook-picker">
+            <el-empty v-if="!createForm.versionId" :image-size="58" description="请先选择一个版本" />
+            <el-empty v-else-if="!currentVersionTextbooks.length" :image-size="58" description="该版本下暂无教材" />
+            <el-checkbox-group v-else v-model="createForm.textbookIds" class="textbook-options">
+              <div v-for="book in currentVersionTextbooks" :key="String(book.textbookId)" class="textbook-option" :class="{ 'is-disabled': book.disabled }">
+                <el-checkbox :value="book.textbookId" :disabled="book.disabled">
+                  <span class="book-name">{{ book.textbookName }}</span>
+                  <span v-if="book.grade || book.volume" class="book-meta">{{ [book.grade, book.volume].filter(Boolean).join(' · ') }}</span>
+                </el-checkbox>
+                <small v-if="book.disabled" class="disabled-reason">{{ book.disabledReason || '缺少采集来源标识' }}</small>
+              </div>
+            </el-checkbox-group>
+          </div>
+        </el-form-item>
+        <el-form-item label="预计范围">
+          <div class="scope-summary">
+            <strong>{{ selectedVersion?.versionName || '尚未选择版本' }}</strong>
+            <span>已选 {{ selectedBooks.length }} 本教材</span>
+            <p v-if="selectedBooks.length">{{ selectedBooks.map((item) => item.textbookName).join('、') }}</p>
+            <p v-else>一次任务可选择同一版本下的一本或多本教材，不会拆成多个任务。</p>
+          </div>
+        </el-form-item>
+        <el-form-item label="采集确认">
+          <el-checkbox v-model="acknowledged">我已确认来源授权和采集规则，并了解本任务不会自动发布。</el-checkbox>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="createVisible = false">取消</el-button>
+        <el-button type="primary" :loading="creating" :disabled="!canCreate" @click="createTask">确认创建</el-button>
+      </template>
+    </el-dialog>
+  </div>
+</template>
+
+<script setup>
+import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { Delete, Plus, Refresh, RefreshLeft, RefreshRight, Search, VideoPause, View } from '@element-plus/icons-vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { useRouter } from 'vue-router'
+import {
+  cancelQuestionSyncTask,
+  createQuestionSyncTask,
+  deleteQuestionSyncTask,
+  getQuestionSyncOptions,
+  listQuestionSyncTasks,
+  resumeQuestionSyncTask,
+  retryQuestionSyncTask,
+} from '../../api/bank'
+import {
+  canCancelSyncTask,
+  canDeleteSyncTask,
+  canResumeSyncTask,
+  canRetrySyncTask,
+  formatTaskTime,
+  isActiveSyncTask,
+  normalizeQuestionSyncOptions,
+  syncTaskErrorMessage,
+  syncTaskStatusMeta,
+  syncTaskStatusOptions,
+  unwrapSyncTask,
+  unwrapSyncTaskPage,
+} from '../../utils/sync-task'
+
+const router = useRouter()
+const tasks = ref([])
+const tableRef = ref()
+const selectedRows = ref([])
+const total = ref(0)
+const loading = ref(false)
+const errorMessage = ref('')
+const actionId = ref('')
+const createVisible = ref(false)
+const creating = ref(false)
+const batchDeleting = ref(false)
+const optionsLoading = ref(false)
+const optionError = ref('')
+const optionVersions = ref([])
+const acknowledged = ref(false)
+const createForm = reactive({ versionId: '', textbookIds: [] })
+const filters = reactive({ taskNo: '', status: undefined, versionName: '', createTimeRange: [], pageNum: 1, pageSize: 10 })
+let refreshTimer = null
+let mounted = false
+
+const selectedVersion = computed(() => optionVersions.value.find((item) => String(item.versionId) === String(createForm.versionId)))
+const currentVersionTextbooks = computed(() => selectedVersion.value?.textbooks || [])
+const selectedBooks = computed(() => currentVersionTextbooks.value.filter((item) => createForm.textbookIds.some((id) => String(id) === String(item.textbookId))))
+const canCreate = computed(() => Boolean(createForm.versionId && createForm.textbookIds.length && acknowledged.value && !optionsLoading.value))
+const hasInterruptedTasks = computed(() => tasks.value.some((task) => task.status === 'interrupted'))
+
+function textbookSummary(task) {
+  const names = task.textbookNames.filter(Boolean)
+  if (!names.length) return task.textbookCount ? `${task.textbookCount} 本教材` : '—'
+  const preview = names.slice(0, 2).join('、')
+  return `${task.textbookCount || names.length} 本：${preview}${names.length > 2 ? ` 等 ${names.length} 本` : ''}`
+}
+
+function requestQuery() {
+  const [createTimeStart, createTimeEnd] = Array.isArray(filters.createTimeRange) ? filters.createTimeRange : []
+  return {
+    taskNo: filters.taskNo || undefined,
+    status: filters.status || undefined,
+    versionName: filters.versionName || undefined,
+    createTimeStart: createTimeStart || undefined,
+    createTimeEnd: createTimeEnd || undefined,
+    pageNum: filters.pageNum,
+    pageSize: filters.pageSize,
+  }
+}
+
+function clearRefreshTimer() {
+  if (refreshTimer !== null) window.clearTimeout(refreshTimer)
+  refreshTimer = null
+}
+
+function scheduleRefresh() {
+  clearRefreshTimer()
+  if (!mounted || !tasks.value.some((task) => isActiveSyncTask(task.status))) return
+  refreshTimer = window.setTimeout(async () => {
+    refreshTimer = null
+    if (selectedRows.value.length || batchDeleting.value) {
+      scheduleRefresh()
+      return
+    }
+    await loadTasks(true)
+  }, 3000)
+}
+
+function isSelectableTask(row) {
+  return canDeleteSyncTask(row?.status)
+}
+
+function handleSelectionChange(rows) {
+  selectedRows.value = (Array.isArray(rows) ? rows : []).filter(isSelectableTask)
+}
+
+function clearSelection() {
+  selectedRows.value = []
+  tableRef.value?.clearSelection?.()
+}
+
+async function loadTasks(silent = false) {
+  // Clear before the request too: a failed query must not leave an old row
+  // armed for a later batch action.
+  clearSelection()
+  if (!silent) loading.value = true
+  errorMessage.value = ''
+  try {
+    const page = unwrapSyncTaskPage(await listQuestionSyncTasks(requestQuery()), 'question')
+    tasks.value = page.rows
+    total.value = page.total
+    // A refresh/query/page change invalidates table row identities; clear
+    // selection so a stale task cannot be deleted accidentally.
+    clearSelection()
+  } catch (error) {
+    if (!silent) { tasks.value = []; total.value = 0 }
+    errorMessage.value = syncTaskErrorMessage(error, '同步题库任务加载失败')
+  } finally {
+    if (!silent) loading.value = false
+    scheduleRefresh()
+  }
+}
+
+function searchTasks() { filters.pageNum = 1; loadTasks() }
+function resetFilters() { Object.assign(filters, { taskNo: '', status: undefined, versionName: '', createTimeRange: [], pageNum: 1 }); loadTasks() }
+
+async function loadOptions() {
+  optionsLoading.value = true
+  optionError.value = ''
+  try {
+    optionVersions.value = normalizeQuestionSyncOptions(await getQuestionSyncOptions()).versions
+  } catch (error) {
+    optionVersions.value = []
+    optionError.value = syncTaskErrorMessage(error, '可同步版本与教材加载失败')
+  } finally {
+    optionsLoading.value = false
+  }
+}
+
+async function openCreate() {
+  resetCreate()
+  createVisible.value = true
+  await loadOptions()
+}
+
+function resetCreate() {
+  createForm.versionId = ''
+  createForm.textbookIds = []
+  acknowledged.value = false
+  optionError.value = ''
+}
+
+function handleVersionChange() {
+  createForm.textbookIds = []
+}
+
+async function createTask() {
+  if (!canCreate.value || creating.value) return
+  creating.value = true
+  try {
+    const task = unwrapSyncTask(await createQuestionSyncTask({
+      versionId: createForm.versionId,
+      textbookIds: [...new Set(createForm.textbookIds)],
+    }), 'question')
+    if (!task?.taskId) throw new Error('服务端未返回任务编号')
+    createVisible.value = false
+    ElMessage.success('同步题库任务已创建')
+    await router.push(`/bank/sync-question/${encodeURIComponent(task.taskId)}`)
+  } catch (error) {
+    ElMessage.error(syncTaskErrorMessage(error, '同步题库任务创建失败'))
+  } finally {
+    creating.value = false
+  }
+}
+
+function openDetail(task) { router.push(`/bank/sync-question/${encodeURIComponent(task.taskId)}`) }
+
+async function resumeTask(task) {
+  if (actionId.value || !canResumeSyncTask(task)) return
+  try {
+    await ElMessageBox.confirm(
+      `将继续同一个任务“${task.taskNo || task.taskId}”。Collector 新 run 会继承旧快照并从断点继续，不会直接应用正式库。${task.status === 'blocked' ? '请先确认风控已解除。' : ''}确定断点续采吗？`,
+      '断点续采',
+      { type: 'warning', confirmButtonText: '确认续采', cancelButtonText: '取消' },
+    )
+    actionId.value = task.taskId
+    const resumed = unwrapSyncTask(await resumeQuestionSyncTask(task.taskId), 'question')
+    if (resumed?.taskId && String(resumed.taskId) !== String(task.taskId)) throw new Error('服务端返回了不同的任务编号')
+    ElMessage.success('断点续采已提交，仍将继续原任务')
+    await loadTasks(true)
+  } catch (error) {
+    if (error !== 'cancel' && error !== 'close') ElMessage.error(syncTaskErrorMessage(error, '断点续采失败'))
+  } finally {
+    actionId.value = ''
+  }
+}
+
+async function stopTask(task) {
+  try {
+    await ElMessageBox.confirm(`确定停止任务“${task.taskNo || task.taskId}”吗？任务日志会保留。`, '停止任务', { type: 'warning', confirmButtonText: '停止', cancelButtonText: '取消' })
+    actionId.value = task.taskId
+    await cancelQuestionSyncTask(task.taskId)
+    ElMessage.success('停止请求已提交')
+    await loadTasks(true)
+  } catch (error) {
+    if (error !== 'cancel' && error !== 'close') ElMessage.error(syncTaskErrorMessage(error, '任务停止失败'))
+  } finally { actionId.value = '' }
+}
+
+async function retryTask(task) {
+  try {
+    await ElMessageBox.confirm('重试会使用原任务范围创建新任务，旧任务保持不变。', '重试任务', { type: 'info', confirmButtonText: '创建新任务', cancelButtonText: '取消' })
+    actionId.value = task.taskId
+    const retried = unwrapSyncTask(await retryQuestionSyncTask(task.taskId), 'question')
+    if (!retried?.taskId) throw new Error('服务端未返回新任务编号')
+    ElMessage.success('新任务已创建')
+    await router.push(`/bank/sync-question/${encodeURIComponent(retried.taskId)}`)
+  } catch (error) {
+    if (error !== 'cancel' && error !== 'close') ElMessage.error(syncTaskErrorMessage(error, '任务重试失败'))
+  } finally { actionId.value = '' }
+}
+
+async function deleteTask(task) {
+  try {
+    await ElMessageBox.confirm(
+      `确定删除终态任务“${task.taskNo || task.taskId}”吗？删除后仅移除服务端任务记录及范围，不会删除采集快照或正式题库数据。`,
+      '删除任务',
+      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' },
+    )
+    actionId.value = task.taskId
+    await deleteQuestionSyncTask(task.taskId)
+    ElMessage.success('同步题库任务已删除')
+    await loadTasks(true)
+  } catch (error) {
+    if (error !== 'cancel' && error !== 'close') ElMessage.error(syncTaskErrorMessage(error, '任务删除失败'))
+  } finally {
+    actionId.value = ''
+  }
+}
+
+async function batchDeleteTasks() {
+  if (batchDeleting.value || !selectedRows.value.length) return
+  const targets = selectedRows.value.filter(isSelectableTask)
+  if (!targets.length) {
+    clearSelection()
+    return
+  }
+  try {
+    await ElMessageBox.confirm(
+      `确定批量删除选中的 ${targets.length} 个终态任务吗？本操作仅删除服务端任务记录及范围，不会删除 Collector 不可变快照、断点或正式题库数据；但任务删除后将无法再从页面继续该任务。`,
+      '批量删除任务',
+      { type: 'warning', confirmButtonText: '确认删除', cancelButtonText: '取消' },
+    )
+    batchDeleting.value = true
+    const succeeded = []
+    const failed = []
+    for (const task of targets) {
+      try {
+        await deleteQuestionSyncTask(task.taskId)
+        succeeded.push(task)
+      } catch (error) {
+        failed.push({ task, error })
+      }
+    }
+    const summary = `批量删除完成：成功 ${succeeded.length} 个，失败 ${failed.length} 个。`
+    if (failed.length) {
+      const detail = failed.slice(0, 3).map(({ task, error }) => `${task.taskNo || task.taskId}：${syncTaskErrorMessage(error, '删除失败')}`).join('；')
+      ElMessage.warning(`${summary}${detail ? ` ${detail}` : ''}`)
+    } else {
+      ElMessage.success(summary)
+    }
+    clearSelection()
+    await loadTasks(true)
+  } catch (error) {
+    if (error !== 'cancel' && error !== 'close') ElMessage.error(syncTaskErrorMessage(error, '批量删除任务失败'))
+  } finally {
+    batchDeleting.value = false
+    clearSelection()
+  }
+}
+
+onMounted(() => { mounted = true; loadTasks() })
+onBeforeUnmount(() => { mounted = false; clearRefreshTimer() })
+</script>
+
+<style scoped>
+.sync-question-list-page { min-height: calc(100vh - 84px); color: var(--el-text-color-primary); }
+.page-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 14px; }
+.page-heading h2 { margin: 0; font-size: 20px; font-weight: 600; }
+.page-heading p { max-width: 760px; margin: 6px 0 0; color: var(--el-text-color-secondary); font-size: 13px; line-height: 1.6; }
+.heading-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+.state-alert, .dialog-alert { margin-bottom: 14px; }
+.panel { min-width: 0; padding: 16px; border: 1px solid var(--el-border-color-light); border-radius: 8px; background: var(--el-bg-color); }
+.filter-form { margin-bottom: 4px; }
+.batch-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 40px; margin-bottom: 8px; }
+.selection-hint { color: var(--el-text-color-secondary); font-size: 12px; }
+.filter-form :deep(.el-form-item) { margin-bottom: 10px; }
+.filter-form :deep(.el-input) { width: 180px; }
+.filter-form :deep(.el-date-editor) { width: 260px; }
+.status-select { width: 150px; }
+.table-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-top: 12px; color: var(--el-text-color-secondary); font-size: 12px; }
+.table-footer :deep(.el-pagination) { flex-wrap: wrap; justify-content: flex-end; }
+.full-control { width: 100%; }
+.option-line { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 16px; }
+.option-line small { color: var(--el-color-danger); font-size: 11px; }
+.textbook-picker { width: 100%; min-height: 120px; max-height: 320px; overflow: auto; border: 1px solid var(--el-border-color-light); border-radius: 6px; }
+.textbook-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0; }
+.textbook-option { min-width: 0; padding: 11px 13px; border-right: 1px solid var(--el-border-color-lighter); border-bottom: 1px solid var(--el-border-color-lighter); }
+.textbook-option:nth-child(2n) { border-right: 0; }
+.textbook-option.is-disabled { background: var(--el-fill-color-extra-light); }
+.book-name { font-weight: 500; }
+.book-meta { margin-left: 8px; color: var(--el-text-color-secondary); font-size: 11px; }
+.disabled-reason { display: block; margin: 3px 0 0 24px; color: var(--el-color-danger); font-size: 11px; }
+.scope-summary { width: 100%; padding: 12px 14px; border-radius: 6px; background: var(--el-fill-color-extra-light); }
+.scope-summary strong, .scope-summary span { display: block; }
+.scope-summary span { margin-top: 4px; color: var(--el-text-color-secondary); font-size: 12px; }
+.scope-summary p { margin: 7px 0 0; color: var(--el-text-color-secondary); font-size: 12px; line-height: 1.6; }
+@media (max-width: 760px) { .page-heading { flex-direction: column; } .heading-actions { justify-content: flex-start; } .table-footer { align-items: flex-start; flex-direction: column; } .textbook-options { grid-template-columns: 1fr; } .textbook-option { border-right: 0; } }
+</style>

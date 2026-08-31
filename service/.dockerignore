@@ -1,0 +1,14 @@
+.env*
+.venv/
+.pytest_cache/
+.ruff_cache/
+**/__pycache__/
+*.py[cod]
+._*
+**/._*
+build/
+caches/
+logs/
+tests/
+vf_admin/
+.DS_Store

@@ -1,0 +1,71 @@
+# 题库管理插件
+
+`bank` 是题库的完整全栈插件，当前版本为 `0.6.0`。
+
+管理端菜单包含：
+
+- 版本管理、教材管理、目录管理、题目管理；
+- 教材浏览和发布批次；
+- 同步中心（版本/教材元数据、目录/题目内容的选择和审核）；
+- 同步教材（最新抓取快照与当前正式版本/教材的全量只读对比）。
+
+## 数据流
+
+```text
+来源站点 -> collector -> SQLite 候选库
+                     ^             |
+                     | HTTP API    v
+service 持久任务 ----+      同步管理对比/审核
+                              |
+                    已通过（仅待发布决定）
+                              |
+                              v
+                  .qbpkg -> Publisher -> 发布批次
+                              |
+                              v
+                         MySQL 正式题库
+```
+
+独立部署时，同步审核接口通过 collector API 读取候选快照，只写入 `qb_sync_review`。点击“通过”不会直接修改正式题库；正式数据仍必须通过可验证的 `.qbpkg` 和发布批次合并，以保留原子发布、回退和恢复能力。
+
+## 数据表
+
+- 七张正式业务表：版本、教材、目录、题目、题目目录关系、标签、素材；
+- `qb_sync_batch` 和 `qb_dataset_meta`：发布批次与数据集切换元数据；
+- `qb_sync_review`：候选快照、对比状态与审核决定。
+
+MySQL 迁移均使用 InnoDB/`utf8mb4`，采用幂等建表和种子脚本。
+
+## 同步中心约定
+
+- 原“同步中心”保持原有单一工作流入口，分成两个由用户主动触发的阶段：
+  1. “刷新版本与教材”只启动一个元数据任务，一次发现来源中的全部版本和教材；
+  2. 用户在版本分组下用左右穿梭框选择教材后，点击“同步所选教材内容”，只创建一个内容任务。该任务把所选教材作为一个整体范围，内部可以顺序调用 `zujuan_sync.cjs`，但不会为每本教材创建独立任务；每本教材的完整目录和题目由同一次内容任务一起采集。
+- 元数据任务完成后，教材选择绑定到明确的 `metadataRunId` 快照；刷新元数据不会静默改写用户已经提交的内容任务范围；
+- 任务支持持久化进度、有限日志、恢复查询和停止。目录和题目共享同一个任务状态和取消边界，结果仍只进入 SQLite 候选库；
+- 同一时间只允许一个同步任务，启动与停止需要 `bank:sync:run`，任务状态允许任一同步列表权限读取；
+- 独立部署通过 `BANK_COLLECTOR_URL` 和 `BANK_COLLECTOR_TOKEN` 连接 collector，令牌不会写入任务记录；
+- `BANK_COLLECTOR_TIMEOUT_SECONDS` 控制单次 API 请求超时；候选快照和日志均有服务端上限；
+- 未配置 `BANK_COLLECTOR_URL` 时启用同机开发兼容模式：`BANK_COLLECTOR_DB` 默认为 `collector/data/zujuan.sqlite3`，SQLite 通过普通文件路径连接并立即启用 `PRAGMA query_only`，兼容 WAL 伴随文件且不允许业务写入；
+- 无论哪种模式，请求参数都不能指定脚本、命令、SQL 或任意文件路径；
+- 稳定身份是 `source_provider + external_id`；
+- 对比状态为 `new/changed/unchanged/conflict`；
+- 审核状态为 `pending/approved/rejected/stale`；
+- 审核时服务端会重新读取候选并校验 `stagedHash`，防止审核后候选已被替换。
+
+主要接口：
+
+- `POST /bank/sync/run/metadata/start`：同步全部版本与教材元数据；
+- `POST /bank/sync/run/content/start`：按 `metadataRunId` 和用户选择的教材 ID 创建一个目录+题目内容任务；
+- `GET /bank/sync/run/current`
+- `GET /bank/sync/run/list`
+- `GET /bank/sync/run/{run_id}`
+- `POST /bank/sync/run/{run_id}/cancel`
+- `GET /bank/sync/metadata/snapshot`
+- `GET /bank/sync/metadata/textbook-overview`：返回抓取侧与当前侧的全量版本/教材树，仅按稳定来源身份标记“新增/已有”；
+- `GET /bank/sync/{entity_type}/compare`
+- `POST /bank/sync/{entity_type}/review`
+
+`entity_type` 仅允许 `version` / `textbook` / `catalog` / `question`。
+
+内容任务请求必须提供成功的 `metadataRunId` 和去重后的 `textbookExternalIds`。服务端会再次校验这些教材确实属于该元数据快照且有真实入口章节；客户端不能传入脚本命令、路径或任意采集参数。

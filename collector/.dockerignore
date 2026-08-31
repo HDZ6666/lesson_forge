@@ -1,0 +1,8 @@
+.cache/
+data/
+logs/
+node_modules/
+._*
+**/._*
+tests/
+.DS_Store

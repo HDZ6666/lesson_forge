@@ -1,0 +1,315 @@
+manifestVersion: 1
+id: bank
+name: 题库管理
+version: 0.8.0
+description: 网站题库的版本、教材、目录、题目、素材和同步发布批次管理。
+
+metadata:
+  category: education
+  tags:
+    - question-bank
+    - textbook
+    - synchronization
+  author: RuoYi
+  license: MIT
+  homepage: ''
+  repository: ''
+  documentation: ''
+
+backend:
+  module: plugins.bank
+  routers:
+    autoScan: true
+  migrations:
+    - migrations/mysql/001_init.sql
+    - migrations/mysql/002_sync_review.sql
+    - migrations/mysql/003_sync_job.sql
+    - migrations/mysql/004_sync_job_compat.py
+    - migrations/mysql/005_sync_job_v2.py
+    - migrations/mysql/006_sync_task_modules.py
+    - migrations/mysql/007_sync_task_delete.py
+    - migrations/mysql/008_textbook_apply.py
+    - migrations/mysql/009_question_apply.py
+    - migrations/mysql/010_question_resume.py
+  seeds:
+    - seeds/mysql/001_dict.sql
+  hooks:
+    onStartup: service.sync_run_service:on_startup
+    onShutdown: service.sync_run_service:on_shutdown
+  jobs: []
+
+frontend:
+  basePath: bank
+  pluginId: bank
+  viewsPath: views
+  apiPath: api
+  delivery:
+    type: source
+    buildRequired: true
+  menus:
+    - name: 题库管理
+      path: bank
+      component: Layout
+      perms: ''
+      type: M
+      orderNum: 10
+      icon: collection
+      children:
+        - name: 版本管理
+          path: version
+          component: plugin/bank/version/index
+          routeName: BankVersion
+          query: ''
+          isFrame: 1
+          isCache: 0
+          perms: bank:version:list
+          type: C
+          orderNum: 1
+          icon: collection
+        - name: 教材管理
+          path: textbook
+          component: plugin/bank/textbook/index
+          routeName: BankTextbook
+          query: ''
+          isFrame: 1
+          isCache: 0
+          perms: bank:textbook:list
+          type: C
+          orderNum: 2
+          icon: reading
+        - name: 目录管理
+          path: catalog
+          component: plugin/bank/catalog/index
+          routeName: BankCatalog
+          query: ''
+          isFrame: 1
+          isCache: 0
+          perms: bank:catalog:list
+          type: C
+          orderNum: 3
+          icon: menu
+        - name: 题目管理
+          path: question-manage
+          component: plugin/bank/question-manage/index
+          routeName: BankQuestionManage
+          query: ''
+          isFrame: 1
+          isCache: 0
+          perms: bank:question:list
+          type: C
+          orderNum: 4
+          icon: tickets
+        - name: 教材浏览
+          path: browse
+          component: plugin/bank/browse/index
+          routeName: BankBrowse
+          query: ''
+          isFrame: 1
+          isCache: 0
+          perms: bank:browse:list
+          type: C
+          orderNum: 5
+          icon: reading
+        - name: 发布批次
+          path: batch
+          component: plugin/bank/batch/index
+          routeName: BankBatch
+          query: ''
+          isFrame: 1
+          isCache: 0
+          perms: bank:batch:list
+          type: C
+          orderNum: 6
+          icon: upload
+        - name: 同步中心
+          path: sync
+          component: plugin/bank/sync/index
+          routeName: BankSyncCenter
+          query: ''
+          isFrame: 1
+          isCache: 0
+          perms: bank:sync:center:list
+          type: C
+          orderNum: 7
+          icon: online
+        - name: 同步教材
+          path: sync-textbook
+          component: plugin/bank/sync-textbook/index
+          routeName: BankSyncTextbookOverview
+          query: ''
+          isFrame: 1
+          isCache: 0
+          perms: bank:sync:textbook:list
+          type: C
+          orderNum: 8
+          icon: education
+        - name: 同步题库
+          path: sync-question
+          component: plugin/bank/sync-question/index
+          routeName: BankSyncQuestionOverview
+          query: ''
+          isFrame: 1
+          isCache: 0
+          perms: bank:sync:question:list
+          type: C
+          orderNum: 9
+          icon: question
+
+permissions:
+  - code: bank:browse:list
+    name: 教材浏览
+    description: 按教材目录浏览题目
+  - code: bank:version:list
+    name: 版本列表
+    description: 查看题库版本
+  - code: bank:version:query
+    name: 版本查询
+    description: 查看题库版本详情
+  - code: bank:version:add
+    name: 版本新增
+    description: 新增人工题库版本
+  - code: bank:version:edit
+    name: 版本修改
+    description: 修改题库版本
+  - code: bank:version:remove
+    name: 版本删除
+    description: 删除人工题库版本
+  - code: bank:textbook:list
+    name: 教材列表
+    description: 查看版本下的教材
+  - code: bank:textbook:query
+    name: 教材查询
+    description: 查看教材详情
+  - code: bank:textbook:add
+    name: 教材新增
+    description: 新增人工教材
+  - code: bank:textbook:edit
+    name: 教材修改
+    description: 修改教材
+  - code: bank:textbook:remove
+    name: 教材删除
+    description: 删除人工教材
+  - code: bank:catalog:list
+    name: 目录列表
+    description: 查看教材目录树
+  - code: bank:catalog:query
+    name: 目录查询
+    description: 查看目录节点详情
+  - code: bank:catalog:add
+    name: 目录新增
+    description: 新增人工目录节点
+  - code: bank:catalog:edit
+    name: 目录修改
+    description: 修改目录节点
+  - code: bank:catalog:remove
+    name: 目录删除
+    description: 删除人工目录节点
+  - code: bank:question:list
+    name: 题目列表
+    description: 浏览题库题目
+  - code: bank:question:query
+    name: 题目查询
+    description: 查看题目详情
+  - code: bank:question:add
+    name: 题目新增
+    description: 新增人工题目
+  - code: bank:question:edit
+    name: 题目修改
+    description: 修改题目或启停状态
+  - code: bank:question:remove
+    name: 题目删除
+    description: 删除人工题目
+  - code: bank:question:asset
+    name: 题目素材
+    description: 查看题目素材引用
+  - code: bank:asset:list
+    name: 素材列表
+    description: 查看题目素材列表
+  - code: bank:asset:query
+    name: 素材查询
+    description: 查看素材详情
+  - code: bank:batch:list
+    name: 批次列表
+    description: 查看同步和发布批次
+  - code: bank:batch:query
+    name: 批次查询
+    description: 查看批次详情和报告
+  - code: bank:batch:approve
+    name: 批次审批
+    description: 审批待发布批次
+  - code: bank:batch:publish
+    name: 批次发布
+    description: 发布已批准批次
+  - code: bank:batch:rollback
+    name: 批次回退
+    description: 回退已发布批次
+  - code: bank:sync:version:list
+    name: 同步版本列表
+    description: 查看来源版本候选及正式版本对比
+  - code: bank:sync:center:list
+    name: 同步中心
+    description: 查看同步中心的教材、题库候选和任务状态
+  - code: bank:sync:textbook:list
+    name: 同步教材列表
+    description: 查看来源教材候选及正式教材对比
+  - code: bank:sync:textbook:query
+    name: 同步教材任务查询
+    description: 查看同步教材任务状态、日志和不可变快照
+  - code: bank:sync:textbook:add
+    name: 新增同步教材任务
+    description: 创建一次全量版本和教材元数据采集任务
+  - code: bank:sync:textbook:cancel
+    name: 停止同步教材任务
+    description: 停止运行中的同步教材任务
+  - code: bank:sync:textbook:retry
+    name: 重试同步教材任务
+    description: 从失败、阻断或已停止任务创建新的同步教材任务
+  - code: bank:sync:textbook:remove
+    name: 删除同步教材任务
+    description: 删除已进入终态的同步教材任务记录
+  - code: bank:sync:textbook:apply
+    name: 应用教材正式版本
+    description: 将成功且完整的教材任务快照应用或回退到正式表
+  - code: bank:sync:catalog:list
+    name: 同步目录列表
+    description: 查看来源目录候选及正式目录对比
+  - code: bank:sync:question:list
+    name: 同步题库列表
+    description: 查看来源题目候选及正式题目对比
+  - code: bank:sync:question:query
+    name: 同步题库任务查询
+    description: 查看同步题库任务、教材 scope 和不可变内容快照
+  - code: bank:sync:question:add
+    name: 新增同步题库任务
+    description: 从当前正式版本和教材创建题库采集任务
+  - code: bank:sync:question:cancel
+    name: 停止同步题库任务
+    description: 停止运行中的同步题库任务及远程 Collector job
+  - code: bank:sync:question:retry
+    name: 重试同步题库任务
+    description: 按原版本和教材范围创建新的同步题库任务
+  - code: bank:sync:question:remove
+    name: 删除同步题库任务
+    description: 删除已进入终态的同步题库任务记录
+  - code: bank:sync:question:apply
+    name: 应用正式题库快照
+    description: 将成功且完整的题库任务快照按教材 scope 应用或回退到正式表
+  - code: bank:sync:question:resume
+    name: 续采中断题库任务
+    description: 从已锁定的不完整 collector 快照安全续采原题库任务
+  - code: bank:sync:review
+    name: 同步候选审核
+    description: 审核同步候选并记录待发布决定
+  - code: bank:sync:run
+    name: 执行来源同步
+    description: 启动或停止来源版本、教材、目录和题目采集任务
+
+dependencies:
+  python: []
+  npm: []
+  npmDev: []
+  plugins: []
+
+compatibility:
+  databases:
+    - mysql

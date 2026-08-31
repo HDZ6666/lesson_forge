@@ -1,0 +1,211 @@
+from typing import Annotated
+
+from fastapi import Path, Query, Request, Response
+from pydantic_validation_decorator import ValidateFields
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from common.annotation.cache_annotation import ApiCache, ApiCacheEvict
+from common.annotation.log_annotation import Log
+from common.aspect.db_session import DBSessionDependency
+from common.aspect.interface_auth import UserInterfaceAuthDependency
+from common.aspect.pre_auth import CurrentUserDependency, PreAuthDependency
+from common.constant import ApiGroup, ApiNamespace
+from common.enums import BusinessType
+from common.router import APIRouterPro
+from common.vo import DataResponseModel, DynamicResponseModel, PageResponseModel, ResponseBaseModel
+from module_admin.entity.vo.notice_vo import (
+    DeleteNoticeModel,
+    NoticeModel,
+    NoticePageQueryModel,
+    NoticeReadUserModel,
+    NoticeReadUserPageQueryModel,
+    NoticeTopResponseModel,
+)
+from module_admin.entity.vo.user_vo import CurrentUserModel
+from module_admin.service.notice_service import NoticeService
+from utils.log_util import logger
+from utils.response_util import ResponseUtil
+
+notice_controller = APIRouterPro(
+    prefix='/system/notice', order_num=10, tags=['系统管理-通知公告管理'], dependencies=[PreAuthDependency()]
+)
+
+
+@notice_controller.get(
+    '/list',
+    summary='获取通知公告分页列表接口',
+    description='用于获取通知公告分页列表',
+    response_model=PageResponseModel[NoticeModel],
+    dependencies=[UserInterfaceAuthDependency('system:notice:list')],
+)
+@ApiCache(namespace=ApiNamespace.SYSTEM_NOTICE_LIST)
+async def get_system_notice_list(
+    request: Request,
+    notice_page_query: Annotated[NoticePageQueryModel, Query()],
+    query_db: Annotated[AsyncSession, DBSessionDependency()],
+) -> Response:
+    # 获取分页数据
+    notice_page_query_result = await NoticeService.get_notice_list_services(query_db, notice_page_query, is_page=True)
+    logger.info('获取成功')
+
+    return ResponseUtil.success(model_content=notice_page_query_result)
+
+
+@notice_controller.get(
+    '/listTop',
+    summary='获取首页顶部通知公告接口',
+    description='用于获取最新的正常通知公告及当前用户已读状态',
+    response_model=DynamicResponseModel[NoticeTopResponseModel],
+)
+async def get_system_notice_top(
+    request: Request,
+    query_db: Annotated[AsyncSession, DBSessionDependency()],
+    current_user: Annotated[CurrentUserModel, CurrentUserDependency()],
+) -> Response:
+    notice_top_result = await NoticeService.get_notice_top_services(query_db, current_user.user.user_id)
+    logger.info('获取成功')
+
+    return ResponseUtil.success(model_content=notice_top_result)
+
+
+@notice_controller.post(
+    '/markRead',
+    summary='标记通知公告已读接口',
+    description='用于将指定通知公告标记为当前用户已读',
+    response_model=ResponseBaseModel,
+)
+async def mark_system_notice_read(
+    request: Request,
+    notice_id: Annotated[int, Query(alias='noticeId', description='公告ID')],
+    query_db: Annotated[AsyncSession, DBSessionDependency()],
+    current_user: Annotated[CurrentUserModel, CurrentUserDependency()],
+) -> Response:
+    mark_read_result = await NoticeService.mark_notice_read_services(query_db, current_user.user.user_id, [notice_id])
+    logger.info(mark_read_result.message)
+
+    return ResponseUtil.success(msg=mark_read_result.message)
+
+
+@notice_controller.get(
+    '/readUsers/list',
+    summary='获取公告已读用户分页列表接口',
+    description='用于获取已阅读指定公告的用户列表',
+    response_model=PageResponseModel[NoticeReadUserModel],
+    dependencies=[UserInterfaceAuthDependency('system:notice:list')],
+)
+async def get_system_notice_read_user_list(
+    request: Request,
+    read_user_page_query: Annotated[NoticeReadUserPageQueryModel, Query()],
+    query_db: Annotated[AsyncSession, DBSessionDependency()],
+) -> Response:
+    read_user_page_query_result = await NoticeService.get_notice_read_user_list_services(
+        query_db, read_user_page_query, is_page=True
+    )
+    logger.info('公告已读用户获取成功')
+
+    return ResponseUtil.success(model_content=read_user_page_query_result)
+
+
+@notice_controller.post(
+    '/markReadAll',
+    summary='批量标记通知公告已读接口',
+    description='用于将指定通知公告批量标记为当前用户已读',
+    response_model=ResponseBaseModel,
+)
+async def mark_all_system_notice_read(
+    request: Request,
+    ids: Annotated[str, Query(description='逗号分隔的公告ID')],
+    query_db: Annotated[AsyncSession, DBSessionDependency()],
+    current_user: Annotated[CurrentUserModel, CurrentUserDependency()],
+) -> Response:
+    notice_ids = NoticeService.parse_notice_ids(ids)
+    mark_read_result = await NoticeService.mark_notice_read_services(query_db, current_user.user.user_id, notice_ids)
+    logger.info(mark_read_result.message)
+
+    return ResponseUtil.success(msg=mark_read_result.message)
+
+
+@notice_controller.post(
+    '',
+    summary='新增通知公告接口',
+    description='用于新增通知公告',
+    response_model=ResponseBaseModel,
+    dependencies=[UserInterfaceAuthDependency('system:notice:add')],
+)
+@ValidateFields(validate_model='add_notice')
+@ApiCacheEvict(namespaces=ApiGroup.NOTICE_MUTATION)
+@Log(title='通知公告', business_type=BusinessType.INSERT)
+async def add_system_notice(
+    request: Request,
+    add_notice: NoticeModel,
+    query_db: Annotated[AsyncSession, DBSessionDependency()],
+    current_user: Annotated[CurrentUserModel, CurrentUserDependency()],
+) -> Response:
+    add_notice.create_by = current_user.user.user_name
+    add_notice.update_by = current_user.user.user_name
+    add_notice_result = await NoticeService.add_notice_services(query_db, add_notice)
+    logger.info(add_notice_result.message)
+
+    return ResponseUtil.success(msg=add_notice_result.message)
+
+
+@notice_controller.put(
+    '',
+    summary='编辑通知公告接口',
+    description='用于编辑通知公告',
+    response_model=ResponseBaseModel,
+    dependencies=[UserInterfaceAuthDependency('system:notice:edit')],
+)
+@ValidateFields(validate_model='edit_notice')
+@ApiCacheEvict(namespaces=ApiGroup.NOTICE_MUTATION)
+@Log(title='通知公告', business_type=BusinessType.UPDATE)
+async def edit_system_notice(
+    request: Request,
+    edit_notice: NoticeModel,
+    query_db: Annotated[AsyncSession, DBSessionDependency()],
+    current_user: Annotated[CurrentUserModel, CurrentUserDependency()],
+) -> Response:
+    edit_notice.update_by = current_user.user.user_name
+    edit_notice_result = await NoticeService.edit_notice_services(query_db, edit_notice)
+    logger.info(edit_notice_result.message)
+
+    return ResponseUtil.success(msg=edit_notice_result.message)
+
+
+@notice_controller.delete(
+    '/{notice_ids}',
+    summary='删除通知公告接口',
+    description='用于删除通知公告',
+    response_model=ResponseBaseModel,
+    dependencies=[UserInterfaceAuthDependency('system:notice:remove')],
+)
+@ApiCacheEvict(namespaces=ApiGroup.NOTICE_MUTATION)
+@Log(title='通知公告', business_type=BusinessType.DELETE)
+async def delete_system_notice(
+    request: Request,
+    notice_ids: Annotated[str, Path(description='需要删除的公告ID')],
+    query_db: Annotated[AsyncSession, DBSessionDependency()],
+) -> Response:
+    delete_notice = DeleteNoticeModel(noticeIds=notice_ids)
+    delete_notice_result = await NoticeService.delete_notice_services(query_db, delete_notice)
+    logger.info(delete_notice_result.message)
+
+    return ResponseUtil.success(msg=delete_notice_result.message)
+
+
+@notice_controller.get(
+    '/{notice_id}',
+    summary='获取通知公告详情接口',
+    description='用于获取指定通知公告的详细信息',
+    response_model=DataResponseModel[NoticeModel],
+)
+@ApiCache(namespace=ApiNamespace.SYSTEM_NOTICE_DETAIL)
+async def query_detail_system_post(
+    request: Request,
+    notice_id: Annotated[int, Path(description='公告ID')],
+    query_db: Annotated[AsyncSession, DBSessionDependency()],
+) -> Response:
+    notice_detail_result = await NoticeService.notice_detail_services(query_db, notice_id)
+    logger.info(f'获取notice_id为{notice_id}的信息成功')
+
+    return ResponseUtil.success(data=notice_detail_result)
