@@ -57,7 +57,7 @@ def _db_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument('--user', default=os.getenv('BANK_MYSQL_USER', 'root'))
     parser.add_argument('--password', default=os.getenv('BANK_MYSQL_PASSWORD', ''))
     parser.add_argument('--database', default=os.getenv('BANK_MYSQL_DATABASE', 'ruoyi'))
-    parser.add_argument('--asset-root', type=Path, default=Path(os.getenv('BANK_ASSET_ROOT', './data/bank-assets')))
+    parser.add_argument('--asset-root', type=Path, default=Path(os.getenv('BANK_ASSET_ROOT') or 'data/bank'))
 
 
 def _publisher(args: argparse.Namespace) -> MySQLPublisher:

@@ -739,7 +739,9 @@ class BankService:
         """Resolve a stored relative path and reject traversal/symlink escapes."""
         if not storage_path:
             raise HTTPException(status_code=404, detail='素材文件不存在')
-        root = Path(os.environ.get('BANK_ASSET_ROOT', 'data/bank/assets')).expanduser().resolve()
+        # ``storage_path`` is relative to the service-owned root.  Collector
+        # host paths must never be persisted or interpreted here.
+        root = Path(os.environ.get('BANK_ASSET_ROOT', 'data/bank')).expanduser().resolve()
         raw = Path(storage_path).expanduser()
         candidate = (raw if raw.is_absolute() else root / raw).resolve(strict=False)
         try:

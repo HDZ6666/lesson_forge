@@ -1,27 +1,20 @@
 """Read-only collector comparison and synchronization review workflow.
 
-The collector is an evidence store, not an application database.  In local
-development the service opens SQLite with a query-only connection; in an
-independent deployment it requests the same bounded projections from the
-collector HTTP API.  The only writes performed here are review decisions in
-``qb_sync_review``; it never publishes or mutates the current seven bank
-tables.
+The collector is an evidence store exposed through its HTTP API. The only
+writes performed here are review decisions in qb_sync_review; this module
+never publishes or mutates the current seven bank tables.
 """
-
 from __future__ import annotations
 
 import asyncio
 import hashlib
 import html
 import json
-import os
 import re
-import sqlite3
 from collections import Counter
 from collections.abc import Mapping
 from datetime import datetime
 from decimal import Decimal
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import select
@@ -41,105 +34,24 @@ from plugins.bank.entity.vo.bank_vo import (
     SyncReviewItemModel,
     SyncReviewRequestModel,
 )
-from plugins.bank.service.collector_client import CollectorClient, remote_collector_enabled
-from plugins.bank.service.collector_sqlite import connect_collector_sqlite
+from plugins.bank.service.collector_client import CollectorClient
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[4]
-DEFAULT_COLLECTOR_DB = PROJECT_ROOT / 'collector' / 'data' / 'zujuan.sqlite3'
 PROVIDER = 'zujuan'
 MAX_METADATA_VERSIONS = 1000
 MAX_METADATA_TEXTBOOKS = 5000
 MAX_COMPARE_CANDIDATES = 20000
+_SAFE_TEXT_RE = re.compile(r'<[^>]*>')
 _TABLES = {
     'version': 'source_textbook_versions',
     'textbook': 'source_textbooks',
     'catalog': 'textbook_nodes',
     'question': 'questions',
 }
-_METADATA_SNAPSHOT_TABLES = {
-    'version': 'source_metadata_run_versions',
-    'textbook': 'source_metadata_run_textbooks',
-}
-_ID_COLUMNS = {
-    'version': 'external_version_id',
-    'textbook': 'external_textbook_id',
-    'catalog': 'external_id',
-    'question': 'external_id',
-}
-_SAFE_TEXT_RE = re.compile(r'<[^>]*>')
-_TABLE_TO_ENTITY = {table: entity for entity, table in _TABLES.items()}
-_STAGING_COLUMNS = {
-    # Only fields required to render/diff a candidate are selected.  In
-    # particular questions deliberately do not select content_html,
-    # solution_html or raw_json.
-    'version': (
-        'provider',
-        'external_version_id',
-        'version_name',
-        'source_url',
-        'is_new',
-        'sort_order',
-        'status',
-        'first_seen_at',
-        'last_seen_at',
-    ),
-    'textbook': (
-        'provider',
-        'external_textbook_id',
-        'version_external_id',
-        'textbook_name',
-        'grade',
-        'volume',
-        'source_url',
-        'sort_order',
-        'status',
-        'bootstrap_chapter_external_id',
-        'first_seen_at',
-        'last_seen_at',
-    ),
-    'catalog': (
-        'provider',
-        'external_id',
-        'textbook_external_id',
-        'parent_external_id',
-        'node_level',
-        'node_type',
-        'name',
-        'source_path',
-        'source_url',
-        'sort_order',
-        'status',
-        'first_seen_at',
-        'last_seen_at',
-    ),
-    'question': (
-        'provider',
-        'external_id',
-        'chapter_id',
-        'detail_url',
-        'source_short',
-        'source_title',
-        'source_url',
-        'source_question_no',
-        'question_type',
-        'difficulty_label',
-        'difficulty_code',
-        'ease_coefficient',
-        'content_hash',
-        'detail_content_hash',
-        'plain_text',
-        'detail_fetched',
-        'subquestion_count',
-        'is_new',
-        'provider_updated_at',
-        'first_seen_at',
-        'last_seen_at',
-    ),
-}
+
 _VERSION_CURRENT_COLUMNS = (
     QbTextbookVersion.version_id,
     QbTextbookVersion.source_provider,
@@ -187,25 +99,6 @@ _QUESTION_CURRENT_COLUMNS = (
     QbQuestion.difficulty_coefficient,
     QbQuestion.content_hash,
 )
-
-
-def _quote_sqlite_identifier(value: str) -> str:
-    return f'"{value.replace(chr(34), chr(34) * 2)}"'
-
-
-def _source_path() -> Path:
-    """Resolve the server-configured collector path.
-
-    No request value is accepted here.  ``BANK_COLLECTOR_DB`` is an operator
-    environment setting; a relative value is anchored at the project root so
-    a process working directory cannot redirect reads unexpectedly.
-    """
-
-    configured = os.environ.get('BANK_COLLECTOR_DB')
-    if configured:
-        path = Path(configured).expanduser()
-        return path if path.is_absolute() else PROJECT_ROOT / path
-    return DEFAULT_COLLECTOR_DB
 
 
 def _pick(row: Mapping[str, Any] | object, *names: str, default: Any = None) -> Any:
@@ -258,287 +151,6 @@ def _safe_snippet(value: Any, limit: int = 360) -> str | None:
     text = html.unescape(_SAFE_TEXT_RE.sub(' ', str(value)))
     text = ' '.join(text.split())
     return text[:limit] if text else None
-
-
-def _read_sqlite_rows_sync(  # noqa: PLR0912
-    path: Path,
-    table: str,
-    *,
-    source_provider: str | None = None,
-    textbook_external_id: str | None = None,
-    time_window: tuple[str, str] | None = None,
-) -> tuple[bool, str, list[dict[str, Any]]]:
-    """Read one known collector table in read-only mode.
-
-    Missing files/tables are normal during first installation and deliberately
-    return a structured unavailable result instead of an HTTP 500.
-    """
-
-    path = Path(path)
-    if not path.is_file():
-        return False, f'collector SQLite 不存在：{path}', []
-    db: sqlite3.Connection | None = None
-    try:
-        db = connect_collector_sqlite(path)
-        db.row_factory = sqlite3.Row
-        columns = [
-            item['name'] for item in db.execute(f'PRAGMA table_info({_quote_sqlite_identifier(table)})').fetchall()
-        ]
-        if not columns:
-            return False, f'collector SQLite 缺少表：{table}', []
-        entity_type = _TABLE_TO_ENTITY[table]
-        required = {'provider', _ID_COLUMNS[entity_type]}
-        required.discard('')
-        missing_columns = sorted(required.difference(columns))
-        if missing_columns:
-            return False, f'collector 表 {table} 缺少字段：{", ".join(missing_columns)}', []
-        available_columns = set(columns)
-        selected: list[str] = []
-        for column in _STAGING_COLUMNS[entity_type]:
-            if column not in available_columns:
-                continue
-            if entity_type == 'question' and column == 'plain_text':
-                selected.append(
-                    f'substr({_quote_sqlite_identifier(column)}, 1, 360) AS {_quote_sqlite_identifier(column)}'
-                )
-            else:
-                selected.append(_quote_sqlite_identifier(column))
-        # Required columns are part of the staging selections above.  Keep a
-        # defensive fallback so a future mapping cannot accidentally produce
-        # SELECT with an empty list.
-        if not selected:
-            return False, f'collector 表 {table} 没有可读取字段', []
-        query = f'SELECT {", ".join(selected)} FROM {_quote_sqlite_identifier(table)}'
-        parameters: list[str] = []
-        predicates: list[str] = []
-        if source_provider:
-            predicates.append(f'{_quote_sqlite_identifier("provider")} = ?')
-            parameters.append(source_provider)
-        if time_window is not None:
-            if 'last_seen_at' not in available_columns:
-                return False, f'collector 表 {table} 缺少 last_seen_at，无法绑定元数据运行', []
-            predicates.append(
-                f'{_quote_sqlite_identifier("last_seen_at")} >= ? AND {_quote_sqlite_identifier("last_seen_at")} <= ?'
-            )
-            parameters.extend([str(time_window[0]), str(time_window[1])])
-        if entity_type == 'catalog' and textbook_external_id:
-            # Catalog rows carry their owning textbook directly.  Apply this
-            # scope in SQLite so a large unrelated catalog table cannot hit
-            # the candidate ceiling before the defensive service filter.
-            predicates.append(f'{_quote_sqlite_identifier("textbook_external_id")} = ?')
-            parameters.append(textbook_external_id)
-        if entity_type == 'question' and textbook_external_id:
-            # Questions do not carry a textbook column.  Their authoritative
-            # scope is the observed question -> catalog -> textbook relation.
-            relation_tables = {
-                str(item['name'])
-                for item in db.execute(
-                    "SELECT name FROM sqlite_master WHERE type = 'table' "
-                    "AND name IN ('question_catalog_memberships', 'textbook_nodes')"
-                ).fetchall()
-            }
-            if relation_tables != {'question_catalog_memberships', 'textbook_nodes'}:
-                return False, 'collector SQLite 缺少题目目录关系表，无法按教材过滤题目', []
-            predicates.append(
-                'EXISTS ('
-                'SELECT 1 FROM "question_catalog_memberships" AS qcm '
-                'JOIN "textbook_nodes" AS tn '
-                'ON tn."provider" = qcm."provider" '
-                'AND tn."external_id" = qcm."catalog_external_id" '
-                f'WHERE qcm."provider" = {_quote_sqlite_identifier(table)}."provider" '
-                f'AND qcm."question_external_id" = {_quote_sqlite_identifier(table)}."external_id" '
-                'AND tn."textbook_external_id" = ?'
-                ')'
-            )
-            parameters.append(textbook_external_id)
-        if predicates:
-            query += ' WHERE ' + ' AND '.join(predicates)
-        # Collector tables do not promise insertion order.  Stable ordering
-        # is required for repeatable page boundaries and for an operator to
-        # review the same candidate after a refresh.
-        query += (
-            f' ORDER BY {_quote_sqlite_identifier("provider")} ASC, '
-            f'{_quote_sqlite_identifier(_ID_COLUMNS[entity_type])} ASC'
-        )
-        rows = [dict(row) for row in db.execute(query, tuple(parameters)).fetchall()]
-        return True, 'collector SQLite 可用', rows
-    except sqlite3.Error as exc:
-        return False, f'collector SQLite 读取失败：{exc}', []
-    finally:
-        if db is not None:
-            db.close()
-
-
-def _read_metadata_snapshot_rows_sync(
-    db: sqlite3.Connection,
-    entity_type: str,
-    run_id: int,
-    *,
-    source_provider: str = PROVIDER,
-    expected_count: int = 0,
-    include_columns: tuple[str, ...] = (),
-) -> list[dict[str, Any]] | None:
-    """Read immutable metadata rows for one collector run.
-
-    ``None`` means that this is an older collector database (or a database
-    whose immutable rows have not been backfilled yet) and the caller may use
-    the legacy time-window reader.  Once a snapshot row is present, however,
-    all rows come from the run-owned table and never from the mutable current
-    tables.
-    """
-
-    snapshot_table = _METADATA_SNAPSHOT_TABLES.get(entity_type)
-    if snapshot_table is None:
-        raise ServiceException(message=f'不支持的元数据实体类型：{entity_type}')
-    table_exists = db.execute(
-        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
-        (snapshot_table,),
-    ).fetchone()
-    if table_exists is None:
-        return None
-
-    columns = {
-        str(item['name'])
-        for item in db.execute(f'PRAGMA table_info({_quote_sqlite_identifier(snapshot_table)})').fetchall()
-    }
-    id_column = _ID_COLUMNS[entity_type]
-    required = {'run_id', 'provider', id_column}
-    missing = sorted(required.difference(columns))
-    if missing:
-        raise ServiceException(
-            message=f'collector 表 {snapshot_table} 缺少字段：{", ".join(missing)}，无法读取不可变元数据快照'
-        )
-
-    selected: list[str] = [
-        _quote_sqlite_identifier(column) for column in _STAGING_COLUMNS[entity_type] if column in columns
-    ]
-    selected.extend(
-        _quote_sqlite_identifier(column)
-        for column in include_columns
-        if column in columns and column not in _STAGING_COLUMNS[entity_type]
-    )
-    if 'captured_at' in columns:
-        # The snapshot captures a row once; expose that capture instant using
-        # the same fields as the legacy projection so candidate builders and
-        # hash calculation stay format-compatible.
-        if 'first_seen_at' not in columns:
-            selected.append(f'{_quote_sqlite_identifier("captured_at")} AS "first_seen_at"')
-        if 'last_seen_at' not in columns:
-            selected.append(f'{_quote_sqlite_identifier("captured_at")} AS "last_seen_at"')
-    if not selected:
-        raise ServiceException(message=f'collector 表 {snapshot_table} 没有可读取字段')
-
-    order_by: list[str] = []
-    if 'sort_order' in columns:
-        order_by.append(f'{_quote_sqlite_identifier("sort_order")} ASC')
-    order_by.append(f'{_quote_sqlite_identifier(id_column)} ASC')
-    rows = db.execute(
-        f'SELECT {", ".join(selected)} FROM {_quote_sqlite_identifier(snapshot_table)} '
-        f'WHERE "run_id" = ? AND "provider" = ? ORDER BY {", ".join(order_by)}',
-        (int(run_id), str(source_provider or PROVIDER)),
-    ).fetchall()
-    if not rows and int(expected_count or 0) > 0:
-        # Collector startup backfills old databases.  A direct Service read
-        # can happen before that startup hook, so preserve the established
-        # compatibility fallback only for an empty legacy snapshot table.
-        return None
-    return [dict(row) for row in rows]
-
-
-def _read_metadata_candidate_rows_sync(  # noqa: PLR0912
-    path: Path,
-    entity_type: str,
-    metadata_run_id: int | None,
-    source_provider: str | None = None,
-) -> tuple[bool, str, list[dict[str, Any]], dict[str, Any] | None]:
-    """Read version/textbook rows inside one metadata run's exact window.
-
-    If a legacy test/development collector has no ``source_metadata_runs``
-    table, the caller may fall back to the ordinary table reader only when no
-    run was explicitly requested.  Production metadata snapshots always have
-    the run table and therefore never expose historical rows accidentally.
-    """
-
-    path = Path(path)
-    if not path.is_file():
-        return False, f'collector SQLite 不存在：{path}', [], None
-    db: sqlite3.Connection | None = None
-    try:
-        db = connect_collector_sqlite(path)
-        db.row_factory = sqlite3.Row
-        run_table = db.execute(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'source_metadata_runs'"
-        ).fetchone()
-        if run_table is None:
-            if metadata_run_id is not None:
-                raise ServiceException(message='采集库缺少 source_metadata_runs 表，不能验证 metadataRunId')
-            available, message, rows = _read_sqlite_rows_sync(
-                path,
-                _TABLES[entity_type],
-                source_provider=source_provider,
-            )
-            return available, message, rows, None
-        run_columns = {str(item['name']) for item in db.execute('PRAGMA table_info("source_metadata_runs")').fetchall()}
-        run_select = 'id, provider, started_at, finished_at, status, version_count, textbook_count'
-        if 'provider' not in run_columns:
-            run_select = 'id, started_at, finished_at, status, version_count, textbook_count'
-        if metadata_run_id is None:
-            if 'provider' in run_columns:
-                run = db.execute(
-                    f"""
-                    SELECT {run_select}
-                    FROM source_metadata_runs
-                    WHERE provider = ? AND status = 'success' AND finished_at IS NOT NULL
-                    ORDER BY id DESC LIMIT 1
-                    """,
-                    (PROVIDER,),
-                ).fetchone()
-            else:
-                run = db.execute(
-                    f"""
-                    SELECT {run_select}
-                    FROM source_metadata_runs
-                    WHERE status = 'success' AND finished_at IS NOT NULL
-                    ORDER BY id DESC LIMIT 1
-                    """,
-                ).fetchone()
-        else:
-            run = db.execute(
-                f"""SELECT {run_select} FROM source_metadata_runs WHERE id = ?""",
-                (metadata_run_id,),
-            ).fetchone()
-        if run is None:
-            if metadata_run_id is None:
-                return False, 'collector SQLite 没有成功的元数据运行', [], None
-            raise ServiceException(message=f'元数据运行 {metadata_run_id} 不存在')
-        if 'provider' in run_columns and str(run['provider'] or '') != PROVIDER:
-            raise ServiceException(message=f'元数据运行 {run["id"]} 来源不受支持')
-        if str(run['status'] or '') != 'success' or not run['finished_at']:
-            raise ServiceException(message=f'元数据运行 {run["id"]} 未成功完成')
-        if not run['started_at']:
-            raise ServiceException(message=f'元数据运行 {run["id"]} 缺少有效时间窗口')
-        table = _TABLES[entity_type]
-        snapshot_rows = _read_metadata_snapshot_rows_sync(
-            db,
-            entity_type,
-            int(run['id']),
-            source_provider=source_provider or PROVIDER,
-            expected_count=int(run[f'{entity_type}_count'] or 0),
-        )
-        if snapshot_rows is not None:
-            return True, 'collector 元数据运行快照可用', snapshot_rows, dict(run)
-        available, message, rows = _read_sqlite_rows_sync(
-            path,
-            table,
-            source_provider=source_provider or PROVIDER,
-            time_window=(str(run['started_at']), str(run['finished_at'])),
-        )
-        return available, message, rows, dict(run)
-    except sqlite3.Error as exc:
-        raise ServiceException(message=f'采集库读取失败：{exc}') from exc
-    finally:
-        if db is not None:
-            db.close()
 
 
 def _version_candidate(row: dict[str, Any]) -> dict[str, Any] | None:
@@ -611,7 +223,7 @@ def _question_candidate(row: dict[str, Any]) -> dict[str, Any] | None:
     if not provider or external_id is None or not str(external_id).strip():
         return None
     plain_text = _pick(row, 'plain_text', 'plainText')
-    return {
+    candidate = {
         'sourceProvider': provider,
         'externalId': str(external_id),
         'chapterId': _pick(row, 'chapter_id', 'chapterId'),
@@ -632,6 +244,18 @@ def _question_candidate(row: dict[str, Any]) -> dict[str, Any] | None:
         'firstSeenAt': _pick(row, 'first_seen_at', 'firstSeenAt'),
         'lastSeenAt': _pick(row, 'last_seen_at', 'lastSeenAt'),
     }
+    # The collector may include this bounded boolean when a scoped question
+    # query was joined through an authoritative question-catalog relation.
+    # Preserve it only as an internal filter marker; it is not part of the
+    # public candidate or staged hash.
+    scope_matched = _pick(row, 'textbook_scope_matched', 'textbookScopeMatched', 'scopeMatched')
+    if scope_matched is not None:
+        if isinstance(scope_matched, str):
+            scope_matched = scope_matched.strip().lower() not in {'', '0', 'false', 'no', 'off'}
+        else:
+            scope_matched = bool(scope_matched)
+        candidate['_textbookScopeMatched'] = scope_matched
+    return candidate
 
 
 _CANDIDATE_BUILDERS = {
@@ -777,10 +401,6 @@ def _formal_question(row: Mapping[str, Any] | QbQuestion) -> dict[str, Any]:
 class SyncService:
     """Comparison and review operations for the synchronization UI."""
 
-    @staticmethod
-    def collector_path() -> Path:
-        return _source_path()
-
     @classmethod
     async def _read_candidates(
         cls,
@@ -789,38 +409,21 @@ class SyncService:
         metadata_run_id: int | None = None,
         textbook_external_id: str | None = None,
     ) -> tuple[bool, str, list[dict[str, Any]]]:
-        if remote_collector_enabled():
-            payload = await asyncio.to_thread(
-                CollectorClient().candidates,
-                entity_type,
-                source_provider=source_provider,
-                metadata_run_id=metadata_run_id,
-                textbook_external_id=textbook_external_id,
-            )
-            available = bool(payload.get('available'))
-            message = str(payload.get('message') or '')
-            raw_rows = payload.get('rows')
-            if not isinstance(raw_rows, list) or any(not isinstance(row, dict) for row in raw_rows):
-                raise ServiceException(message='collector API 候选数据结构不正确')
-            rows = raw_rows
-        else:
-            table = _TABLES[entity_type]
-            if entity_type in {'version', 'textbook'}:
-                available, message, rows, _run = await asyncio.to_thread(
-                    _read_metadata_candidate_rows_sync,
-                    cls.collector_path(),
-                    entity_type,
-                    metadata_run_id,
-                    source_provider,
-                )
-            else:
-                available, message, rows = await asyncio.to_thread(
-                    _read_sqlite_rows_sync,
-                    cls.collector_path(),
-                    table,
-                    source_provider=source_provider,
-                    textbook_external_id=(textbook_external_id if entity_type in {'catalog', 'question'} else None),
-                )
+        payload = await asyncio.to_thread(
+            CollectorClient().candidates,
+            entity_type,
+            source_provider=source_provider,
+            metadata_run_id=metadata_run_id,
+            textbook_external_id=textbook_external_id,
+        )
+        if not isinstance(payload, Mapping):
+            raise ServiceException(message='collector API 候选数据结构不正确')
+        available = bool(payload.get('available'))
+        message = str(payload.get('message') or '')
+        raw_rows = payload.get('rows')
+        if not isinstance(raw_rows, list) or any(not isinstance(row, dict) for row in raw_rows):
+            raise ServiceException(message='collector API 候选数据结构不正确')
+        rows = raw_rows
         if len(rows) > MAX_COMPARE_CANDIDATES:
             raise ServiceException(
                 message=(f'{entity_type} 候选数量超过安全上限 {MAX_COMPARE_CANDIDATES}，请缩小同步范围后重试')
@@ -830,6 +433,7 @@ class SyncService:
         skipped = len(rows) - len(candidates)
         if skipped:
             message = f'{message}；已跳过 {skipped} 条缺少稳定来源 ID 的候选'
+        candidates.sort(key=lambda item: (str(item.get('sourceProvider') or ''), str(item.get('externalId') or '')))
         return available, message, candidates
 
     @classmethod
@@ -837,58 +441,37 @@ class SyncService:
         cls,
         metadata_run_id: int | None,
     ) -> tuple[bool, bool, str, str, list[dict[str, Any]], list[dict[str, Any]], dict[str, Any] | None, str]:
-        """Read one coherent metadata snapshot from API or local development SQLite."""
+        """Read one coherent metadata snapshot through the collector API."""
 
-        if remote_collector_enabled():
-            payload = await asyncio.to_thread(CollectorClient().metadata_snapshot, metadata_run_id)
-            version_rows = payload.get('versions')
-            textbook_rows = payload.get('textbooks')
-            run = payload.get('run')
-            if not isinstance(version_rows, list) or any(not isinstance(row, dict) for row in version_rows):
-                raise ServiceException(message='collector API 版本快照结构不正确')
-            if not isinstance(textbook_rows, list) or any(not isinstance(row, dict) for row in textbook_rows):
-                raise ServiceException(message='collector API 教材快照结构不正确')
-            if run is not None and not isinstance(run, dict):
-                raise ServiceException(message='collector API 元数据运行结构不正确')
-            available = bool(payload.get('available'))
-            return (
-                available,
-                available,
-                str(payload.get('message') or ''),
-                '',
-                version_rows,
-                textbook_rows,
-                run,
-                'collector API 可用',
-            )
-
-        version_result, textbook_result = await asyncio.gather(
-            asyncio.to_thread(
-                _read_metadata_candidate_rows_sync,
-                cls.collector_path(),
-                'version',
-                metadata_run_id,
-            ),
-            asyncio.to_thread(
-                _read_metadata_candidate_rows_sync,
-                cls.collector_path(),
-                'textbook',
-                metadata_run_id,
-            ),
-        )
-        available_v, message_v, version_rows, run_v = version_result
-        available_t, message_t, textbook_rows, run_t = textbook_result
-        if run_v and run_t and int(run_v['id']) != int(run_t['id']):
-            raise ServiceException(message='版本和教材读取到了不同的元数据快照')
+        payload = await asyncio.to_thread(CollectorClient().metadata_snapshot, metadata_run_id)
+        if not isinstance(payload, Mapping):
+            raise ServiceException(message='collector API 元数据快照结构不正确')
+        version_rows = payload.get('versions')
+        textbook_rows = payload.get('textbooks')
+        run = payload.get('run')
+        if not isinstance(version_rows, list) or any(not isinstance(row, dict) for row in version_rows):
+            raise ServiceException(message='collector API 版本快照结构不正确')
+        if not isinstance(textbook_rows, list) or any(not isinstance(row, dict) for row in textbook_rows):
+            raise ServiceException(message='collector API 教材快照结构不正确')
+        if run is not None and not isinstance(run, dict):
+            raise ServiceException(message='collector API 元数据运行结构不正确')
+        if metadata_run_id is not None and run is not None:
+            remote_run_id = run.get('id', run.get('runId', run.get('metadataRunId')))
+            try:
+                if isinstance(remote_run_id, bool) or int(remote_run_id) != int(metadata_run_id):
+                    raise ServiceException(message='collector API 元数据运行 ID 不一致')
+            except (TypeError, ValueError) as exc:
+                raise ServiceException(message='collector API 元数据运行 ID 无效') from exc
+        available = bool(payload.get('available'))
         return (
-            available_v,
-            available_t,
-            message_v,
-            message_t,
+            available,
+            available,
+            str(payload.get('message') or ''),
+            '',
             version_rows,
             textbook_rows,
-            run_v or run_t,
-            'collector SQLite 可用',
+            run,
+            'collector API 可用',
         )
 
     @classmethod

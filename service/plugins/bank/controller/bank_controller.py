@@ -939,8 +939,8 @@ async def compare_sync_candidates(
 ) -> Response:
     """Compare collector candidates with current formal rows.
 
-    The path is a closed Literal rather than a table name, and the service
-    only opens the server-configured collector path in SQLite read-only mode.
+    The path is a closed Literal rather than a table name, and candidates are
+    fetched through the configured collector HTTP service.
     """
 
     return ResponseUtil.success(dict_content=await SyncService.compare(db, entity_type, query))

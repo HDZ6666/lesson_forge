@@ -615,6 +615,13 @@ function migrateRunSnapshotSchema(db) {
       );
     CREATE INDEX IF NOT EXISTS idx_sync_run_question_assets_hash
       ON sync_run_question_assets (content_sha256);
+    -- Asset API lookups always constrain one immutable run scope as well as
+    -- the content digest.  Keep that predicate indexable so serving tens of
+    -- thousands of unique assets does not scan every asset row in the run.
+    CREATE INDEX IF NOT EXISTS idx_sync_run_question_assets_scope_hash
+      ON sync_run_question_assets (
+        run_id, provider, textbook_external_id, content_sha256
+      );
     CREATE INDEX IF NOT EXISTS idx_sync_run_checkpoints_scope
       ON sync_run_checkpoints (scope_key, last_completed_page);
     CREATE INDEX IF NOT EXISTS idx_sync_run_checkpoints_run

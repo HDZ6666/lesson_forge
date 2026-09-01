@@ -117,7 +117,7 @@ services:
       BANK_COLLECTOR_URL: http://collector:9110
       BANK_COLLECTOR_TOKEN: ${COLLECTOR_API_TOKEN}
       BANK_COLLECTOR_TIMEOUT_SECONDS: 30
-      BANK_COLLECTOR_HEADFUL: "false"
+      BANK_ASSET_ROOT: /app/runtime/bank
       TRANSPORT_CRYPTO_ENABLED: "false"
       TRANSPORT_CRYPTO_MODE: off
       TZ: Asia/Shanghai

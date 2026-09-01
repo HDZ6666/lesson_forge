@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import sqlite3
 from datetime import datetime
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
@@ -32,7 +31,6 @@ from plugins.bank.service.textbook_apply_service import TextbookApplyService
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Mapping
-    from pathlib import Path
 
 
 CURRENT_TASK_ID = 9
@@ -216,65 +214,11 @@ def snapshot_reader(monkeypatch: pytest.MonkeyPatch) -> Mapping[int, dict[str, A
         return snapshots[metadata_run_id]
 
     monkeypatch.setattr(textbook_apply_service, '_read_snapshot', read_snapshot)
-    monkeypatch.setattr(textbook_apply_service, 'remote_collector_enabled', lambda: False)
     return snapshots
 
 
 async def _apply_task9(db: AsyncSession) -> dict[str, Any]:
     return await TextbookApplyService.apply(db, 9, expected_current_task_id=None, operator='tester')
-
-
-def _create_collector_snapshot_db(path: Path, *, version_count: int = 1, textbook_count: int = 1) -> None:
-    connection = sqlite3.connect(path)
-    connection.executescript(
-        """
-        CREATE TABLE source_metadata_runs (
-            id INTEGER PRIMARY KEY, provider TEXT, started_at TEXT, finished_at TEXT, status TEXT,
-            version_count INTEGER, textbook_count INTEGER, snapshot_locked_at TEXT
-        );
-        CREATE TABLE source_metadata_run_versions (
-            run_id INTEGER, provider TEXT, external_version_id TEXT, version_name TEXT, source_url TEXT,
-            is_new TEXT, sort_order INTEGER, status TEXT, captured_at TEXT
-        );
-        CREATE TABLE source_metadata_run_textbooks (
-            run_id INTEGER, provider TEXT, external_textbook_id TEXT, version_external_id TEXT,
-            textbook_name TEXT, grade TEXT, volume TEXT, source_url TEXT, sort_order INTEGER,
-            status TEXT, captured_at TEXT
-        );
-        """
-    )
-    connection.execute(
-        'INSERT INTO source_metadata_runs VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-        (1, 'zujuan', '2026-08-29 07:00:00', '2026-08-29 08:00:00', 'completed', version_count, textbook_count, '2026-08-29 08:00:01'),
-    )
-    connection.execute(
-        'INSERT INTO source_metadata_run_versions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-        (1, 'zujuan', 'version-a', '版本 A', None, '0', 0, '0', '2026-08-29 08:00:00'),
-    )
-    connection.execute(
-        'INSERT INTO source_metadata_run_textbooks VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-        (1, 'zujuan', 'textbook-a', 'version-a', '教材 A', '七年级', '上册', None, 0, '0', '2026-08-29 08:00:00'),
-    )
-    connection.commit()
-    connection.close()
-
-
-def test_local_snapshot_rejects_missing_database_and_tables(tmp_path: Path) -> None:
-    with pytest.raises(ServiceException, match='采集库不存在'):
-        textbook_apply_service._read_local_snapshot_sync(tmp_path / 'missing.sqlite3', 1)
-
-    empty = tmp_path / 'empty.sqlite3'
-    sqlite3.connect(empty).close()
-    with pytest.raises(ServiceException, match='缺少不可变元数据快照表'):
-        textbook_apply_service._read_local_snapshot_sync(empty, 1)
-
-
-def test_local_snapshot_rejects_incomplete_row_counts(tmp_path: Path) -> None:
-    path = tmp_path / 'incomplete.sqlite3'
-    _create_collector_snapshot_db(path, textbook_count=2)
-
-    with pytest.raises(ServiceException, match=r'快照不完整.*教材 1/2'):
-        textbook_apply_service._read_local_snapshot_sync(path, 1)
 
 
 @pytest.mark.asyncio
@@ -529,6 +473,7 @@ async def test_add_state_recovers_from_concurrent_provider_insert(monkeypatch: p
 @pytest.mark.asyncio
 async def test_remote_snapshot_requires_immutable_lock_marker(monkeypatch: pytest.MonkeyPatch) -> None:
     payload = _snapshot(9)
+    payload['available'] = True
     payload['run']['versionCount'] = len(payload['versions'])
     payload['run']['textbookCount'] = len(payload['textbooks'])
     payload['run']['snapshotLockedAt'] = payload['run'].pop('snapshot_locked_at')
@@ -537,7 +482,6 @@ async def test_remote_snapshot_requires_immutable_lock_marker(monkeypatch: pytes
         def metadata_snapshot(self, _metadata_run_id: int) -> dict[str, Any]:
             return payload
 
-    monkeypatch.setattr(textbook_apply_service, 'remote_collector_enabled', lambda: True)
     monkeypatch.setattr(textbook_apply_service, 'CollectorClient', Client)
 
     snapshot = await textbook_apply_service._read_snapshot(9)

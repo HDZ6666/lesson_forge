@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 from datetime import datetime
-from typing import TYPE_CHECKING
 
 import pytest
 from sqlalchemy.exc import SQLAlchemyError
@@ -17,29 +15,11 @@ from plugins.bank.service.sync_service import (
     _catalog_candidate,
     _formal_question,
     _question_candidate,
-    _read_sqlite_rows_sync,
     _semantic,
 )
 
-if TYPE_CHECKING:
-    from pathlib import Path
-
-
 SHA256_LENGTH = 64
 BATCH_ITEM_COUNT = 2
-
-
-def collector_db(tmp_path: Path, table_sql: str, rows: list[tuple]) -> Path:
-    path = tmp_path / 'collector.sqlite3'
-    db = sqlite3.connect(path)
-    db.execute(table_sql)
-    placeholders = ','.join('?' for _ in rows[0]) if rows else ''
-    if rows:
-        table_name = table_sql.split('CREATE TABLE ')[1].split(' ', maxsplit=1)[0]
-        db.executemany(f'INSERT INTO {table_name} VALUES ({placeholders})', rows)
-    db.commit()
-    db.close()
-    return path
 
 
 class FakeDb:
@@ -58,16 +38,6 @@ class FakeDb:
 
     def add(self, _row: object) -> None:
         return None
-
-
-@pytest.mark.asyncio
-async def test_missing_collector_is_structured_empty_result(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    monkeypatch.setenv('BANK_COLLECTOR_DB', str(tmp_path / 'missing.sqlite3'))
-    result = await SyncService.compare(FakeDb(), 'version', SyncCompareQueryModel())
-    assert result['sourceAvailable'] is False
-    assert result['rows'] == []
-    assert result['summary']['total'] == 0
-    assert '不存在' in result['sourceMessage']
 
 
 @pytest.mark.asyncio
@@ -109,6 +79,239 @@ async def test_remote_collector_candidates_do_not_require_shared_sqlite(
 
 
 @pytest.mark.asyncio
+async def test_version_mapping_preserves_year_filter_and_staged_hash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Client:
+        def candidates(self, entity_type: str, **kwargs: object) -> dict[str, object]:
+            assert entity_type == 'version'
+            assert kwargs == {
+                'source_provider': None,
+                'metadata_run_id': None,
+                'textbook_external_id': None,
+            }
+            return {
+                'available': True,
+                'message': 'collector API 可用',
+                'rows': [
+                    {
+                        'provider': 'zujuan',
+                        'external_version_id': 'v-2012',
+                        'version_name': '北师大版（2012）',
+                        'source_url': 'https://zujuan.xkw.com/v-2012',
+                        'sort_order': 1,
+                        'status': '0',
+                    },
+                    {
+                        'provider': 'zujuan',
+                        'external_version_id': 'v-other',
+                        'version_name': '人教版',
+                        'sort_order': 2,
+                        'status': '0',
+                    },
+                ],
+            }
+
+    async def no_current(*_args: object, **_kwargs: object) -> dict:
+        return {}
+
+    async def no_reviews(*_args: object, **_kwargs: object) -> dict:
+        return {}
+
+    monkeypatch.setenv('BANK_COLLECTOR_URL', 'http://collector.internal:9110')
+    monkeypatch.setattr('plugins.bank.service.sync_service.CollectorClient', Client)
+    monkeypatch.setattr(SyncService, '_load_current', classmethod(no_current))
+    monkeypatch.setattr(SyncService, '_load_reviews', classmethod(no_reviews))
+
+    result = await SyncService.compare(FakeDb(), 'version', SyncCompareQueryModel(keyword='2012'))
+
+    assert result['sourceAvailable'] is True
+    assert result['page']['total'] == 1
+    assert result['rows'][0]['candidate']['versionName'] == '北师大版（2012）'
+    assert len(result['rows'][0]['stagedHash']) == SHA256_LENGTH
+
+
+@pytest.mark.asyncio
+async def test_review_rejects_stale_hash_before_writing_with_http_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Client:
+        def candidates(self, entity_type: str, **_kwargs: object) -> dict[str, object]:
+            assert entity_type == 'version'
+            return {
+                'available': True,
+                'rows': [
+                    {
+                        'provider': 'zujuan',
+                        'external_version_id': 'v1',
+                        'version_name': '版本A',
+                        'status': '0',
+                    }
+                ],
+            }
+
+    async def no_current(*_args: object, **_kwargs: object) -> dict:
+        return {}
+
+    monkeypatch.setenv('BANK_COLLECTOR_URL', 'http://collector.internal:9110')
+    monkeypatch.setattr('plugins.bank.service.sync_service.CollectorClient', Client)
+    monkeypatch.setattr(SyncService, '_load_current', classmethod(no_current))
+    db = FakeDb()
+
+    with pytest.raises(ServiceException, match='已变化'):
+        await SyncService.review(
+            db,
+            'version',
+            SyncReviewRequestModel(externalId='v1', stagedHash='0' * SHA256_LENGTH, action='approve'),
+            'tester',
+        )
+    assert db.commits == 0
+
+
+def test_question_staging_projection_drops_html_solution_and_raw_json() -> None:
+    row = {
+        'provider': 'zujuan',
+        'external_id': 'q1',
+        'source_title': '试卷',
+        'source_short': '来源',
+        'source_url': 'https://q',
+        'content_hash': 'h',
+        'plain_text': '题干',
+        'content_html': '<p>long</p>',
+        'solution_html': '<p>answer</p>',
+        'raw_json': '{"secret":1}',
+    }
+
+    candidate = _question_candidate(row)
+
+    assert candidate is not None
+    assert 'contentHtml' not in candidate
+    assert 'solutionHtml' not in candidate
+    assert 'rawJson' not in candidate
+    assert 'content_html' not in candidate
+    assert 'solution_html' not in candidate
+    assert 'raw_json' not in candidate
+
+
+@pytest.mark.asyncio
+async def test_collector_rows_are_stably_ordered_by_provider_and_external_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Client:
+        def candidates(self, _entity_type: str, **_kwargs: object) -> dict[str, object]:
+            return {
+                'available': True,
+                'rows': [
+                    {'provider': 'z-provider', 'external_version_id': 'v2', 'version_name': 'Z'},
+                    {'provider': 'a-provider', 'external_version_id': 'v9', 'version_name': 'A9'},
+                    {'provider': 'a-provider', 'external_version_id': 'v1', 'version_name': 'A1'},
+                ],
+            }
+
+    monkeypatch.setenv('BANK_COLLECTOR_URL', 'http://collector.internal:9110')
+    monkeypatch.setattr('plugins.bank.service.sync_service.CollectorClient', Client)
+
+    available, _, candidates = await SyncService._read_candidates('version')
+
+    assert available is True
+    assert [(row['sourceProvider'], row['externalId']) for row in candidates] == [
+        ('a-provider', 'v1'),
+        ('a-provider', 'v9'),
+        ('z-provider', 'v2'),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_empty_provider_is_skipped_and_reported_with_http_reader(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Client:
+        def candidates(self, _entity_type: str, **_kwargs: object) -> dict[str, object]:
+            return {
+                'available': True,
+                'rows': [
+                    {'provider': '', 'external_version_id': 'v0', 'version_name': '无来源'},
+                    {'provider': 'zujuan', 'external_version_id': 'v1', 'version_name': '有效'},
+                ],
+            }
+
+    monkeypatch.setenv('BANK_COLLECTOR_URL', 'http://collector.internal:9110')
+    monkeypatch.setattr('plugins.bank.service.sync_service.CollectorClient', Client)
+
+    available, message, candidates = await SyncService._read_candidates('version')
+
+    assert available is True
+    assert [candidate['externalId'] for candidate in candidates] == ['v1']
+    assert '跳过 1 条' in message
+
+
+def test_catalog_without_status_defaults_to_enabled() -> None:
+    candidate = _catalog_candidate(
+        {
+            'provider': 'zujuan',
+            'external_id': 'n1',
+            'textbook_external_id': 'tb1',
+            'node_level': 1,
+            'node_type': 'chapter',
+            'name': '第一章',
+        }
+    )
+    assert candidate is not None
+    assert candidate['status'] == '0'
+    fallback = _catalog_candidate({'provider': 'zujuan', 'external_id': 'n2'})
+    assert fallback is not None
+    assert fallback['nodeType'] == 'other'
+
+
+@pytest.mark.asyncio
+async def test_scoped_question_read_requires_an_authoritative_catalog_relation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Client:
+        def candidates(self, entity_type: str, **kwargs: object) -> dict[str, object]:
+            assert entity_type == 'question'
+            assert kwargs['textbook_external_id'] == 'tb1'
+            return {
+                'available': True,
+                'rows': [
+                    {
+                        'provider': 'zujuan',
+                        'external_id': 'q2',
+                        'chapter_id': 'c2',
+                        'plain_text': '错误教材的题目',
+                        'textbookScopeMatched': False,
+                    },
+                    {
+                        'provider': 'zujuan',
+                        'external_id': 'q1',
+                        'chapter_id': 'c1',
+                        'plain_text': '教材一题目',
+                        'textbookScopeMatched': True,
+                    },
+                ],
+            }
+
+    async def no_current(*_args: object, **_kwargs: object) -> dict:
+        return {}
+
+    async def no_reviews(*_args: object, **_kwargs: object) -> dict:
+        return {}
+
+    monkeypatch.setenv('BANK_COLLECTOR_URL', 'http://collector.internal:9110')
+    monkeypatch.setattr('plugins.bank.service.sync_service.CollectorClient', Client)
+    monkeypatch.setattr(SyncService, '_load_current', classmethod(no_current))
+    monkeypatch.setattr(SyncService, '_load_reviews', classmethod(no_reviews))
+
+    result = await SyncService.compare(
+        FakeDb(),
+        'question',
+        SyncCompareQueryModel(textbookExternalId='tb1'),
+    )
+
+    assert [row['externalId'] for row in result['rows']] == ['q1']
+
+
+@pytest.mark.asyncio
 async def test_content_compare_requires_textbook_scope(monkeypatch: pytest.MonkeyPatch) -> None:
     async def should_not_read(*_args: object, **_kwargs: object) -> tuple[bool, str, list[dict]]:
         raise AssertionError('content comparison must be scoped before reading candidates')
@@ -118,39 +321,6 @@ async def test_content_compare_requires_textbook_scope(monkeypatch: pytest.Monke
         with pytest.raises(ServiceException) as error:
             await SyncService.compare(FakeDb(), entity_type, SyncCompareQueryModel())
         assert '教材范围' in (error.value.message or '')
-
-
-@pytest.mark.asyncio
-async def test_version_mapping_preserves_year_and_filters_and_hashes(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    path = collector_db(
-        tmp_path,
-        """CREATE TABLE source_textbook_versions (
-            provider TEXT, external_version_id TEXT, version_name TEXT, source_url TEXT,
-            is_new TEXT, sort_order INTEGER, status TEXT, first_seen_at TEXT,
-            last_seen_at TEXT, raw_json TEXT
-        )""",
-        [
-            ('zujuan', 'v1', '北师大版（2012）', 'https://example/v1', 'N', 0, '0', 'a', 'b', '{}'),
-            ('zujuan', 'v2', '人教版', 'https://example/v2', 'Y', 1, '0', 'a', 'b', '{}'),
-        ],
-    )
-    monkeypatch.setenv('BANK_COLLECTOR_DB', str(path))
-
-    async def no_current(cls: object, db: object, entity_type: str, source_provider: str | None = None) -> dict:
-        return {}
-
-    async def no_reviews(cls: object, db: object, entity_type: str, source_provider: str | None = None) -> dict:
-        return {}
-
-    monkeypatch.setattr(SyncService, '_load_current', classmethod(no_current))
-    monkeypatch.setattr(SyncService, '_load_reviews', classmethod(no_reviews))
-    result = await SyncService.compare(FakeDb(), 'version', SyncCompareQueryModel(keyword='2012'))
-    assert result['sourceAvailable'] is True
-    assert result['page']['total'] == 1
-    assert result['rows'][0]['candidate']['versionName'] == '北师大版（2012）'
-    assert len(result['rows'][0]['stagedHash']) == SHA256_LENGTH
 
 
 @pytest.mark.asyncio
@@ -220,7 +390,7 @@ async def test_metadata_snapshot_orders_by_source_sort_order_with_external_id_ti
                 },
             ],
             {'id': 5, 'finished_at': '2026-08-27T10:00:00'},
-            'collector SQLite 可用',
+            'collector API 可用',
         )
 
     async def no_current(
@@ -255,34 +425,6 @@ async def test_metadata_snapshot_orders_by_source_sort_order_with_external_id_ti
     assert all('_sortOrder' not in item for item in result['versions'][0]['textbooks'])
 
 
-@pytest.mark.asyncio
-async def test_review_rejects_stale_hash_before_writing(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    path = collector_db(
-        tmp_path,
-        """CREATE TABLE source_textbook_versions (
-            provider TEXT, external_version_id TEXT, version_name TEXT, source_url TEXT,
-            is_new TEXT, sort_order INTEGER, status TEXT, first_seen_at TEXT,
-            last_seen_at TEXT, raw_json TEXT
-        )""",
-        [('zujuan', 'v1', '版本A', 'https://example/v1', 'Y', 0, '0', 'a', 'b', '{}')],
-    )
-    monkeypatch.setenv('BANK_COLLECTOR_DB', str(path))
-    fake_db = FakeDb()
-
-    async def no_current(cls: object, db: object, entity_type: str, source_provider: str | None = None) -> dict:
-        return {}
-
-    monkeypatch.setattr(SyncService, '_load_current', classmethod(no_current))
-    with pytest.raises(ServiceException):
-        await SyncService.review(
-            fake_db,
-            'version',
-            SyncReviewRequestModel(externalId='v1', stagedHash='0' * 64, action='approve'),
-            'tester',
-        )
-    assert fake_db.commits == 0
-
-
 def test_candidate_hash_is_stable_and_does_not_include_raw_html() -> None:
     candidate = {
         'sourceProvider': 'zujuan',
@@ -293,137 +435,6 @@ def test_candidate_hash_is_stable_and_does_not_include_raw_html() -> None:
     assert _canonical_hash(_semantic(candidate, 'question', for_hash=True)) == _canonical_hash(
         json.loads(json.dumps(_semantic(candidate, 'question', for_hash=True), ensure_ascii=False))
     )
-
-
-def test_question_staging_projection_drops_html_solution_and_raw_json(tmp_path: Path) -> None:
-    path = collector_db(
-        tmp_path,
-        """CREATE TABLE questions (
-            provider TEXT, external_id TEXT, source_title TEXT, source_short TEXT,
-            source_url TEXT, content_hash TEXT, plain_text TEXT, content_html TEXT,
-            solution_html TEXT, raw_json TEXT, first_seen_at TEXT, last_seen_at TEXT
-        )""",
-        [
-            (
-                'zujuan',
-                'q1',
-                '试卷',
-                '来源',
-                'https://q',
-                'h',
-                '题干',
-                '<p>long</p>',
-                '<p>answer</p>',
-                '{"secret":1}',
-                'a',
-                'b',
-            )
-        ],
-    )
-    available, _, rows = _read_sqlite_rows_sync(path, 'questions')
-    assert available is True
-    assert rows[0]['external_id'] == 'q1'
-    assert 'content_html' not in rows[0]
-    assert 'solution_html' not in rows[0]
-    assert 'raw_json' not in rows[0]
-    candidate = _question_candidate(rows[0])
-    assert candidate is not None
-    assert 'contentHtml' not in candidate and 'rawJson' not in candidate
-
-
-def test_collector_rows_are_stably_ordered_by_provider_and_external_id(tmp_path: Path) -> None:
-    path = collector_db(
-        tmp_path,
-        """CREATE TABLE source_textbook_versions (
-            provider TEXT, external_version_id TEXT, version_name TEXT
-        )""",
-        [('z-provider', 'v2', 'Z'), ('a-provider', 'v9', 'A9'), ('a-provider', 'v1', 'A1')],
-    )
-    available, _, rows = _read_sqlite_rows_sync(path, 'source_textbook_versions')
-    assert available is True
-    assert [(row['provider'], row['external_version_id']) for row in rows] == [
-        ('a-provider', 'v1'),
-        ('a-provider', 'v9'),
-        ('z-provider', 'v2'),
-    ]
-
-
-@pytest.mark.asyncio
-async def test_empty_provider_is_skipped_and_reported(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    path = collector_db(
-        tmp_path,
-        """CREATE TABLE source_textbook_versions (
-            provider TEXT, external_version_id TEXT, version_name TEXT
-        )""",
-        [('', 'v0', '无来源'), ('zujuan', 'v1', '有效')],
-    )
-    monkeypatch.setenv('BANK_COLLECTOR_DB', str(path))
-    available, message, candidates = await SyncService._read_candidates('version')
-    assert available is True
-    assert [candidate['externalId'] for candidate in candidates] == ['v1']
-    assert '跳过 1 条' in message
-
-
-def test_catalog_without_status_defaults_to_enabled(tmp_path: Path) -> None:
-    path = collector_db(
-        tmp_path,
-        """CREATE TABLE textbook_nodes (
-            provider TEXT, external_id TEXT, textbook_external_id TEXT,
-            parent_external_id TEXT, node_level INTEGER, node_type TEXT,
-            name TEXT, source_path TEXT, first_seen_at TEXT, last_seen_at TEXT
-        )""",
-        [('zujuan', 'n1', 'tb1', None, 1, 'chapter', '第一章', '/n1', 'a', 'b')],
-    )
-    available, _, rows = _read_sqlite_rows_sync(path, 'textbook_nodes')
-    assert available is True
-    assert _catalog_candidate(rows[0])['status'] == '0'
-    assert _catalog_candidate({'provider': 'zujuan', 'external_id': 'n2'})['nodeType'] == 'other'
-
-
-def test_scoped_question_read_requires_an_authoritative_catalog_relation(tmp_path: Path) -> None:
-    path = collector_db(
-        tmp_path,
-        """CREATE TABLE questions (
-            provider TEXT, external_id TEXT, chapter_id TEXT, source_title TEXT,
-            plain_text TEXT, first_seen_at TEXT, last_seen_at TEXT
-        )""",
-        [
-            ('zujuan', 'q1', 'c1', '教材一题目', '题干一', 'a', 'b'),
-            ('zujuan', 'q2', 'c2', '教材二题目', '题干二', 'a', 'b'),
-            ('zujuan', 'q3', None, '无目录题目', '题干三', 'a', 'b'),
-        ],
-    )
-    connection = sqlite3.connect(path)
-    connection.executescript(
-        """
-        CREATE TABLE question_catalog_memberships (
-            provider TEXT, question_external_id TEXT, catalog_external_id TEXT,
-            evidence_type TEXT, query_fingerprint TEXT
-        );
-        CREATE TABLE textbook_nodes (
-            provider TEXT, external_id TEXT, textbook_external_id TEXT, name TEXT,
-            first_seen_at TEXT, last_seen_at TEXT
-        );
-        INSERT INTO question_catalog_memberships VALUES
-            ('zujuan', 'q1', 'c1', 'query_membership', 'f1'),
-            ('zujuan', 'q2', 'c2', 'query_membership', 'f2');
-        INSERT INTO textbook_nodes VALUES
-            ('zujuan', 'c1', 'tb1', '目录一', 'a', 'b'),
-            ('zujuan', 'c2', 'tb2', '目录二', 'a', 'b');
-        """
-    )
-    connection.commit()
-    connection.close()
-
-    available, _, rows = _read_sqlite_rows_sync(
-        path,
-        'questions',
-        source_provider='zujuan',
-        textbook_external_id='tb1',
-    )
-
-    assert available is True
-    assert [row['external_id'] for row in rows] == ['q1']
 
 
 class MappingResult:

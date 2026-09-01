@@ -1,8 +1,7 @@
 """Independent textbook/question synchronization task services.
 
-This module is intentionally read-oriented with respect to the question bank.
-Collectors write immutable snapshots in their own SQLite store; the service
-only records task state/scope in MySQL and computes comparison projections.
+The collector owns immutable snapshots behind its HTTP API.  This module only
+records task state/scope in MySQL and computes comparison projections.
 Publishing those projections is a separate, explicit batch workflow.
 """
 
@@ -11,14 +10,11 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import os
 import re
-import sqlite3
 from collections import Counter
 from collections.abc import Mapping
 from datetime import datetime
 from decimal import Decimal
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import select
@@ -42,16 +38,13 @@ from plugins.bank.entity.vo.bank_vo import (
     SyncTaskPageQueryModel,
     TaskComparisonQueryModel,
 )
-from plugins.bank.service.collector_client import CollectorClient, remote_collector_enabled
-from plugins.bank.service.collector_sqlite import connect_collector_sqlite
+from plugins.bank.service.collector_client import CollectorClient
 from plugins.bank.service.question_apply_service import _normalise_answer_status
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[4]
-DEFAULT_COLLECTOR_DB = PROJECT_ROOT / 'collector' / 'data' / 'zujuan.sqlite3'
 PROVIDER = 'zujuan'
 MAX_SCOPE_ITEMS = 200
 MAX_SNAPSHOT_ROWS = 100_000
@@ -61,6 +54,11 @@ _TERMINAL_TASK_STATUSES = {'completed', 'failed', 'blocked', 'cancelled', 'inter
 # including numeric-only IDs. Keep the same bound here before forwarding
 # identifiers to the collector or exposing them in comparison responses.
 SAFE_EXTERNAL_ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z')
+_COLLECTOR_COUNT_ALIASES: dict[str, tuple[str, ...]] = {
+    'catalog': ('catalogItemCount', 'catalogs', 'catalogCount', 'catalog_count'),
+    'question': ('questionItemCount', 'questions', 'questionCount', 'question_count'),
+}
+_COLLECTOR_RUN_ID_ALIASES = ('id', 'runId', 'collectorRunId', 'run_id')
 
 
 def _pick(value: Mapping[str, Any] | object, *names: str, default: Any = None) -> Any:
@@ -148,14 +146,6 @@ async def _commit_or_rollback(db: AsyncSession, operation: Any) -> Any:
     except Exception:
         await db.rollback()
         raise
-
-
-def _source_path() -> Path:
-    configured = os.environ.get('BANK_COLLECTOR_DB', '').strip()
-    if not configured:
-        return DEFAULT_COLLECTOR_DB
-    path = Path(configured).expanduser()
-    return path if path.is_absolute() else PROJECT_ROOT / path
 
 
 def _task_options(row: object) -> dict[str, Any]:
@@ -637,92 +627,233 @@ def _catalog_tree(rows: list[dict[str, Any]], side: str) -> list[dict[str, Any]]
     return roots
 
 
-def _read_local_run_sync(  # noqa: PLR0912
-    path: Path,
-    run_id: int,
-    kind: str,
-    textbook_external_id: str | None,
-) -> Any:
-    if not path.is_file():
-        raise ServiceException(message=f'采集库不存在：{path}，没有可用的题库任务快照')
-    connection: sqlite3.Connection | None = None
-    table = 'sync_run_catalog_items' if kind == 'catalog' else 'sync_run_question_items'
-    try:
-        connection = connect_collector_sqlite(path)
-        connection.row_factory = sqlite3.Row
-        tables = {
-            str(item[0])
-            for item in connection.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('sync_runs', ?, ?)",
-                (table, 'sync_run_question_catalogs'),
-            ).fetchall()
-        }
-        if 'sync_runs' not in tables or table not in tables:
-            raise ServiceException(message=f'采集库缺少 {table} 运行快照表，请先完成题库同步')
-        run = connection.execute(
-            'SELECT id, provider, status, scope_json, started_at, finished_at FROM sync_runs WHERE id = ?',
-            (int(run_id),),
-        ).fetchone()
-        if run is None:
-            raise ServiceException(message=f'collector 运行 {run_id} 不存在，没有可用快照')
-        if str(run['provider'] or '') != PROVIDER:
-            raise ServiceException(message=f'collector 运行 {run_id} 来源不受支持')
-        if str(run['status'] or '') not in {'success', 'completed'} or not run['finished_at']:
-            raise ServiceException(message=f'collector 运行 {run_id} 未成功完成，没有可用快照')
-        try:
-            scope = json.loads(str(run['scope_json'] or '{}'))
-        except (TypeError, json.JSONDecodeError):
-            raise ServiceException(message=f'collector 运行 {run_id} 缺少有效教材范围') from None
-        if not isinstance(scope, Mapping):
-            raise ServiceException(message=f'collector 运行 {run_id} 缺少有效教材范围')
-        scope_textbook_id = scope.get('textbookId') or scope.get('textbookExternalId')
-        if scope_textbook_id is None or str(scope_textbook_id) != str(textbook_external_id):
-            raise ServiceException(message=f'collector 运行 {run_id} 与教材 {textbook_external_id} 不匹配')
-        predicates = ['run_id = ?', 'provider = ?']
-        params: list[Any] = [int(run_id), PROVIDER]
-        if textbook_external_id:
-            predicates.append('textbook_external_id = ?')
-            params.append(str(textbook_external_id))
-        rows = [
-            dict(item)
-            for item in connection.execute(
-                f'SELECT * FROM "{table}" WHERE {" AND ".join(predicates)} ORDER BY rowid', tuple(params)
-            ).fetchall()
-        ]
-        if len(rows) > MAX_SNAPSHOT_ROWS:
-            raise ServiceException(message=f'运行快照超过安全上限 {MAX_SNAPSHOT_ROWS}')
-        if kind == 'question' and 'sync_run_question_catalogs' in tables:
-            links = [
-                dict(item)
-                for item in connection.execute(
-                    'SELECT * FROM sync_run_question_catalogs WHERE run_id = ? AND provider = ?',
-                    (int(run_id), PROVIDER),
-                ).fetchall()
-            ]
-            by_question: dict[tuple[str, str], list[dict[str, Any]]] = {}
-            for link in links:
-                if textbook_external_id and str(link.get('textbook_external_id') or '') != str(textbook_external_id):
-                    continue
-                key = (str(link.get('textbook_external_id') or ''), str(link.get('question_external_id') or ''))
-                by_question.setdefault(key, []).append(link)
-            for row in rows:
-                key = (str(row.get('textbook_external_id') or ''), str(row.get('question_external_id') or ''))
-                row['catalogs'] = by_question.get(key, [])
-        return {'run': dict(run), 'rows': rows, 'available': True, 'message': 'collector 运行快照可用'}
-    except sqlite3.Error as exc:
-        raise ServiceException(message=f'采集库读取失败：{exc}') from exc
-    finally:
-        if connection is not None:
-            connection.close()
-
-
 async def _maybe_await(value: Any) -> Any:
     if hasattr(value, '__await__'):
         return await value
     return value
 
 
-async def _collector_rows(
+def _collector_envelope(raw: Mapping[str, Any]) -> dict[str, Any]:
+    """Unwrap the documented ``data``/``summary`` response envelopes."""
+
+    payload: Mapping[str, Any] = raw
+    for wrapper in ('data', 'summary'):
+        candidate = payload.get(wrapper)
+        if isinstance(candidate, Mapping):
+            payload = {
+                **candidate,
+                **{key: value for key, value in payload.items() if key not in {'data', 'summary'}},
+            }
+            break
+    return dict(payload)
+
+
+def _strict_nonnegative(value: Any, label: str) -> int:
+    if isinstance(value, bool):
+        raise ServiceException(message=f'collector {label} 无效')
+    if isinstance(value, int):
+        result = value
+    elif isinstance(value, str) and re.fullmatch(r'\d+', value.strip()):
+        result = int(value.strip())
+    elif isinstance(value, float) and value.is_integer() and value >= 0:
+        result = int(value)
+    else:
+        raise ServiceException(message=f'collector {label} 无效')
+    if result < 0 or result > MAX_SNAPSHOT_ROWS:
+        raise ServiceException(message=f'collector {label} 超出安全上限')
+    return result
+
+
+def _collector_scope_ids(value: Any) -> set[str]:
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return set()
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            return {text}
+        return _collector_scope_ids(parsed)
+    if isinstance(value, Mapping):
+        result: set[str] = set()
+        for name in (
+            'textbookExternalId',
+            'textbook_external_id',
+            'externalTextbookId',
+            'external_textbook_id',
+        ):
+            item = value.get(name)
+            if item not in (None, ''):
+                result.add(str(item).strip())
+        for name in (
+            'textbookExternalIds',
+            'textbook_external_ids',
+            'textbookIds',
+            'textbook_ids',
+        ):
+            items = value.get(name)
+            if isinstance(items, list):
+                result.update(str(item).strip() for item in items if item not in (None, ''))
+        for name in ('run', 'scope', 'scopeItems', 'scope_items', 'textbooks', 'selectedTextbooks'):
+            nested = value.get(name)
+            if isinstance(nested, (Mapping, list, str)):
+                result.update(_collector_scope_ids(nested))
+        return {item for item in result if item}
+    if isinstance(value, list):
+        result: set[str] = set()
+        for item in value:
+            result.update(_collector_scope_ids(item))
+        return result
+    return set()
+
+
+def _collector_run_id(run: Mapping[str, Any]) -> Any:
+    return next((run[name] for name in _COLLECTOR_RUN_ID_ALIASES if run.get(name) is not None), None)
+
+
+def _validate_collector_run(
+    run: Mapping[str, Any],
+    run_id: int,
+    textbook_external_id: str | None,
+    *,
+    reference: Mapping[str, Any] | None = None,
+) -> None:
+    remote_id = _collector_run_id(run)
+    if remote_id is None or str(remote_id) != str(run_id):
+        raise ServiceException(message='collector 运行快照 ID 不一致')
+    provider = run.get('provider', run.get('sourceProvider'))
+    if str(provider or '') != PROVIDER:
+        raise ServiceException(message='collector 运行快照来源不受支持')
+    status = str(run.get('status') or '').strip().lower()
+    if status not in {'success', 'completed'}:
+        raise ServiceException(message='collector 运行快照未成功完成')
+    if textbook_external_id is not None:
+        scope_ids = _collector_scope_ids(run)
+        if str(textbook_external_id) not in scope_ids:
+            raise ServiceException(message='collector 运行快照教材范围不一致')
+    for source in (run,):
+        markers = [
+            source[name]
+            for name in ('snapshotComplete', 'snapshot_complete', 'complete', 'isComplete')
+            if name in source and source[name] is not None
+        ]
+        if markers and not all(_as_flag(value) for value in markers):
+            raise ServiceException(message='collector 运行快照未完成')
+    if reference is not None:
+        for aliases in (
+            ('provider', 'sourceProvider'),
+            ('status',),
+            ('snapshotLockedAt', 'snapshot_locked_at', 'locked'),
+            ('finishedAt', 'finished_at'),
+            ('textbookExternalId', 'textbook_external_id'),
+        ):
+            left = next((reference[name] for name in aliases if name in reference), None)
+            right = next((run[name] for name in aliases if name in run), None)
+            if left is not None and right is not None and str(left) != str(right):
+                raise ServiceException(message='collector 分页快照运行信息不一致')
+
+
+def _validate_collector_summary(
+    raw: Any,
+    run_id: int,
+    textbook_external_id: str | None,
+    kind: str,
+) -> tuple[dict[str, Any], dict[str, Any], int]:
+    if not isinstance(raw, Mapping):
+        raise ServiceException(message='collector API 快照摘要结构不正确')
+    payload = _collector_envelope(raw)
+    if payload.get('available') is not True or payload.get('immutable') is not True:
+        raise ServiceException(message='collector 快照摘要未锁定或不可用')
+    run = payload.get('run')
+    if not isinstance(run, Mapping):
+        raise ServiceException(message='collector API 快照摘要缺少运行信息')
+    _validate_collector_run(run, run_id, textbook_external_id)
+    payload_markers = [
+        payload[name]
+        for name in ('snapshotComplete', 'snapshot_complete', 'complete', 'isComplete')
+        if name in payload and payload[name] is not None
+    ]
+    if not payload_markers or not all(_as_flag(value) for value in payload_markers):
+        raise ServiceException(message='collector 快照摘要未完成')
+    scope_ids = _collector_scope_ids(payload)
+    if textbook_external_id is not None and str(textbook_external_id) not in scope_ids:
+        raise ServiceException(message='collector 快照摘要教材范围不一致')
+    counts = payload.get('counts')
+    if not isinstance(counts, Mapping):
+        raise ServiceException(message='collector 快照摘要缺少 counts')
+    aliases = _COLLECTOR_COUNT_ALIASES[kind]
+    values = [_strict_nonnegative(counts[name], f'{kind} 快照计数') for name in aliases if name in counts]
+    if not values or len(set(values)) != 1:
+        raise ServiceException(message=f'collector 快照 {kind} 计数结构不一致')
+    return payload, dict(run), values[0]
+
+
+async def _collector_call(method: Any, *args: Any, **kwargs: Any) -> Any:
+    result = await asyncio.to_thread(method, *args, **kwargs)
+    return await _maybe_await(result)
+
+
+async def _collector_summary(
+    client: CollectorClient,
+    run_id: int,
+    textbook_external_id: str | None,
+    kind: str,
+) -> tuple[dict[str, Any], dict[str, Any], int]:
+    method = getattr(client, 'run_snapshot_summary', None) or getattr(client, 'snapshot_summary', None)
+    if not callable(method):
+        raise ServiceException(message='collector 客户端不支持快照摘要接口')
+    try:
+        raw = await _collector_call(method, run_id, textbook_external_id=textbook_external_id)
+    except TypeError:
+        # Small integration doubles may omit the optional scope keyword. The
+        # response is still subjected to the same strict scope validation.
+        raw = await _collector_call(method, run_id)
+    return _validate_collector_summary(raw, run_id, textbook_external_id, kind)
+
+
+def _collector_page_rows(
+    payload: Any,
+    run_id: int,
+    textbook_external_id: str | None,
+    kind: str,
+    reference_run: Mapping[str, Any],
+    expected_total: int,
+    requested_page: int,
+    requested_page_size: int,
+    *,
+    filtered: bool,
+) -> tuple[dict[str, Any], list[dict[str, Any]], int]:
+    if not isinstance(payload, Mapping):
+        raise ServiceException(message='collector API 分页快照结构不正确')
+    if payload.get('available') is not True:
+        raise ServiceException(message='collector 分页快照不可用')
+    run = payload.get('run')
+    if not isinstance(run, Mapping):
+        raise ServiceException(message='collector API 分页快照缺少运行信息')
+    _validate_collector_run(run, run_id, textbook_external_id, reference=reference_run)
+    page = _strict_nonnegative(payload.get('page'), '分页 page')
+    if page != requested_page or page < 1:
+        raise ServiceException(message='collector 分页快照 page 不一致')
+    page_size_value = payload.get('pageSize', payload.get('page_size', requested_page_size))
+    page_size = _strict_nonnegative(page_size_value, '分页 pageSize')
+    if page_size <= 0 or page_size > MAX_SNAPSHOT_ROWS or page_size != requested_page_size:
+        raise ServiceException(message='collector 分页快照 pageSize 不一致')
+    total = _strict_nonnegative(payload.get('total'), '分页 total')
+    if total > expected_total or (not filtered and total != expected_total):
+        raise ServiceException(message='collector 分页快照计数与摘要不一致')
+    rows = payload.get('rows')
+    if rows is None:
+        rows = payload.get('items')
+    if rows is None:
+        rows = payload.get('catalogs' if kind == 'catalog' else 'questions')
+    if not isinstance(rows, list) or any(not isinstance(item, Mapping) for item in rows):
+        raise ServiceException(message=f'collector API 分页 {kind} 行结构不正确')
+    if len(rows) > page_size or len(rows) > MAX_SNAPSHOT_ROWS:
+        raise ServiceException(message='collector 分页快照页大小超过安全上限')
+    return dict(run), [dict(item) for item in rows], total
+
+
+async def _collector_rows(  # noqa: PLR0912, PLR0915
     run_id: int,
     kind: str,
     textbook_external_id: str | None,
@@ -731,19 +862,37 @@ async def _collector_rows(
     question_type: str | None = None,
     keyword: str | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    if not remote_collector_enabled():
-        payload = await asyncio.to_thread(_read_local_run_sync, _source_path(), run_id, kind, textbook_external_id)
-        raw_rows = payload.get('rows') if isinstance(payload, Mapping) else []
-        return dict(payload.get('run') or {}) if isinstance(payload, Mapping) else {}, list(raw_rows or [])
+    """Read only the requested comparison collection over the HTTP API.
 
+    Summary validation establishes the immutable run/scope and the maximum
+    collection count. The legacy collection endpoints then page only catalogs
+    or questions, avoiding a five-collection snapshot (and its assets) for a
+    browser comparison request.
+    """
+
+    if kind not in {'catalog', 'question'}:
+        raise ServiceException(message='不支持的题库快照类型')
     client = CollectorClient()
+    kind_name = 'catalog' if kind == 'catalog' else 'question'
+    _summary, summary_run, expected_total = await _collector_summary(
+        client,
+        run_id,
+        textbook_external_id,
+        kind_name,
+    )
     method_name = 'run_catalogs' if kind == 'catalog' else 'run_questions'
-    method = getattr(client, method_name)
-    first: Any
+    method = getattr(client, method_name, None)
+    if not callable(method):
+        alias = 'catalogs' if kind == 'catalog' else 'questions'
+        method = getattr(client, alias, None)
+    if not callable(method):
+        raise ServiceException(message='collector 客户端不支持题库分页接口')
+    page_size = 500 if kind == 'catalog' else 200
+    filtered = bool(catalog_external_id or question_type or keyword)
     kwargs: dict[str, Any] = {
         'textbook_external_id': textbook_external_id,
         'page': 1,
-        'page_size': 500 if kind == 'catalog' else 200,
+        'page_size': page_size,
     }
     if kind == 'question':
         kwargs.update(
@@ -753,80 +902,132 @@ async def _collector_rows(
                 'keyword': keyword,
             }
         )
-    try:
-        first = await asyncio.to_thread(method, run_id, **kwargs)
-    except TypeError:
-        # Integration doubles and older clients may expose only the required
-        # run ID.  Retain compatibility without weakening URL validation.
-        first = await asyncio.to_thread(method, run_id, textbook_external_id=textbook_external_id)
-    first = await _maybe_await(first)
-    if not isinstance(first, Mapping):
-        raise ServiceException(message='collector API 运行快照结构不正确')
-    available = first.get('available', True)
-    if available is False:
-        raise ServiceException(message=str(first.get('message') or 'collector 没有可用的运行快照'))
-    run = first.get('run') or first.get('scope') or {}
-    rows = list(first.get('rows') or first.get('items') or first.get('catalogs') or first.get('questions') or [])
-    raw_total = first.get('total')
-    try:
-        total = int(raw_total) if raw_total is not None else None
-    except (TypeError, ValueError):
-        total = None
-    page = int(first.get('page') or 1)
-    page_size = int(first.get('pageSize') or first.get('page_size') or len(rows) or 0)
-    # Fetch subsequent pages only when the collector explicitly advertises a
-    # page boundary.  A malformed page size is treated as one bounded page.
-    while isinstance(total, int) and total > len(rows) and page_size > 0 and len(rows) < MAX_SNAPSHOT_ROWS:
-        page += 1
+    rows: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    page_number = 1
+    total: int | None = None
+    while True:
+        call_kwargs = {**kwargs, 'page': page_number}
         try:
-            payload = await asyncio.to_thread(method, run_id, **{**kwargs, 'page': page})
+            payload = await _collector_call(method, run_id, **call_kwargs)
         except TypeError:
-            break
-        payload = await _maybe_await(payload)
-        if not isinstance(payload, Mapping):
-            break
-        batch = payload.get('rows') or payload.get('items') or payload.get('catalogs') or payload.get('questions') or []
-        if not isinstance(batch, list) or not batch:
-            break
-        rows.extend(batch)
-    if len(rows) > MAX_SNAPSHOT_ROWS:
-        raise ServiceException(message=f'运行快照超过安全上限 {MAX_SNAPSHOT_ROWS}')
-    return dict(run) if isinstance(run, Mapping) else {}, [dict(item) for item in rows if isinstance(item, Mapping)]
+            # Keep simple test/integration doubles compatible while the real
+            # client always uses the fully filtered endpoint contract.
+            try:
+                payload = await _collector_call(
+                    method,
+                    run_id,
+                    textbook_external_id=textbook_external_id,
+                    page=page_number,
+                    page_size=page_size,
+                )
+            except TypeError:
+                fallback = {'textbook_external_id': textbook_external_id}
+                payload = await _collector_call(method, run_id, **fallback)
+        page_run, batch, page_total = _collector_page_rows(
+            payload,
+            run_id,
+            textbook_external_id,
+            kind_name,
+            summary_run,
+            expected_total,
+            page_number,
+            page_size,
+            filtered=filtered,
+        )
+        if total is None:
+            total = page_total
+        elif total != page_total:
+            raise ServiceException(message='collector 分页快照 total 在页间不一致')
+        for item in batch:
+            row_provider = str(_pick(item, 'sourceProvider', 'source_provider', 'provider', default='') or '').strip()
+            if row_provider != PROVIDER:
+                raise ServiceException(message=f'collector 分页 {kind_name} 行来源不受支持')
+            row_textbook = _pick(
+                item,
+                'externalTextbookId',
+                'external_textbook_id',
+                'textbookExternalId',
+                'textbook_external_id',
+            )
+            if textbook_external_id is not None and str(row_textbook or '').strip() != str(textbook_external_id):
+                raise ServiceException(message=f'collector 分页 {kind_name} 行教材范围不一致')
+            external_id = _pick(
+                item,
+                'externalCatalogId' if kind == 'catalog' else 'externalQuestionId',
+                'catalog_external_id' if kind == 'catalog' else 'question_external_id',
+                'externalId',
+                'external_id',
+            )
+            if not _safe_external_id(external_id):
+                raise ServiceException(message=f'collector 分页 {kind_name} 行缺少安全外部 ID')
+            identity = str(external_id)
+            if identity in seen_ids:
+                raise ServiceException(message=f'collector 分页 {kind_name} 包含重复行')
+            seen_ids.add(identity)
+            if kind == 'question' and catalog_external_id:
+                # The specialized endpoint filters by catalog but does not
+                # repeat relation rows; preserve the selected catalog for the
+                # existing comparison projection/filter.
+                item['catalogs'] = [{'externalCatalogId': str(catalog_external_id)}]
+            rows.append(item)
+        if len(rows) > total:
+            raise ServiceException(message='collector 分页快照累计行数超过 total')
+        has_next = payload.get('hasNext') if isinstance(payload, Mapping) else None
+        if len(rows) == total:
+            if has_next is True:
+                raise ServiceException(message='collector 分页快照 hasNext 与 total 不一致')
+            return page_run, rows
+        if not batch or has_next is False:
+            raise ServiceException(message='collector 分页快照页未前进或提前结束')
+        page_number += 1
+        if page_number > MAX_SNAPSHOT_ROWS:
+            raise ServiceException(message='collector 分页快照页数超过安全上限')
 
 
 async def _collector_question_detail(run_id: int, external_id: str, textbook_external_id: str | None) -> dict[str, Any]:
-    if not remote_collector_enabled():
-        payload = await asyncio.to_thread(
-            _read_local_run_sync, _source_path(), run_id, 'question', textbook_external_id
-        )
-        rows = payload.get('rows') if isinstance(payload, Mapping) else []
-        matches = [
-            row
-            for row in rows
-            if str(_pick(row, 'question_external_id', 'externalQuestionId', 'external_id')) == str(external_id)
-        ]
-        if not matches:
-            raise ServiceException(message=f'运行快照中不存在题目 {external_id}')
-        return dict(matches[0])
+    """Validate the run summary, then read one question detail over HTTP."""
+
     client = CollectorClient()
-    method = client.run_question_detail
+    _summary, summary_run, _expected_total = await _collector_summary(
+        client,
+        run_id,
+        textbook_external_id,
+        'question',
+    )
+    method = getattr(client, 'run_question_detail', None) or getattr(client, 'question_detail', None)
+    if not callable(method):
+        raise ServiceException(message='collector 客户端不支持题目详情接口')
     try:
-        payload = await asyncio.to_thread(
+        payload = await _collector_call(
             method,
             run_id,
             external_id,
             textbook_external_id=textbook_external_id,
         )
     except TypeError:
-        payload = await asyncio.to_thread(method, run_id, external_id)
-    payload = await _maybe_await(payload)
+        payload = await _collector_call(method, run_id, external_id)
     if not isinstance(payload, Mapping):
         raise ServiceException(message='collector API 题目详情结构不正确')
-    if payload.get('available') is False:
+    if payload.get('available') is not True:
         raise ServiceException(message=str(payload.get('message') or 'collector 没有可用的题目详情快照'))
-    item = payload.get('item') or payload.get('question') or payload.get('data') or payload
+    detail_run = payload.get('run')
+    if not isinstance(detail_run, Mapping):
+        raise ServiceException(message='collector API 题目详情缺少运行信息')
+    _validate_collector_run(detail_run, run_id, textbook_external_id, reference=summary_run)
+    item = payload.get('item') or payload.get('question') or payload.get('data')
     if not isinstance(item, Mapping):
-        raise ServiceException(message='collector API 题目详情结构不正确')
+        raise ServiceException(message='collector API 题目详情缺少题目')
+    item_id = _pick(item, 'externalQuestionId', 'questionExternalId', 'external_question_id', 'externalId', 'external_id')
+    if not _safe_external_id(item_id) or str(item_id) != str(external_id):
+        raise ServiceException(message='collector API 题目详情外部 ID 不一致')
+    provider = str(_pick(item, 'sourceProvider', 'source_provider', 'provider', default='') or '')
+    if provider != PROVIDER:
+        raise ServiceException(message='collector API 题目详情来源不受支持')
+    if textbook_external_id is not None and str(textbook_external_id) not in (
+        _collector_scope_ids(payload) | _collector_scope_ids(detail_run) | _collector_scope_ids(item)
+    ):
+        raise ServiceException(message='collector API 题目详情教材范围不一致')
     return dict(item)
 
 

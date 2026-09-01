@@ -248,8 +248,7 @@ def test_real_collector_schema_full_api_and_python_normalizer_preserve_answer_fi
     assert full['questions'][0]['analysisHtml'] == '<p>因为 A</p>'
     assert full['questions'][0]['answerStatus'] == 'public_captured'
 
-    local = apply_module._read_local_snapshot_sync(sealed_collector_db, RUN_ID, TEXTBOOK_ID)
-    normalized = apply_module._normalise_snapshot(local, 9001, TEXTBOOK_ID)
+    normalized = apply_module._normalise_snapshot(full, 9001, TEXTBOOK_ID)
     assert normalized['counts'] == {
         'catalogs': 1,
         'questions': 1,

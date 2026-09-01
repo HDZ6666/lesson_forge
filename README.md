@@ -27,9 +27,21 @@
 
 ## 同步工具与管理端入口
 
-组卷网采集器是 `collector/` 下的独立 Node 服务，不作为 Python 模块导入，也不直接写 MySQL。`service` 通过受控 HTTP API 启动和停止采集任务，并读取有界的候选快照；两个工程不再依赖共享脚本或 SQLite 文件。本地开发仍保留未配置 `BANK_COLLECTOR_URL` 时的同机兼容模式。
+组卷网采集器是 `collector/` 下的独立 Node 服务，不作为 Python 模块导入，也不直接写 MySQL。`service` 通过受控 HTTP API 启动和停止采集任务，并读取有界的候选快照；两个工程不依赖共享脚本或 SQLite 文件，`BANK_COLLECTOR_URL` 是必需配置。本地开发也统一使用服务形式：先启动 collector（默认监听 loopback 且不启用 token），再让 service 通过 HTTP 连接。
 
-题库插件的“同步中心”分两阶段：先刷新版本与教材，再由用户选择教材后提交内容同步。采集结果只进入 `collector/data/zujuan.sqlite3` 候选库，须审核并经发布批次处理后才会进入正式题库。
+```bash
+cd collector && npm start
+```
+
+然后在 service 的环境配置中设置：
+
+```bash
+BANK_COLLECTOR_URL=http://127.0.0.1:9110
+```
+
+生产部署必须配置 `BANK_COLLECTOR_URL` 和 `BANK_COLLECTOR_TOKEN`；collector 对外绑定非本机地址时也必须配置 `COLLECTOR_API_TOKEN`。
+
+题库插件的“同步中心”分两阶段：先刷新版本与教材，再由用户选择教材后提交内容同步。采集结果只进入 `collector/data/zujuan.sqlite3` 候选库，须审核；发布时 service 通过 HTTP 分页读取不可变快照，并经 SHA-256 校验下载素材到自身存储后，才会进入正式题库。
 
 管理端链路：
 

@@ -10,11 +10,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import os
-import sqlite3
 from collections.abc import Mapping
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import select
@@ -30,15 +27,12 @@ from plugins.bank.entity.do.bank_do import (
     QbTextbookApplyState,
     QbTextbookVersion,
 )
-from plugins.bank.service.collector_client import CollectorClient, remote_collector_enabled
-from plugins.bank.service.collector_sqlite import connect_collector_sqlite
+from plugins.bank.service.collector_client import CollectorClient
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[4]
-DEFAULT_COLLECTOR_DB = PROJECT_ROOT / 'collector' / 'data' / 'zujuan.sqlite3'
 PROVIDER = 'zujuan'
 MAX_METADATA_VERSIONS = 1000
 MAX_METADATA_TEXTBOOKS = 5000
@@ -54,14 +48,6 @@ def _pick(value: Mapping[str, Any] | object, *names: str, default: Any = None) -
         elif hasattr(value, name):
             return getattr(value, name)
     return default
-
-
-def _source_path() -> Path:
-    configured = os.environ.get('BANK_COLLECTOR_DB', '').strip()
-    if not configured:
-        return DEFAULT_COLLECTOR_DB
-    path = Path(configured).expanduser()
-    return path if path.is_absolute() else PROJECT_ROOT / path
 
 
 def _safe_external_id(value: Any) -> bool:
@@ -127,143 +113,42 @@ def _is_missing_apply_state_table(exc: SQLAlchemyError) -> bool:
     )
 
 
-def _table_columns(connection: sqlite3.Connection, table: str) -> set[str]:
-    return {str(row['name']) for row in connection.execute(f'PRAGMA table_info("{table}")').fetchall()}
-
-
-def _read_local_snapshot_sync(path: Path, metadata_run_id: int) -> dict[str, Any]:  # noqa: PLR0912, PLR0915
-    """Read only the immutable collector metadata-run tables.
-
-    Unlike the comparison endpoint, applying a task never falls back to the
-    mutable ``source_*`` tables or to a time window.  A run is eligible only
-    when both immutable tables exist, counts match exactly, and the run is
-    sealed by ``snapshot_locked_at`` (or a compatible ``locked`` marker).
-    """
-
-    if not path.is_file():
-        raise ServiceException(message=f'采集库不存在：{path}，没有可应用的教材快照')
-    connection: sqlite3.Connection | None = None
-    try:
-        connection = connect_collector_sqlite(path)
-        connection.row_factory = sqlite3.Row
-        tables = {
-            str(row['name'])
-            for row in connection.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN "
-                "('source_metadata_runs', 'source_metadata_run_versions', 'source_metadata_run_textbooks')"
-            ).fetchall()
-        }
-        required_tables = {
-            'source_metadata_runs',
-            'source_metadata_run_versions',
-            'source_metadata_run_textbooks',
-        }
-        missing_tables = sorted(required_tables - tables)
-        if missing_tables:
-            raise ServiceException(message=f'采集库缺少不可变元数据快照表：{", ".join(missing_tables)}')
-        run_columns = _table_columns(connection, 'source_metadata_runs')
-        selected = ['id', 'provider', 'started_at', 'finished_at', 'status', 'version_count', 'textbook_count']
-        lock_column = 'snapshot_locked_at' if 'snapshot_locked_at' in run_columns else ('locked' if 'locked' in run_columns else None)
-        if lock_column:
-            selected.append(lock_column)
-        run = connection.execute(
-            f'SELECT {", ".join(selected)} FROM source_metadata_runs WHERE id = ?',
-            (int(metadata_run_id),),
-        ).fetchone()
-        if run is None:
-            raise ServiceException(message=f'元数据运行 {metadata_run_id} 不存在，不能应用教材快照')
-        if str(run['provider'] or '').strip() != PROVIDER:
-            raise ServiceException(message=f'元数据运行 {metadata_run_id} 来源不受支持')
-        if str(run['status'] or '').strip().lower() not in {'success', 'completed'} or not run['finished_at']:
-            raise ServiceException(message=f'元数据运行 {metadata_run_id} 未成功完成，不能应用教材快照')
-        if lock_column and run[lock_column] in (None, '', 0, '0', False):
-            raise ServiceException(message=f'元数据运行 {metadata_run_id} 尚未锁定，不能应用教材快照')
-        if not lock_column:
-            raise ServiceException(message='采集库缺少元数据快照锁定标记，不能应用教材快照')
-
-        version_columns = _table_columns(connection, 'source_metadata_run_versions')
-        textbook_columns = _table_columns(connection, 'source_metadata_run_textbooks')
-        version_required = {'run_id', 'provider', 'external_version_id', 'version_name', 'source_url', 'is_new', 'sort_order', 'status', 'captured_at'}
-        textbook_required = {'run_id', 'provider', 'external_textbook_id', 'version_external_id', 'textbook_name', 'grade', 'volume', 'source_url', 'sort_order', 'status', 'captured_at'}
-        missing_version = sorted(version_required - version_columns)
-        missing_textbook = sorted(textbook_required - textbook_columns)
-        if missing_version or missing_textbook:
-            details = []
-            if missing_version:
-                details.append(f'版本缺少字段：{", ".join(missing_version)}')
-            if missing_textbook:
-                details.append(f'教材缺少字段：{", ".join(missing_textbook)}')
-            raise ServiceException(message='；'.join(details))
-        versions = [
-            dict(row)
-            for row in connection.execute(
-                'SELECT provider, external_version_id, version_name, source_url, is_new, sort_order, status, captured_at '
-                'FROM source_metadata_run_versions WHERE run_id = ? ORDER BY sort_order ASC, external_version_id ASC',
-                (int(metadata_run_id),),
-            ).fetchall()
-        ]
-        textbooks = [
-            dict(row)
-            for row in connection.execute(
-                'SELECT provider, external_textbook_id, version_external_id, textbook_name, grade, volume, source_url, sort_order, status, captured_at '
-                'FROM source_metadata_run_textbooks WHERE run_id = ? ORDER BY sort_order ASC, external_textbook_id ASC',
-                (int(metadata_run_id),),
-            ).fetchall()
-        ]
-        expected_versions = int(run['version_count'] or 0)
-        expected_textbooks = int(run['textbook_count'] or 0)
-        if expected_versions <= 0 or expected_textbooks <= 0:
-            raise ServiceException(message=f'元数据运行 {metadata_run_id} 的版本或教材计数为空，不能应用')
-        if len(versions) != expected_versions or len(textbooks) != expected_textbooks:
-            raise ServiceException(
-                message=(
-                    f'元数据运行 {metadata_run_id} 快照不完整：版本 {len(versions)}/{expected_versions}，'
-                    f'教材 {len(textbooks)}/{expected_textbooks}'
-                )
-            )
-        return {'run': dict(run), 'versions': versions, 'textbooks': textbooks, 'immutable': True}
-    except sqlite3.Error as exc:
-        raise ServiceException(message=f'采集库读取失败：{exc}') from exc
-    finally:
-        if connection is not None:
-            connection.close()
-
-
 async def _read_snapshot(metadata_run_id: int) -> dict[str, Any]:
-    if remote_collector_enabled():
-        payload = await asyncio.to_thread(CollectorClient().metadata_snapshot, metadata_run_id)
-        if not isinstance(payload, Mapping) or payload.get('available') is False:
-            raise ServiceException(message=str((payload or {}).get('message') or 'collector 没有可用的教材快照'))
-        if payload.get('immutable') is not True:
-            raise ServiceException(message='collector 元数据快照未锁定，不能应用到正式表')
-        versions = payload.get('versions')
-        textbooks = payload.get('textbooks')
-        run = payload.get('run')
-        if not isinstance(versions, list) or not isinstance(textbooks, list) or not isinstance(run, Mapping):
-            raise ServiceException(message='collector 元数据快照结构不完整')
-        if _snapshot_lock_value(run) in (None, '', 0, '0', False):
-            raise ServiceException(message='collector 元数据快照缺少锁定标记，不能应用到正式表')
-        # The remote API is the same trust boundary as the local SQLite
-        # reader: reject a response whose rows are only a partial projection
-        # of the completed metadata run.  Support both API naming styles.
-        expected_versions = _pick(run, 'version_count', 'versionCount')
-        expected_textbooks = _pick(run, 'textbook_count', 'textbookCount')
-        try:
-            expected_versions = int(expected_versions)
-            expected_textbooks = int(expected_textbooks)
-        except (TypeError, ValueError) as exc:
-            raise ServiceException(message='collector 元数据快照缺少有效的版本或教材计数') from exc
-        if expected_versions <= 0 or expected_textbooks <= 0:
-            raise ServiceException(message='collector 元数据快照的版本或教材计数为空')
-        if len(versions) != expected_versions or len(textbooks) != expected_textbooks:
-            raise ServiceException(
-                message=(
-                    f'collector 元数据快照不完整：版本 {len(versions)}/{expected_versions}，'
-                    f'教材 {len(textbooks)}/{expected_textbooks}'
-                )
+    payload = await asyncio.to_thread(CollectorClient().metadata_snapshot, metadata_run_id)
+    if not isinstance(payload, Mapping) or payload.get('available') is not True:
+        raise ServiceException(message=str((payload or {}).get('message') or 'collector 没有可用的教材快照'))
+    if payload.get('immutable') is not True:
+        raise ServiceException(message='collector 元数据快照未锁定，不能应用到正式表')
+    versions = payload.get('versions')
+    textbooks = payload.get('textbooks')
+    run = payload.get('run')
+    if not isinstance(versions, list) or not isinstance(textbooks, list) or not isinstance(run, Mapping):
+        raise ServiceException(message='collector 元数据快照结构不完整')
+    remote_run_id = _pick(run, 'id', 'runId', 'collectorRunId')
+    try:
+        if isinstance(remote_run_id, bool) or int(remote_run_id) != int(metadata_run_id):
+            raise ServiceException(message='collector 元数据运行 ID 不一致')
+    except (TypeError, ValueError) as exc:
+        raise ServiceException(message='collector 元数据运行 ID 无效') from exc
+    if _snapshot_lock_value(run) in (None, '', 0, '0', False):
+        raise ServiceException(message='collector 元数据快照缺少锁定标记，不能应用到正式表')
+    expected_versions = _pick(run, 'version_count', 'versionCount')
+    expected_textbooks = _pick(run, 'textbook_count', 'textbookCount')
+    try:
+        expected_versions = int(expected_versions)
+        expected_textbooks = int(expected_textbooks)
+    except (TypeError, ValueError) as exc:
+        raise ServiceException(message='collector 元数据快照缺少有效的版本或教材计数') from exc
+    if expected_versions <= 0 or expected_textbooks <= 0:
+        raise ServiceException(message='collector 元数据快照的版本或教材计数为空')
+    if len(versions) != expected_versions or len(textbooks) != expected_textbooks:
+        raise ServiceException(
+            message=(
+                f'collector 元数据快照不完整：版本 {len(versions)}/{expected_versions}，'
+                f'教材 {len(textbooks)}/{expected_textbooks}'
             )
-        return {'run': dict(run), 'versions': versions, 'textbooks': textbooks, 'immutable': True}
-    return await asyncio.to_thread(_read_local_snapshot_sync, _source_path(), metadata_run_id)
+        )
+    return {'run': dict(run), 'versions': versions, 'textbooks': textbooks, 'immutable': True}
 
 
 def _normalise_snapshot(raw: Mapping[str, Any], task_id: int, metadata_run_id: int) -> dict[str, Any]:

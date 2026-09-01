@@ -2,6 +2,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const { createHash } = require('node:crypto');
 const { DatabaseSync } = require('node:sqlite');
 
 const { buildCatalogProgressTree } = require('../zujuan_sync.cjs');
@@ -19,6 +20,76 @@ const MAX_RUN_TEXT_LENGTH = 120000;
 const MAX_RUN_RAW_JSON_LENGTH = 160000;
 const MAX_RUN_ERRORS = 50;
 const MAX_RUN_SNAPSHOT_ROWS = 20000;
+// The page API deliberately uses a lower target than the HTTP hard limit.
+// This leaves room for the response envelope and keeps a page safe even
+// when a caller and the HTTP layer use slightly different limits.  Rows are
+// fetched in fixed small batches, so a large assets table never becomes a
+// giant in-memory array even when a caller requests the maximum page size.
+const MAX_SNAPSHOT_PAGE_BYTES = 6 * 1024 * 1024;
+const MAX_SNAPSHOT_PAGE_SIZE = 5000;
+const MAX_SNAPSHOT_FETCH_BATCH_SIZE = 64;
+const MAX_ASSET_BYTES = 64 * 1024 * 1024;
+const ASSET_SHA256 = /^[a-f0-9]{64}$/i;
+const STRICT_SNAPSHOT_RUN_COLUMNS = Object.freeze([
+  'finished_at', 'scope_json', 'error_count', 'snapshot_locked_at',
+  'snapshot_complete', 'catalog_item_count', 'question_item_count',
+  'question_catalog_count', 'question_tag_count', 'question_asset_count',
+]);
+const SNAPSHOT_COLLECTIONS = Object.freeze({
+  catalogs: {
+    table: 'sync_run_catalog_items',
+    count: 'catalogItemCount',
+    orderBy: `
+      textbook_external_id ASC,
+      COALESCE(sort_order, 2147483647) ASC,
+      COALESCE(node_level, 2147483647) ASC,
+      catalog_external_id ASC
+    `,
+  },
+  questions: {
+    table: 'sync_run_question_items',
+    count: 'questionItemCount',
+    orderBy: `
+      textbook_external_id ASC,
+      question_external_id ASC
+    `,
+  },
+  questionCatalogs: {
+    table: 'sync_run_question_catalogs',
+    count: 'questionCatalogCount',
+    orderBy: `
+      textbook_external_id ASC,
+      question_external_id ASC,
+      COALESCE(catalog_level, 2147483647) ASC,
+      catalog_external_id ASC
+    `,
+  },
+  tags: {
+    table: 'sync_run_question_tags',
+    count: 'questionTagCount',
+    orderBy: `
+      textbook_external_id ASC,
+      question_external_id ASC,
+      dimension ASC,
+      tag_external_id ASC,
+      tag_value ASC,
+      relation_type ASC,
+      evidence_type ASC,
+      query_fingerprint ASC
+    `,
+  },
+  assets: {
+    table: 'sync_run_question_assets',
+    count: 'questionAssetCount',
+    orderBy: `
+      textbook_external_id ASC,
+      question_external_id ASC,
+      asset_key ASC,
+      COALESCE(content_sha256, '') ASC,
+      COALESCE(storage_path, '') ASC
+    `,
+  },
+});
 // Source IDs are used in API paths and SQL predicates. Keep the complete
 // identifier, including numeric-only IDs, within the same 64-character
 // contract instead of letting a numeric alternation bypass the bound.
@@ -76,6 +147,13 @@ function httpError(message, statusCode = 400, code = 'bad_request') {
   return error;
 }
 
+function snapshotLockPresent(value) {
+  if (value == null || value === '' || value === false || value === 0) return false;
+  const text = String(value).trim().toLowerCase();
+  return text !== '' && !['0', 'false', 'null', 'undefined'].includes(text)
+    && !/^0+(?:\.0+)?$/.test(text);
+}
+
 function boundedText(value, name, maxLength, { optional = true } = {}) {
   if (value == null || value === '') {
     if (optional) return null;
@@ -101,6 +179,21 @@ function positiveInt(value, name, fallback, max) {
   const parsed = Number(value);
   if (!Number.isInteger(parsed) || parsed < 1 || parsed > max) {
     throw httpError(`${name} 必须是 1 到 ${max} 之间的整数`);
+  }
+  return parsed;
+}
+
+function nonNegativeInt(value, name, fallback, max) {
+  if (value == null || value === '') return fallback;
+  if (typeof value === 'string' && !/^\d+$/.test(value.trim())) {
+    throw httpError(`${name} 必须是 0 到 ${max} 之间的整数`);
+  }
+  if (typeof value === 'boolean' || (typeof value !== 'string' && typeof value !== 'number')) {
+    throw httpError(`${name} 必须是 0 到 ${max} 之间的整数`);
+  }
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 0 || parsed > max) {
+    throw httpError(`${name} 必须是 0 到 ${max} 之间的整数`);
   }
   return parsed;
 }
@@ -254,7 +347,8 @@ function resolveContentRun(db, runId) {
     assetsDownloaded: Number(row.assets_downloaded || 0),
     errorCount: Number(row.error_count || 0),
     message: boundedString(row.message, 4000),
-    snapshotLockedAt: row.snapshot_locked_at || null,
+    snapshotLockedAt: snapshotLockPresent(row.snapshot_locked_at)
+      ? row.snapshot_locked_at : null,
     snapshotComplete: Number(row.snapshot_complete || 0) === 1,
     catalogItemCount: Number(row.catalog_item_count || 0),
     questionItemCount: Number(row.question_item_count || 0),
@@ -316,6 +410,99 @@ function assertSnapshotTables(db, { all = false } = {}) {
       'snapshot_unavailable',
     );
   }
+}
+
+/**
+ * Check only the immutable run header required by the page/asset APIs.
+ *
+ * The full snapshot-summary endpoint additionally checks persisted counters
+ * and orphan relations.  Those checks are intentionally not repeated for
+ * every page or every asset request: once the run is sealed, the snapshot
+ * tables are protected by SQLite triggers, while the service validates the
+ * complete summary before it starts consuming pages/assets.
+ */
+function assertApplyableSnapshotRun(db, run) {
+  const runColumns = tableColumns(db, 'sync_runs');
+  const missingRunColumns = STRICT_SNAPSHOT_RUN_COLUMNS.filter((column) => !runColumns.has(column));
+  if (missingRunColumns.length) {
+    throw httpError(
+      `collector SQLite sync_runs 字段不完整：${missingRunColumns.join(', ')}`,
+      503,
+      'snapshot_unavailable',
+    );
+  }
+  if (!['success', 'completed'].includes(String(run.status || '').toLowerCase()) || !run.finishedAt) {
+    throw httpError(`内容运行 ${run.id} 未成功完成，暂无可用快照`, 409, 'snapshot_unavailable');
+  }
+  if (!snapshotLockPresent(run.snapshotLockedAt)) {
+    throw httpError(`内容运行 ${run.id} 尚未锁定，暂无可用快照`, 409, 'snapshot_unavailable');
+  }
+  if (run.snapshotComplete !== true) {
+    throw httpError(`内容运行 ${run.id} 的快照不完整，不能应用`, 409, 'snapshot_incomplete');
+  }
+  if (!Number.isSafeInteger(run.errorCount) || run.errorCount < 0) {
+    throw httpError(`内容运行 ${run.id} 的 error_count 无效`, 409, 'snapshot_incomplete');
+  }
+  if (run.errorCount > 0) {
+    throw httpError(`内容运行 ${run.id} 包含采集错误，不能应用`, 409, 'snapshot_incomplete');
+  }
+}
+
+function snapshotScopeIds(db, run) {
+  const scopeIds = new Set(run.textbookExternalIds || []);
+  for (const table of [
+    'sync_run_catalog_items',
+    'sync_run_question_items',
+    'sync_run_question_catalogs',
+    'sync_run_question_tags',
+    'sync_run_question_assets',
+  ]) {
+    for (const row of db.prepare(`
+      SELECT DISTINCT textbook_external_id FROM "${table}"
+      WHERE run_id = ? AND provider = ?
+    `).all(run.id, PROVIDER)) {
+      if (row.textbook_external_id != null) scopeIds.add(String(row.textbook_external_id));
+    }
+  }
+  return scopeIds;
+}
+
+function resolveSnapshotTextbook(db, run, requestedTextbookId) {
+  const declaredScopeIds = new Set(run.textbookExternalIds || []);
+  // The service always supplies the textbook for a multi-scope apply.  In
+  // that common path the run declaration plus one ownership check is enough;
+  // do not rescan five large snapshot tables for every asset request.
+  if (requestedTextbookId) {
+    if (!safeExternalId(requestedTextbookId)) {
+      throw httpError('快照缺少有效教材范围', 409, 'snapshot_incomplete');
+    }
+    assertRunTextbook(db, run, requestedTextbookId);
+    return {
+      textbookExternalId: requestedTextbookId,
+      scopeIds: declaredScopeIds,
+    };
+  }
+
+  // A declared single-textbook run does not need DISTINCT scans either.
+  const scopeIds = declaredScopeIds.size === 1
+    ? declaredScopeIds
+    : snapshotScopeIds(db, run);
+  let textbookExternalId = requestedTextbookId;
+  if (!textbookExternalId) {
+    if (scopeIds.size !== 1) {
+      throw httpError(
+        `内容运行 ${run.id} 包含多个教材范围，必须指定 textbookExternalId`,
+        400,
+        'textbook_scope_required',
+      );
+    }
+    textbookExternalId = [...scopeIds][0];
+  }
+  if (!safeExternalId(textbookExternalId)) {
+    throw httpError('快照缺少有效教材范围', 409, 'snapshot_incomplete');
+  }
+  assertRunTextbook(db, run, textbookExternalId);
+  return { textbookExternalId, scopeIds };
 }
 
 function assertRunTextbook(db, run, textbookExternalId) {
@@ -816,16 +1003,539 @@ function snapshotRowObject(row, table) {
     output.sourceUrl = output.source_url || null;
     output.contentSha256 = output.content_sha256 || null;
     output.storagePath = output.storage_path || null;
-    if (output.storage_path && path.isAbsolute(String(output.storage_path))) {
+    if (output.storage_path && isAbsoluteStoragePath(String(output.storage_path))) {
       const normalized = String(output.storage_path).replace(/\\/g, '/');
       const marker = normalized.lastIndexOf('/assets/');
       output.storagePath = marker >= 0 ? normalized.slice(marker + 1) : null;
       // Keep the canonical snake-case field safe as well; consumers that use
       // the snake form should not accidentally receive a host-specific path.
       output.storage_path = output.storagePath;
+    } else if (output.storage_path && String(output.storage_path).replace(/\\/g, '/').split('/').includes('..')) {
+      // A traversal value is not a host path, but publishing it would invite
+      // consumers to resolve it unsafely.  Keep the row visible while hiding
+      // the unusable storage reference; the byte endpoint performs the
+      // authoritative integrity/path rejection.
+      output.storagePath = null;
+      output.storage_path = null;
     }
   }
   return output;
+}
+
+function snapshotPageCountObject(counts) {
+  const output = {
+    catalogItemCount: Number(counts.catalogItemCount || 0),
+    questionItemCount: Number(counts.questionItemCount || 0),
+    questionCatalogCount: Number(counts.questionCatalogCount || 0),
+    questionTagCount: Number(counts.questionTagCount || 0),
+    questionAssetCount: Number(counts.questionAssetCount || 0),
+  };
+  Object.assign(output, {
+    catalogCount: output.catalogItemCount,
+    questionCount: output.questionItemCount,
+    tagCount: output.questionTagCount,
+    assetCount: output.questionAssetCount,
+  });
+  return output;
+}
+
+function snapshotPageSuffixBytes(suffix, nextCursor) {
+  const marker = '"nextCursor":null';
+  const markerIndex = suffix.indexOf(marker);
+  if (markerIndex < 0) return null;
+  const replacement = `"nextCursor":${JSON.stringify(nextCursor)}`;
+  return Buffer.byteLength(
+    `${suffix.slice(0, markerIndex)}${replacement}${suffix.slice(markerIndex + marker.length)}`,
+  );
+}
+
+function snapshotOrderBy(db, collection, definition) {
+  const columns = tableColumns(db, definition.table);
+  const column = (name, fallback = "''") => columns.has(name) ? name : fallback;
+  const nullableNumber = (name) => columns.has(name)
+    ? `COALESCE(${name}, 2147483647)`
+    : '2147483647';
+  if (collection === 'catalogs') {
+    return `
+      textbook_external_id ASC,
+      ${nullableNumber('sort_order')} ASC,
+      ${nullableNumber('node_level')} ASC,
+      catalog_external_id ASC
+    `;
+  }
+  if (collection === 'questions') {
+    return 'textbook_external_id ASC, question_external_id ASC';
+  }
+  if (collection === 'questionCatalogs') {
+    return `
+      textbook_external_id ASC,
+      question_external_id ASC,
+      ${nullableNumber('catalog_level')} ASC,
+      catalog_external_id ASC
+    `;
+  }
+  if (collection === 'tags') {
+    return [
+      'textbook_external_id ASC',
+      'question_external_id ASC',
+      `${column('dimension')} ASC`,
+      `${column('tag_external_id')} ASC`,
+      `${column('tag_value')} ASC`,
+      `${column('relation_type')} ASC`,
+      `${column('evidence_type')} ASC`,
+      `${column('query_fingerprint')} ASC`,
+    ].join(', ');
+  }
+  return [
+    'textbook_external_id ASC',
+    'question_external_id ASC',
+    `${column('asset_key')} ASC`,
+    `${column('content_sha256')} ASC`,
+    `${column('storage_path')} ASC`,
+  ].join(', ');
+}
+
+/**
+ * Read one bounded page of a sealed run snapshot.
+ *
+ * The page owns one read-only connection for its run header, scope, five
+ * scoped counts, and bounded row reads.  The service obtains the complete
+ * snapshot summary once before consuming pages; repeating its orphan scans
+ * for every page would turn a large run into an N-times full-table audit.
+ * Sealed snapshot triggers make the page rows immutable after the strict
+ * header check.  If the byte budget stops the batch early, the unread tail is
+ * deliberately left for the next request, whose offset advances only by the
+ * rows actually returned.
+ */
+function readRunSnapshotPage(dbPath, runId, options = {}) {
+  const collection = options && typeof options === 'object' ? options.collection : null;
+  if (typeof collection !== 'string' || !Object.hasOwn(SNAPSHOT_COLLECTIONS, collection)) {
+    throw httpError(
+      'collection 必须是 catalogs、questions、questionCatalogs、tags 或 assets',
+    );
+  }
+  const requestedTextbookId = optionalExternalId(
+    options?.textbookExternalId,
+    'textbookExternalId',
+  );
+  const cursor = nonNegativeInt(options?.cursor, 'cursor', 0, MAX_RUN_OFFSET);
+  let pageSize;
+  if (options?.pageSize == null || options.pageSize === '') {
+    pageSize = 500;
+  } else {
+    pageSize = positiveInt(
+      options.pageSize,
+      'pageSize',
+      500,
+      MAX_SNAPSHOT_PAGE_SIZE,
+    );
+    if (typeof options.pageSize === 'boolean') {
+      throw httpError(`pageSize 必须是 1 到 ${MAX_SNAPSHOT_PAGE_SIZE} 之间的整数`);
+    }
+  }
+  const definition = SNAPSHOT_COLLECTIONS[collection];
+
+  const db = openReadOnly(dbPath);
+  if (!db) throw httpError('collector SQLite 不存在', 503, 'snapshot_unavailable');
+  try {
+    const run = resolveContentRun(db, runId);
+    assertSnapshotTables(db, { all: true });
+    assertApplyableSnapshotRun(db, run);
+    const { textbookExternalId } = resolveSnapshotTextbook(db, run, requestedTextbookId);
+
+    const scopedCounts = {};
+    for (const item of Object.values(SNAPSHOT_COLLECTIONS)) {
+      const row = db.prepare(`
+        SELECT COUNT(*) AS value
+        FROM "${item.table}"
+        WHERE run_id = ? AND provider = ? AND textbook_external_id = ?
+      `).get(run.id, PROVIDER, textbookExternalId);
+      scopedCounts[item.count] = Number(row?.value || 0);
+    }
+    for (const [name, value] of Object.entries(scopedCounts)) {
+      if (!Number.isSafeInteger(value) || value < 0 || value > MAX_RUN_OFFSET) {
+        throw httpError(`运行快照 ${name} 计数超出安全范围`, 413, 'snapshot_too_large');
+      }
+    }
+    const expectedTotal = scopedCounts[definition.count];
+    if (cursor > expectedTotal) throw httpError('cursor 超出当前集合范围');
+
+    const pageRun = {
+      ...run,
+      id: run.id,
+      runId: run.id,
+      collectorRunId: run.id,
+      provider: PROVIDER,
+      textbookExternalId,
+      textbookExternalIds: [textbookExternalId],
+      snapshotLockedAt: run.snapshotLockedAt,
+      snapshot_locked_at: run.snapshotLockedAt,
+      snapshotComplete: run.snapshotComplete,
+      snapshot_complete: run.snapshotComplete ? 1 : 0,
+    };
+    const counts = snapshotPageCountObject(scopedCounts);
+    // Keep `items` in the template as null so the fixed envelope can be
+    // measured by replacing only the array portion.  This avoids repeatedly
+    // serialising the accumulated page while still measuring exact UTF-8
+    // JSON bytes for every candidate row.
+    const template = {
+      available: true,
+      immutable: snapshotLockPresent(run.snapshotLockedAt),
+      snapshotComplete: run.snapshotComplete,
+      run: pageRun,
+      counts,
+      collection,
+      cursor,
+      items: null,
+      total: expectedTotal,
+      nextCursor: null,
+    };
+    const templateJson = JSON.stringify(template);
+    const itemsMarker = '"items":null';
+    const itemsIndex = templateJson.indexOf(itemsMarker);
+    if (itemsIndex < 0) {
+      throw httpError('响应模板无法序列化', 500, 'serialization_error');
+    }
+    const prefix = templateJson.slice(0, itemsIndex + '"items":'.length);
+    const suffix = templateJson.slice(itemsIndex + itemsMarker.length);
+    const suffixNullBytes = snapshotPageSuffixBytes(suffix, null);
+    if (suffixNullBytes == null) {
+      throw httpError('响应模板无法序列化', 500, 'serialization_error');
+    }
+    const prefixBytes = Buffer.byteLength(prefix);
+    const items = [];
+    let itemBytes = 0;
+    const statement = db.prepare(`
+      SELECT * FROM "${definition.table}"
+      WHERE run_id = ? AND provider = ? AND textbook_external_id = ?
+      ORDER BY ${snapshotOrderBy(db, collection, definition)}
+      LIMIT ? OFFSET ?
+    `);
+
+    // Fetch fixed-size batches rather than materialising a caller-sized page
+    // (which may be 5000 rows) or issuing one OFFSET query per row.  A batch
+    // may be only partly returned when the byte budget is reached; the unread
+    // tail is deliberately left for the next request because nextCursor uses
+    // only the number of items actually appended to the response.
+    const remaining = Math.min(pageSize, expectedTotal - cursor);
+    let rowsRead = 0;
+    let budgetReached = false;
+    while (rowsRead < remaining) {
+      const fetchCount = Math.min(
+        MAX_SNAPSHOT_FETCH_BATCH_SIZE,
+        remaining - rowsRead,
+      );
+      // Keep each fetchedRows array scoped to one iteration.  Once this
+      // block ends, only the bounded result items remain reachable.
+      const fetchedRows = statement.all(
+        run.id,
+        PROVIDER,
+        textbookExternalId,
+        fetchCount,
+        cursor + rowsRead,
+      );
+      if (fetchedRows.length !== fetchCount) {
+        throw httpError('运行快照分页行数与计数不一致', 409, 'snapshot_incomplete');
+      }
+      rowsRead += fetchedRows.length;
+
+      for (const row of fetchedRows) {
+        const item = snapshotRowObject(row, definition.table);
+        const encodedItem = JSON.stringify(item);
+        if (encodedItem == null) {
+          throw httpError('运行快照行无法序列化', 409, 'snapshot_incomplete');
+        }
+        const encodedItemBytes = Buffer.byteLength(encodedItem);
+        const itemCount = items.length + 1;
+        const nextCursor = cursor + itemCount < expectedTotal
+          ? cursor + itemCount
+          : null;
+        const suffixBytes = snapshotPageSuffixBytes(suffix, nextCursor);
+        const candidateBytes = prefixBytes
+          + 1 // opening `[`
+          + itemBytes
+          + (items.length ? items.length : 0) // commas between items
+          + encodedItemBytes
+          + 1 // closing `]`
+          + suffixBytes;
+        if (candidateBytes > MAX_SNAPSHOT_PAGE_BYTES) {
+          if (!items.length) {
+            // Snapshot row text is bounded by snapshotRowObject.  A defensive
+            // hard check still prevents sendJson from ever turning an
+            // unexpectedly huge single row into a second 413 response.
+            throw httpError(
+              '运行快照单行超过安全响应上限',
+              413,
+              'snapshot_row_too_large',
+            );
+          }
+          budgetReached = true;
+          break;
+        }
+        items.push(item);
+        itemBytes += encodedItemBytes;
+      }
+      if (budgetReached) break;
+    }
+
+    const nextCursor = cursor + items.length < expectedTotal
+      ? cursor + items.length
+      : null;
+    const output = {
+      available: true,
+      immutable: snapshotLockPresent(run.snapshotLockedAt),
+      snapshotComplete: run.snapshotComplete,
+      run: pageRun,
+      counts,
+      collection,
+      cursor,
+      items,
+      total: expectedTotal,
+      nextCursor,
+    };
+    const actualBytes = Buffer.byteLength(JSON.stringify(output));
+    if (actualBytes > MAX_SNAPSHOT_PAGE_BYTES) {
+      throw httpError('运行快照页超过安全响应上限', 413, 'snapshot_too_large');
+    }
+    return output;
+  } finally {
+    db.close();
+  }
+}
+
+function isAbsoluteStoragePath(value) {
+  const text = String(value || '');
+  return path.isAbsolute(text)
+    || path.posix.isAbsolute(text)
+    || path.win32.isAbsolute(text)
+    // Reject drive-relative spellings (`C:foo`) too; they are not absolute
+    // on Windows but can escape the intended drive when resolved there.
+    || /^[A-Za-z]:/.test(text)
+    || /^\\\\/.test(text);
+}
+
+function resolveAssetFile(dataDir, storagePath) {
+  if (typeof dataDir !== 'string' || !dataDir.trim()) {
+    throw httpError('collector 素材目录未配置', 503, 'asset_unavailable');
+  }
+  if (typeof storagePath !== 'string' || !storagePath.trim()
+    || /[\u0000-\u001f\u007f]/.test(storagePath)
+    || isAbsoluteStoragePath(storagePath)) {
+    throw httpError('素材存储路径不安全', 404, 'asset_not_found');
+  }
+  // Collector paths are persisted as POSIX-style relative paths.  Treat a
+  // backslash as a separator too, otherwise a Windows traversal can become
+  // a harmless-looking filename when served on Linux (and vice versa).
+  const normalizedStoragePath = storagePath.replace(/\\/g, '/');
+  const parts = normalizedStoragePath.split('/');
+  if (parts.some((part) => part === '..')) {
+    throw httpError('素材存储路径不安全', 404, 'asset_not_found');
+  }
+  const root = path.resolve(dataDir);
+  const candidate = path.resolve(root, normalizedStoragePath);
+  const relative = path.relative(root, candidate);
+  if (!relative || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+    throw httpError('素材存储路径不安全', 404, 'asset_not_found');
+  }
+  let rootReal;
+  let candidateReal;
+  let stat;
+  try {
+    rootReal = fs.realpathSync.native(root);
+    candidateReal = fs.realpathSync.native(candidate);
+    stat = fs.statSync(candidateReal);
+    const realRelative = path.relative(rootReal, candidateReal);
+    if (!realRelative || realRelative === '..' || realRelative.startsWith(`..${path.sep}`)
+      || path.isAbsolute(realRelative) || !stat.isFile()) {
+      throw new Error('asset path outside root');
+    }
+  } catch (error) {
+    if (error?.statusCode) throw error;
+    throw httpError('素材文件不存在或不可用', 404, 'asset_not_found');
+  }
+  return { path: candidateReal, stat };
+}
+
+function sha256File(filePath, { keepOpen = false } = {}) {
+  let descriptor;
+  let retained = false;
+  const hash = createHash('sha256');
+  let total = 0;
+  try {
+    descriptor = fs.openSync(filePath, 'r');
+    const buffer = Buffer.allocUnsafe(64 * 1024);
+    while (true) {
+      const read = fs.readSync(descriptor, buffer, 0, buffer.length, null);
+      if (!read) break;
+      total += read;
+      if (total > MAX_ASSET_BYTES) {
+        throw httpError('素材文件超过安全大小上限', 413, 'asset_too_large');
+      }
+      hash.update(buffer.subarray(0, read));
+    }
+    const result = { digest: hash.digest('hex'), bytes: total };
+    if (keepOpen) {
+      result.descriptor = descriptor;
+      retained = true;
+    }
+    return result;
+  } finally {
+    if (!retained) {
+      try { if (descriptor != null) fs.closeSync(descriptor); } catch {}
+    }
+  }
+}
+
+function safeAssetMimeType(value) {
+  const text = String(value || '').trim();
+  if (!text || text.length > 200 || /[\u0000-\u001f\u007f]/.test(text)) {
+    return 'application/octet-stream';
+  }
+  // Keep the value suitable for a Node response header.  Unknown but
+  // syntactically harmless media types are still useful to clients.
+  if (!/^[A-Za-z0-9][A-Za-z0-9!#$&^_.+*-]*\/[A-Za-z0-9][A-Za-z0-9!#$&^_.+*-]*(?:\s*;\s*[A-Za-z0-9_-]+=[^\r\n;]+)*$/.test(text)) {
+    return 'application/octet-stream';
+  }
+  return text;
+}
+
+/**
+ * Resolve and integrity-check one immutable run asset without returning the
+ * host path in the serialisable result.  The non-enumerable file descriptor
+ * is an internal hand-off for server.cjs to stream after this read-only DB
+ * scope is closed.  Keeping the descriptor opened during verification also
+ * prevents a path replacement between hashing and HTTP streaming.
+ */
+function readRunAsset(dbPath, runId, contentSha256, options = {}) {
+  const suppliedHash = typeof contentSha256 === 'string'
+    ? contentSha256.trim()
+    : String(contentSha256 ?? '').trim();
+  if (!ASSET_SHA256.test(suppliedHash)) {
+    throw httpError('contentSha256 必须是 64 位十六进制 SHA-256');
+  }
+  const digest = suppliedHash.toLowerCase();
+  const requestedTextbookId = optionalExternalId(
+    options?.textbookExternalId,
+    'textbookExternalId',
+  );
+  const dataDir = options?.dataDir;
+
+  const db = openReadOnly(dbPath);
+  if (!db) throw httpError('collector SQLite 不存在', 503, 'snapshot_unavailable');
+  try {
+    const run = resolveContentRun(db, runId);
+    assertSnapshotTables(db, { all: true });
+    assertApplyableSnapshotRun(db, run);
+    const { textbookExternalId } = resolveSnapshotTextbook(db, run, requestedTextbookId);
+    const hashValues = digest === digest.toUpperCase()
+      ? [digest]
+      : [digest, digest.toUpperCase()];
+    const assetIndexes = new Set(db.prepare(
+      `PRAGMA index_list("sync_run_question_assets")`,
+    ).all().map((index) => String(index.name)));
+    // The composite index is installed by ensureRunSnapshotSchema.  Keep the
+    // fallback for callers reading a legacy DB directly, while making the
+    // production path deterministic even when SQLite's cost estimates prefer
+    // the asset identity index because of the ORDER BY clause.
+    const assetIndexHint = assetIndexes.has('idx_sync_run_question_assets_scope_hash')
+      ? ' INDEXED BY idx_sync_run_question_assets_scope_hash'
+      : '';
+    const row = db.prepare(`
+      SELECT question_external_id, asset_key, asset_type, source_url,
+             content_sha256, storage_path, mime_type, byte_size,
+             ${tableColumns(db, 'sync_run_question_assets').has('observed_at')
+               ? 'observed_at' : 'NULL'} AS observed_at
+      FROM sync_run_question_assets${assetIndexHint}
+      WHERE run_id = ? AND provider = ? AND textbook_external_id = ?
+        AND content_sha256 IN (${hashValues.map(() => '?').join(', ')})
+      ORDER BY question_external_id ASC, asset_key ASC, storage_path ASC
+      LIMIT 1
+    `).get(run.id, PROVIDER, textbookExternalId, ...hashValues);
+    if (!row) {
+      throw httpError('指定素材不存在', 404, 'asset_not_found');
+    }
+
+    const declaredSize = row.byte_size == null || row.byte_size === ''
+      ? null : Number(row.byte_size);
+    if (declaredSize != null
+      && (!Number.isSafeInteger(declaredSize) || declaredSize < 0)) {
+      throw httpError('素材大小元数据无效', 409, 'asset_unavailable');
+    }
+    if (declaredSize != null && declaredSize > MAX_ASSET_BYTES) {
+      throw httpError('素材文件超过安全大小上限', 413, 'asset_too_large');
+    }
+    const resolved = resolveAssetFile(dataDir, row.storage_path);
+    if (resolved.stat.size > MAX_ASSET_BYTES) {
+      throw httpError('素材文件超过安全大小上限', 413, 'asset_too_large');
+    }
+    const beforeSize = resolved.stat.size;
+    let checked;
+    let verifiedDescriptor = null;
+    try {
+      checked = sha256File(resolved.path, { keepOpen: true });
+      verifiedDescriptor = checked.descriptor;
+      const after = fs.fstatSync(verifiedDescriptor);
+      if (after.size !== beforeSize || checked.bytes !== beforeSize) {
+        throw httpError('素材文件在读取期间发生变化', 409, 'asset_integrity_error');
+      }
+      if (checked.digest.toLowerCase() !== digest) {
+        throw httpError('素材文件内容摘要不匹配', 409, 'asset_integrity_error');
+      }
+    } catch (error) {
+      try { if (verifiedDescriptor != null) fs.closeSync(verifiedDescriptor); } catch {}
+      if (error?.statusCode) throw error;
+      throw httpError('素材文件不可用', 404, 'asset_not_found');
+    }
+
+    const result = {
+      available: true,
+      immutable: true,
+      run: {
+        ...run,
+        id: run.id,
+        runId: run.id,
+        collectorRunId: run.id,
+        provider: PROVIDER,
+        textbookExternalId,
+        textbookExternalIds: [textbookExternalId],
+        snapshotComplete: run.snapshotComplete,
+        snapshot_complete: run.snapshotComplete ? 1 : 0,
+        snapshotLockedAt: run.snapshotLockedAt,
+        snapshot_locked_at: run.snapshotLockedAt,
+      },
+      asset: {
+        sourceProvider: PROVIDER,
+        externalTextbookId: textbookExternalId,
+        externalQuestionId: String(row.question_external_id || ''),
+        assetKey: String(row.asset_key || ''),
+        assetType: row.asset_type == null ? null : String(row.asset_type),
+        sourceUrl: row.source_url == null ? null : boundedString(row.source_url, 10000),
+        contentSha256: digest,
+        mimeType: safeAssetMimeType(row.mime_type),
+        byteSize: beforeSize,
+        observedAt: row.observed_at == null ? null : boundedString(row.observed_at, 80),
+      },
+      contentType: safeAssetMimeType(row.mime_type),
+      contentLength: beforeSize,
+      etag: `"${digest}"`,
+      cacheControl: 'public, max-age=31536000, immutable',
+    };
+    Object.defineProperty(result, 'filePath', {
+      value: resolved.path,
+      enumerable: false,
+      configurable: false,
+      writable: false,
+    });
+    Object.defineProperty(result, 'fileDescriptor', {
+      value: verifiedDescriptor,
+      enumerable: false,
+      configurable: false,
+      writable: false,
+    });
+    return result;
+  } finally {
+    db.close();
+  }
 }
 
 /**
@@ -846,11 +1556,14 @@ function readRunSnapshot(dbPath, runId, options = {}) {
     if (!['success', 'completed'].includes(String(run.status || '').toLowerCase()) || !run.finishedAt) {
       throw httpError(`内容运行 ${run.id} 未成功完成，暂无可用快照`, 409, 'snapshot_unavailable');
     }
-    if (!run.snapshotLockedAt) {
+    if (!snapshotLockPresent(run.snapshotLockedAt)) {
       throw httpError(`内容运行 ${run.id} 尚未锁定，暂无可用快照`, 409, 'snapshot_unavailable');
     }
     if (run.snapshotComplete !== true) {
       throw httpError(`内容运行 ${run.id} 的快照不完整，不能应用`, 409, 'snapshot_incomplete');
+    }
+    if (!Number.isSafeInteger(run.errorCount) || run.errorCount < 0) {
+      throw httpError(`内容运行 ${run.id} 的 error_count 无效`, 409, 'snapshot_incomplete');
     }
     if (run.errorCount > 0) {
       throw httpError(`内容运行 ${run.id} 包含采集错误，不能应用`, 409, 'snapshot_incomplete');
@@ -1065,32 +1778,7 @@ function readRunSnapshotSummary(dbPath, runId, expectedTextbookExternalId = null
     assertSnapshotTables(db, { all: !allowIncomplete });
 
     if (!allowIncomplete) {
-      const runColumns = tableColumns(db, 'sync_runs');
-      const requiredRunColumns = [
-        'finished_at', 'scope_json', 'error_count', 'snapshot_locked_at',
-        'snapshot_complete', 'catalog_item_count', 'question_item_count',
-        'question_catalog_count', 'question_tag_count', 'question_asset_count',
-      ];
-      const missingRunColumns = requiredRunColumns.filter((column) => !runColumns.has(column));
-      if (missingRunColumns.length) {
-        throw httpError(
-          `collector SQLite sync_runs 字段不完整：${missingRunColumns.join(', ')}`,
-          503,
-          'snapshot_unavailable',
-        );
-      }
-      if (!['success', 'completed'].includes(String(run.status || '').toLowerCase()) || !run.finishedAt) {
-        throw httpError(`内容运行 ${run.id} 未成功完成，暂无可用快照`, 409, 'snapshot_unavailable');
-      }
-      if (!run.snapshotLockedAt) {
-        throw httpError(`内容运行 ${run.id} 尚未锁定，暂无可用快照`, 409, 'snapshot_unavailable');
-      }
-      if (run.snapshotComplete !== true) {
-        throw httpError(`内容运行 ${run.id} 的快照不完整，不能应用`, 409, 'snapshot_incomplete');
-      }
-      if (run.errorCount > 0) {
-        throw httpError(`内容运行 ${run.id} 包含采集错误，不能应用`, 409, 'snapshot_incomplete');
-      }
+      assertApplyableSnapshotRun(db, run);
     }
 
     // Scope is derived from the run declaration plus immutable rows.  A
@@ -1266,7 +1954,7 @@ function readRunSnapshotSummary(dbPath, runId, expectedTextbookExternalId = null
     };
     const output = {
       available: true,
-      immutable: !allowIncomplete || Boolean(run.snapshotLockedAt),
+      immutable: !allowIncomplete || snapshotLockPresent(run.snapshotLockedAt),
       snapshotComplete: run.snapshotComplete,
       run: snapshotRun,
       scoped,
@@ -1862,6 +2550,10 @@ module.exports = {
   ENTITIES,
   MAX_CANDIDATE_ROWS,
   MAX_CATALOG_PAGE_SIZE,
+  MAX_ASSET_BYTES,
+  MAX_SNAPSHOT_PAGE_BYTES,
+  MAX_SNAPSHOT_PAGE_SIZE,
+  MAX_SNAPSHOT_FETCH_BATCH_SIZE,
   MAX_RUN_PAGE_SIZE,
   MAX_RUN_PAGE_NUMBER,
   MAX_SELECTED_TEXTBOOKS,
@@ -1873,9 +2565,11 @@ module.exports = {
   readCandidates,
   readCatalogProgress,
   readRunCatalogs,
+  readRunAsset,
   readRunQuestion,
   readRunQuestions,
   readRunSnapshot,
+  readRunSnapshotPage,
   readRunSnapshotScopes,
   readRunSnapshotSummary,
   readMetadataSnapshot,

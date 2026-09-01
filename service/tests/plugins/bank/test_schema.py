@@ -61,6 +61,7 @@ def test_bank_manifest_is_mysql_only_and_references_real_resources() -> None:
         'migrations/mysql/008_textbook_apply.py',
         'migrations/mysql/009_question_apply.py',
         'migrations/mysql/010_question_resume.py',
+        'migrations/mysql/011_remove_local_collector_options.py',
     ]
     assert plugin.manifest.backend.seeds == ['seeds/mysql/001_dict.sql']
     assert plugin.manifest.compatibility.databases == ['mysql']
@@ -475,6 +476,7 @@ def test_bank_page_views_exist(view: str) -> None:
         'migrations/mysql/001_init.sql',
         'migrations/mysql/004_sync_job_compat.py',
         'migrations/mysql/005_sync_job_v2.py',
+        'migrations/mysql/011_remove_local_collector_options.py',
         'seeds/mysql/001_dict.sql',
     ),
 )

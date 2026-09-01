@@ -478,7 +478,7 @@ def verify_package(package: str | os.PathLike[str]) -> VerifiedPackage:
 
 @dataclass
 class PublisherConfig:
-    asset_root: Path = Path(os.environ.get('BANK_ASSET_ROOT', './data/bank-assets'))
+    asset_root: Path = Path(os.environ.get('BANK_ASSET_ROOT') or 'data/bank')
     lock_name: str = 'ruoyi:bank:dataset-publish'
     lock_timeout: int = 30
     stale_after_seconds: int = 24 * 3600

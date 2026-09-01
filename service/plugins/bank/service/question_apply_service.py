@@ -11,10 +11,14 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import json
+import mimetypes
 import os
+import re
 import secrets
-import sqlite3
+import tempfile
+import urllib.parse
 from collections.abc import Mapping
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -38,15 +42,12 @@ from plugins.bank.entity.do.bank_do import (
     QbSyncJobScope,
     QbTextbook,
 )
-from plugins.bank.service.collector_client import CollectorClient, remote_collector_enabled
-from plugins.bank.service.collector_sqlite import connect_collector_sqlite
+from plugins.bank.service.collector_client import CollectorClient
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[4]
-DEFAULT_COLLECTOR_DB = PROJECT_ROOT / 'collector' / 'data' / 'zujuan.sqlite3'
 PROVIDER = 'zujuan'
 MAX_SNAPSHOT_ROWS = 100_000
 MAX_EXTERNAL_ID_LENGTH = 64
@@ -106,7 +107,7 @@ def _safe_external_id(value: Any) -> bool:
 
 
 def _as_bool(value: Any) -> bool:
-    """Parse the booleans emitted by SQLite, JSON and older collector builds."""
+    """Parse booleans emitted by the collector JSON contract and older builds."""
 
     if isinstance(value, bool):
         return value
@@ -211,6 +212,337 @@ def _safe_storage_path(value: Any) -> str | None:
     if any(part == '..' or any(ord(char) < CONTROL_CHAR_LIMIT for char in part) for part in parts):
         return None
     return '/'.join(parts)[:1000] or None
+
+
+ASSET_SHA256_LENGTH = 64
+_ASSET_SHA256_RE = re.compile(r'^[0-9a-f]{64}$')
+_ASSET_EXT_RE = re.compile(r'^[a-z0-9]{1,12}$')
+_ASSET_CACHE_MAX_BYTES = 64 * 1024 * 1024
+ASSET_DOWNLOAD_CONCURRENCY = 8
+
+
+def _asset_byte_size(row: Mapping[str, Any]) -> int | None:
+    """Return the collector-declared byte size, when present and valid."""
+
+    value = _pick(
+        row,
+        'byte_size',
+        'byteSize',
+        'content_length',
+        'contentLength',
+        'file_size',
+        'fileSize',
+        'size',
+    )
+    if value in (None, ''):
+        return None
+    if isinstance(value, bool):
+        raise ServiceException(message='题库素材大小必须是非负整数')
+    if isinstance(value, float) and not value.is_integer():
+        raise ServiceException(message='题库素材大小必须是非负整数')
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ServiceException(message='题库素材大小必须是非负整数') from exc
+    if parsed < 0 or parsed > _ASSET_CACHE_MAX_BYTES:
+        raise ServiceException(message='题库素材大小超出安全上限')
+    return parsed
+
+
+def _asset_extension(row: Mapping[str, Any]) -> str:
+    """Choose a harmless extension for the service-owned content-addressed file."""
+
+    candidates = (
+        _pick(row, 'file_name', 'fileName'),
+        _pick(row, 'source_url', 'sourceUrl', 'url'),
+        _pick(row, 'mime_type', 'mimeType'),
+    )
+    for candidate in candidates:
+        text = str(candidate or '').strip()
+        if not text:
+            continue
+        if '/' in text or '?' in text or '#' in text:
+            text = urllib.parse.urlsplit(text).path
+        suffix = Path(text).suffix.rsplit('.', 1)[-1].lower() if '.' in Path(text).name else ''
+        if _ASSET_EXT_RE.fullmatch(suffix):
+            return f'.{suffix}'
+        guessed = mimetypes.guess_extension(text.lower()) if '/' in text else None
+        if guessed:
+            guessed = guessed.rsplit('.', 1)[-1].lower()
+            if _ASSET_EXT_RE.fullmatch(guessed):
+                return f'.{guessed}'
+    return '.bin'
+
+
+def _asset_relative_path(file_hash: str, row: Mapping[str, Any]) -> str:
+    """Build the only storage layout accepted for downloaded collector assets."""
+
+    digest = str(file_hash or '').strip().lower()
+    if not _ASSET_SHA256_RE.fullmatch(digest):
+        raise ServiceException(message='题库素材内容摘要无效')
+    path = f'assets/{digest[:2]}/{digest}{_asset_extension(row)}'
+    safe = _safe_storage_path(path)
+    if safe is None:
+        raise ServiceException(message='题库素材存储路径不合法')
+    return safe
+
+
+def _asset_root() -> Path:
+    configured = str(os.environ.get('BANK_ASSET_ROOT', 'data/bank') or '').strip()
+    if not configured:
+        configured = 'data/bank'
+    return Path(configured).expanduser().resolve()
+
+
+def _path_inside(root: Path, candidate: Path) -> Path:
+    """Resolve a path and require it to remain below the service asset root."""
+
+    resolved = candidate.resolve(strict=False)
+    try:
+        resolved.relative_to(root)
+    except ValueError as exc:
+        raise ServiceException(message='题库素材路径不合法') from exc
+    return resolved
+
+
+def _valid_cached_asset(root: Path, digest: str, expected_size: int | None) -> Path | None:
+    """Find a previously downloaded file with the requested content hash."""
+
+    try:
+        directory = _path_inside(root, root / 'assets' / digest[:2])
+    except ServiceException:
+        # A hostile/surprising symlink at the cache directory must not make a
+        # read path escape the service-owned root. Treat it as a cache miss;
+        # the atomic download path below will recreate a safe directory.
+        return None
+    if not directory.is_dir():
+        return None
+    try:
+        candidates = sorted(directory.glob(f'{digest}.*'))
+    except OSError:
+        return None
+    for candidate in candidates:
+        try:
+            resolved = _path_inside(root, candidate)
+            if candidate.is_symlink() or not resolved.is_file():
+                continue
+            size = resolved.stat().st_size
+            if size > _ASSET_CACHE_MAX_BYTES or (expected_size is not None and size != expected_size):
+                continue
+            hasher = hashlib.sha256()
+            with resolved.open('rb') as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+                    hasher.update(chunk)
+            if hasher.hexdigest() == digest:
+                return resolved
+        except (OSError, ServiceException):
+            continue
+    return None
+
+
+def _download_and_store_asset(
+    root: Path,
+    digest: str,
+    item: Mapping[str, Any],
+    expected_size: int | None,
+    result: Any,
+) -> tuple[Path, str]:
+    """Validate one response and atomically persist it.
+
+    This function intentionally contains every potentially expensive byte
+    operation (conversion, hashing, temporary-file write, fsync and replace)
+    so callers can run it in a worker thread without blocking the event loop.
+    """
+
+    if not isinstance(result, (bytes, bytearray, memoryview)):
+        raise ServiceException(message=f'素材 {digest} 下载响应不是二进制')
+    content = bytes(result)
+    if len(content) > _ASSET_CACHE_MAX_BYTES:
+        raise ServiceException(message=f'素材 {digest} 超出大小上限')
+    if expected_size is not None and len(content) != expected_size:
+        raise ServiceException(message=f'素材 {digest} 大小校验失败')
+    if hashlib.sha256(content).hexdigest() != digest:
+        raise ServiceException(message=f'素材 {digest} 哈希校验失败')
+    relative = _asset_relative_path(digest, item)
+    target = _path_inside(root, root / relative)
+    parent = _path_inside(root, target.parent)
+    parent.mkdir(parents=True, exist_ok=True)
+    temporary_name: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode='wb',
+            dir=str(parent),
+            prefix=f'.{digest}.',
+            suffix='.tmp',
+            delete=False,
+        ) as temporary:
+            temporary_name = temporary.name
+            temporary.write(content)
+            temporary.flush()
+            os.fsync(temporary.fileno())
+        os.replace(temporary_name, target)
+        temporary_name = None
+    finally:
+        if temporary_name:
+            try:
+                os.unlink(temporary_name)
+            except OSError:
+                pass
+    return target, relative
+
+
+async def _invoke_asset_client(
+    method: Any,
+    run_id: int,
+    digest: str,
+    textbook_id: str,
+) -> Any:
+    """Invoke sync clients off-loop while accepting async test doubles."""
+
+    # Calling a synchronous CollectorClient through to_thread is important:
+    # urllib performs blocking socket I/O.  An async double returns a
+    # coroutine from this worker invocation; only that coroutine is awaited on
+    # the event loop, so both implementations remain compatible.
+    result = await asyncio.to_thread(
+        method,
+        run_id,
+        digest,
+        textbook_external_id=textbook_id,
+    )
+    if inspect.isawaitable(result):
+        return await result
+    return result
+
+
+async def _materialize_one_asset(
+    semaphore: asyncio.Semaphore,
+    client: CollectorClient,
+    method: Any,
+    root: Path,
+    run_id: int,
+    textbook_id: str,
+    digest: str,
+    item: Mapping[str, Any],
+    expected_size: int | None,
+) -> tuple[Path, str]:
+    async with semaphore:
+        cached_path = await asyncio.to_thread(_valid_cached_asset, root, digest, expected_size)
+        if cached_path is not None:
+            return cached_path, _safe_storage_path(str(cached_path.relative_to(root))) or ''
+        try:
+            result = await _invoke_asset_client(method, run_id, digest, textbook_id)
+        except ServiceException:
+            raise
+        except Exception as exc:
+            raise ServiceException(message=f'素材 {digest} 下载失败') from exc
+        try:
+            return await asyncio.to_thread(
+                _download_and_store_asset,
+                root,
+                digest,
+                item,
+                expected_size,
+                result,
+            )
+        except ServiceException:
+            raise
+        except Exception as exc:
+            raise ServiceException(message=f'素材 {digest} 落盘失败') from exc
+
+
+async def _download_snapshot_assets(snapshot: dict[str, Any]) -> None:  # noqa: PLR0912
+    """Materialize declared assets with bounded, service-owned concurrency."""
+
+    assets = snapshot.get('assets')
+    if not isinstance(assets, list) or not assets:
+        return
+    run_value = snapshot.get('collector_run_id') or snapshot.get('collectorRunId')
+    if isinstance(run_value, bool):
+        raise ServiceException(message='题库素材缺少快照运行范围')
+    try:
+        run_id = int(run_value)
+    except (TypeError, ValueError) as exc:
+        raise ServiceException(message='题库素材缺少快照运行范围') from exc
+    textbook_id = str(snapshot.get('textbook_external_id') or snapshot.get('textbookExternalId') or '')
+    if run_id <= 0 or not textbook_id:
+        raise ServiceException(message='题库素材缺少快照运行范围')
+    # Construct the client before creating any local directories.  A missing
+    # collector URL must fail closed without leaving an otherwise empty cache
+    # behind during an apply attempt.
+    client = CollectorClient()
+    root = await asyncio.to_thread(_asset_root)
+    await asyncio.to_thread(root.mkdir, parents=True, exist_ok=True)
+    method = getattr(client, 'run_asset_bytes', None) or getattr(client, 'asset_bytes', None)
+    if not callable(method):
+        raise ServiceException(message='collector 客户端不支持素材下载')
+
+    # Group by content address before any I/O.  A run can reference the same
+    # binary from multiple questions or HTML fields; one worker then serves
+    # every occurrence with the same service-owned path.
+    groups: dict[str, list[tuple[dict[str, Any], int | None]]] = {}
+    for item in assets:
+        if not isinstance(item, dict):
+            raise ServiceException(message='题库素材行结构不正确')
+        digest = str(
+            item.get('file_hash')
+            or item.get('fileHash')
+            or item.get('content_sha256')
+            or item.get('contentSha256')
+            or ''
+        ).strip().lower()
+        if not _ASSET_SHA256_RE.fullmatch(digest):
+            raise ServiceException(message='题库素材内容摘要无效')
+        expected_size = item.get('byte_size')
+        if expected_size is None:
+            expected_size = _asset_byte_size(item)
+        if expected_size is not None:
+            expected_size = _asset_byte_size({'byte_size': expected_size})
+        item['byte_size'] = expected_size
+        groups.setdefault(digest, []).append((item, expected_size))
+
+    # Conflicting declarations for the same content address are an invalid
+    # snapshot.  Reject before downloading anything rather than letting the
+    # first occurrence decide which size to trust.
+    grouped: list[tuple[str, list[tuple[dict[str, Any], int | None]], int | None]] = []
+    for digest, entries in groups.items():
+        sizes = {size for _item, size in entries if size is not None}
+        if len(sizes) > 1:
+            raise ServiceException(message=f'素材 {digest} 大小声明不一致')
+        grouped.append((digest, entries, next(iter(sizes), None)))
+
+    semaphore = asyncio.Semaphore(ASSET_DOWNLOAD_CONCURRENCY)
+    results = await asyncio.gather(
+        *(
+            _materialize_one_asset(
+                semaphore,
+                client,
+                method,
+                root,
+                run_id,
+                textbook_id,
+                digest,
+                entries[0][0],
+                expected_size,
+            )
+            for digest, entries, expected_size in grouped
+        ),
+        return_exceptions=True,
+    )
+    for result in results:
+        if isinstance(result, BaseException):
+            raise result
+
+    for (digest, entries, _expected_size), result in zip(grouped, results, strict=True):
+        target, relative = result
+        if not relative:
+            raise ServiceException(message=f'素材 {digest} 缓存路径不合法')
+        # ``target`` is returned for type/diagnostic completeness; all rows
+        # deliberately receive one relative path, never a collector path.
+        del target
+        for item, _item_size in entries:
+            item['storage_path'] = relative
+            item['download_status'] = 'downloaded'
+            item['error_message'] = None
 
 
 def _as_int(value: Any, *, field: str, allow_none: bool = False) -> int | None:
@@ -361,18 +693,6 @@ def _same(left: Any, right: Any) -> bool:
     return _jsonable(left) == _jsonable(right)
 
 
-def _source_path() -> Path:
-    configured = os.environ.get('BANK_COLLECTOR_DB', '').strip()
-    if not configured:
-        return DEFAULT_COLLECTOR_DB
-    path = Path(configured).expanduser()
-    return path if path.is_absolute() else PROJECT_ROOT / path
-
-
-def _table_columns(connection: sqlite3.Connection, table: str) -> set[str]:
-    return {str(row['name']) for row in connection.execute(f'PRAGMA table_info("{table}")').fetchall()}
-
-
 def _run_scope_ids(scope: Any) -> set[str]:
     if isinstance(scope, str):
         try:
@@ -421,320 +741,16 @@ def _run_scope_ids(scope: Any) -> set[str]:
     return {str(value).strip() for value in values if str(value or '').strip()}
 
 
-def _snapshot_tables() -> tuple[str, ...]:
-    return (
-        'sync_run_catalog_items',
-        'sync_run_question_items',
-        'sync_run_question_catalogs',
-        'sync_run_question_tags',
-        'sync_run_question_assets',
-    )
-
-
-def _snapshot_count_columns(run_columns: set[str]) -> dict[str, str]:
-    """Resolve all five persisted run counters or fail closed.
-
-    Row counts alone cannot prove that a completed run sealed the whole
-    snapshot.  The Collector persists these counters immediately before the
-    immutable lock, so local compatibility mode must require the same trust
-    boundary as the HTTP summary/full endpoints.
-    """
-
-    resolved: dict[str, str] = {}
-    missing: list[str] = []
-    for key, aliases in SNAPSHOT_COUNT_FIELDS.items():
-        column = next((name for name in aliases if name in run_columns), None)
-        if column is None:
-            missing.append(aliases[1])
-        else:
-            resolved[key] = column
-    if missing:
-        raise ServiceException(message=f'采集库 sync_runs 缺少字段：{", ".join(sorted(missing))}')
-    return resolved
-
-
-def _snapshot_table_keys() -> dict[str, str]:
-    return {
-        'sync_run_catalog_items': 'catalogs',
-        'sync_run_question_items': 'questions',
-        'sync_run_question_catalogs': 'questionCatalogs',
-        'sync_run_question_tags': 'tags',
-        'sync_run_question_assets': 'assets',
-    }
-
-
-def _snapshot_required_columns() -> dict[str, set[str]]:
-    return {
-        'sync_run_catalog_items': {
-            'run_id', 'provider', 'textbook_external_id', 'catalog_external_id', 'name',
-        },
-        'sync_run_question_items': {
-            'run_id', 'provider', 'textbook_external_id', 'question_external_id',
-            'content_html', 'plain_text', 'question_type', 'detail_fetched',
-        },
-        'sync_run_question_catalogs': {
-            'run_id', 'provider', 'textbook_external_id', 'question_external_id', 'catalog_external_id',
-        },
-        'sync_run_question_tags': {
-            'run_id', 'provider', 'textbook_external_id', 'question_external_id', 'dimension', 'tag_value',
-        },
-        'sync_run_question_assets': {
-            'run_id', 'provider', 'textbook_external_id', 'question_external_id',
-            'asset_key', 'asset_type', 'source_url', 'content_sha256', 'storage_path',
-        },
-    }
-
-
-def _validate_local_scope_references(
-    connection: sqlite3.Connection,
-    run_id: int,
-    textbook_external_id: str,
-) -> None:
-    """Reject scoped relationship rows whose immutable owners are absent."""
-
-    params = (int(run_id), PROVIDER, str(textbook_external_id))
-    checks = {
-        '目录关系': """
-            SELECT 1 FROM sync_run_question_catalogs AS r
-            WHERE r.run_id = ? AND r.provider = ? AND r.textbook_external_id = ?
-              AND (NOT EXISTS (
-                SELECT 1 FROM sync_run_question_items AS q
-                WHERE q.run_id = r.run_id AND q.provider = r.provider
-                  AND q.textbook_external_id = r.textbook_external_id
-                  AND q.question_external_id = r.question_external_id
-              ) OR NOT EXISTS (
-                SELECT 1 FROM sync_run_catalog_items AS c
-                WHERE c.run_id = r.run_id AND c.provider = r.provider
-                  AND c.textbook_external_id = r.textbook_external_id
-                  AND c.catalog_external_id = r.catalog_external_id
-              )) LIMIT 1
-        """,
-        '标签': """
-            SELECT 1 FROM sync_run_question_tags AS r
-            WHERE r.run_id = ? AND r.provider = ? AND r.textbook_external_id = ?
-              AND NOT EXISTS (
-                SELECT 1 FROM sync_run_question_items AS q
-                WHERE q.run_id = r.run_id AND q.provider = r.provider
-                  AND q.textbook_external_id = r.textbook_external_id
-                  AND q.question_external_id = r.question_external_id
-              ) LIMIT 1
-        """,
-        '素材': """
-            SELECT 1 FROM sync_run_question_assets AS r
-            WHERE r.run_id = ? AND r.provider = ? AND r.textbook_external_id = ?
-              AND NOT EXISTS (
-                SELECT 1 FROM sync_run_question_items AS q
-                WHERE q.run_id = r.run_id AND q.provider = r.provider
-                  AND q.textbook_external_id = r.textbook_external_id
-                  AND q.question_external_id = r.question_external_id
-              ) LIMIT 1
-        """,
-    }
-    for label, statement in checks.items():
-        if connection.execute(statement, params).fetchone() is not None:
-            raise ServiceException(
-                message=f'运行 {run_id} 教材 {textbook_external_id} 的{label}快照包含孤儿行'
-            )
-
-
-def _read_local_snapshot_sync(path: Path, run_id: int, textbook_external_id: str) -> dict[str, Any]:  # noqa: PLR0912, PLR0915
-    """Read one complete, immutable scope from the collector SQLite store.
-
-    This deliberately reads the five run tables directly in one bounded
-    operation.  It never follows the paginated comparison APIs and never
-    falls back to the collector's mutable ``questions``/``textbook_nodes``
-    tables.  The run-level completion marker is required even when all rows
-    happen to be present: a partial run can otherwise look indistinguishable
-    from a valid empty/short snapshot.
-    """
-
-    if not path.is_file():
-        raise ServiceException(message=f'采集库不存在：{path}，没有可应用的题库快照')
-    connection: sqlite3.Connection | None = None
-    try:
-        connection = connect_collector_sqlite(path)
-        connection.row_factory = sqlite3.Row
-        names = {
-            str(row['name'])
-            for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
-        }
-        required = {'sync_runs', *_snapshot_tables()}
-        missing = sorted(required - names)
-        if missing:
-            raise ServiceException(message=f'采集库缺少不可变题库快照表：{", ".join(missing)}')
-
-        run_columns = _table_columns(connection, 'sync_runs')
-        required_run_columns = {'id', 'provider', 'status', 'finished_at'}
-        # Both markers are part of the apply trust boundary.  Camel-case
-        # columns are accepted for hand-migrated SQLite stores, but at least
-        # one spelling of each marker must physically exist.
-        lock_column = next((name for name in ('snapshot_locked_at', 'snapshotLockedAt', 'locked') if name in run_columns), None)
-        complete_column = next((name for name in ('snapshot_complete', 'snapshotComplete', 'complete') if name in run_columns), None)
-        error_column = next((name for name in ('error_count', 'errorCount') if name in run_columns), None)
-        missing_run = sorted(required_run_columns - run_columns)
-        if lock_column is None:
-            missing_run.append('snapshot_locked_at')
-        if complete_column is None:
-            missing_run.append('snapshot_complete')
-        if error_column is None:
-            missing_run.append('error_count')
-        if missing_run:
-            raise ServiceException(message=f'采集库 sync_runs 缺少字段：{", ".join(sorted(set(missing_run)))}')
-        run_count_columns = _snapshot_count_columns(run_columns)
-
-        run_row = connection.execute('SELECT * FROM "sync_runs" WHERE "id" = ?', (int(run_id),)).fetchone()
-        if run_row is None:
-            raise ServiceException(message=f'collector 运行 {run_id} 不存在，没有可用快照')
-        run = dict(run_row)
-        # Expose a stable canonical marker even when the physical column uses
-        # an older spelling; the normalizer applies the same validation to
-        # remote responses.
-        run.setdefault('snapshot_locked_at', run.get(lock_column))
-        run.setdefault('snapshot_complete', run.get(complete_column))
-        run.setdefault('error_count', run.get(error_column))
-        if int(_as_int(run.get('error_count'), field='error_count') or 0) != 0:
-            raise ServiceException(message=f'collector 运行 {run_id} 包含采集错误，不能应用')
-        scope_value = run.get('scope_json', run.get('scopeJson', run.get('scope', {})))
-        run['scope_json'] = scope_value
-        run_scope_ids = _run_scope_ids(scope_value)
-        raw_header = {
-            'available': True,
-            'run': run,
-            'immutable': True,
-            'snapshotComplete': run.get('snapshot_complete'),
-        }
-        _snapshot_header(raw_header, str(textbook_external_id))
-
-        columns_by_table = {table: _table_columns(connection, table) for table in _snapshot_tables()}
-        required_columns = _snapshot_required_columns()
-        result: dict[str, Any] = {
-            'available': True,
-            'run': run,
-            'immutable': True,
-            'snapshotComplete': True,
-        }
-        filters = '"run_id" = ? AND "provider" = ? AND "textbook_external_id" = ?'
-        params = (int(run_id), PROVIDER, str(textbook_external_id))
-        for table, wanted in required_columns.items():
-            absent = sorted(wanted - columns_by_table[table])
-            if absent:
-                raise ServiceException(message=f'采集库 {table} 缺少字段：{", ".join(absent)}')
-            rows = [dict(row) for row in connection.execute(f'SELECT * FROM "{table}" WHERE {filters}', params).fetchall()]
-            if len(rows) > MAX_SNAPSHOT_ROWS:
-                raise ServiceException(message=f'运行快照超过安全上限 {MAX_SNAPSHOT_ROWS}')
-            key = _snapshot_table_keys()[table]
-            result[key] = rows
-
-        _validate_local_scope_references(connection, run_id, textbook_external_id)
-
-        # Validate the sealed run-level declarations even when this reader is
-        # filtering one scope from a historical multi-textbook run.
-        for table, key in _snapshot_table_keys().items():
-            declared_value = run.get(run_count_columns[key])
-            if declared_value is None:
-                raise ServiceException(message=f'运行 {run_id} 缺少有效 {key} 快照计数')
-            declared = int(_as_int(declared_value, field=f'{key} count') or 0)
-            actual_row = connection.execute(
-                f'SELECT COUNT(*) FROM "{table}" WHERE "run_id" = ? AND "provider" = ?',
-                (int(run_id), PROVIDER),
-            ).fetchone()
-            actual = int(actual_row[0] if actual_row else 0)
-            if actual != declared:
-                raise ServiceException(message=f'运行 {run_id} 的 {key} 总计数不一致：{actual}/{declared}')
-
-        # New collectors may persist scoped counts as JSON or dedicated run
-        # columns.  If neither is available, deriving counts from the rows is
-        # safe for local mode because the rows were read in full; the remote
-        # endpoint still has to provide explicit counts in its response.
-        scoped_counts: Mapping[str, Any] = {}
-        for field in ('snapshot_counts_json', 'snapshotCounts', 'counts_json', 'counts'):
-            candidate = run.get(field)
-            if isinstance(candidate, str):
-                try:
-                    candidate = json.loads(candidate)
-                except (TypeError, json.JSONDecodeError):
-                    candidate = None
-            if isinstance(candidate, Mapping):
-                nested = candidate.get(str(textbook_external_id))
-                if isinstance(nested, Mapping):
-                    scoped_counts = nested
-                elif len(run_scope_ids) <= 1:
-                    scoped_counts = candidate
-                break
-        counts: dict[str, int] = {}
-        for key, aliases in SNAPSHOT_COUNT_FIELDS.items():
-            value = next((scoped_counts[name] for name in aliases if name in scoped_counts), None)
-            # Dedicated run columns on a multi-textbook collector run are
-            # aggregate counts.  They cannot be compared with one filtered
-            # scope; use the fully selected row count unless the collector
-            # persisted a per-scope JSON counter above.
-            if value is None and len(run_scope_ids) <= 1:
-                value = run.get(run_count_columns[key])
-            counts[key] = _as_int(value, field=f'{key} count', allow_none=True) if value is not None else len(result[key])
-        result['counts'] = {
-            'catalogItemCount': counts['catalogs'],
-            'questionItemCount': counts['questions'],
-            'questionCatalogCount': counts['questionCatalogs'],
-            'questionTagCount': counts['tags'],
-            'questionAssetCount': counts['assets'],
-        }
-        aliases_to_rows = {
-            'catalogItemCount': 'catalogs',
-            'questionItemCount': 'questions',
-            'questionCatalogCount': 'questionCatalogs',
-            'questionTagCount': 'tags',
-            'questionAssetCount': 'assets',
-        }
-        for count_name, row_name in aliases_to_rows.items():
-            if len(result[row_name]) != result['counts'][count_name]:
-                raise ServiceException(
-                    message=f'运行 {run_id} 教材 {textbook_external_id} 的 {row_name} 计数不一致：'
-                    f'{len(result[row_name])}/{result["counts"][count_name]}'
-                )
-        if not result['catalogs'] or not result['questions'] or not result['questionCatalogs']:
-            raise ServiceException(message=f'运行 {run_id} 教材 {textbook_external_id} 缺少必要目录、题目或目录关系')
-        for question in result['questions']:
-            if not _as_bool(question.get('detail_fetched', question.get('detailFetched'))):
-                raise ServiceException(message=f'运行 {run_id} 教材 {textbook_external_id} 的题目详情未完整抓取')
-        for asset in result['assets']:
-            if not _safe_storage_path(asset.get('storage_path', asset.get('storagePath', asset.get('local_path')))):
-                raise ServiceException(message=f'运行 {run_id} 教材 {textbook_external_id} 的题目素材未完整下载')
-            if not str(_pick(asset, 'content_sha256', 'contentSha256', 'sha256', 'file_hash', 'fileHash', default='') or '').strip():
-                raise ServiceException(message=f'运行 {run_id} 教材 {textbook_external_id} 的题目素材缺少内容摘要')
-        return result
-    except sqlite3.Error as exc:
-        raise ServiceException(message=f'采集库读取失败：{exc}') from exc
-    finally:
-        if connection is not None:
-            connection.close()
-
-
 async def _read_snapshot(run_id: int, textbook_external_id: str) -> dict[str, Any]:
-    if remote_collector_enabled():
-        client = CollectorClient()
-        method = getattr(client, 'run_snapshot', None) or getattr(client, 'snapshot', None)
-        if method is None:
-            raise ServiceException(message='collector 客户端不支持完整题库快照接口')
-        try:
-            payload = await asyncio.to_thread(
-                method,
-                run_id,
-                textbook_external_id=textbook_external_id,
-            )
-        except TypeError:
-            # Compatibility with small integration doubles that only accept a
-            # positional run ID.  The production client always sends the
-            # textbook query parameter, so this fallback cannot broaden the
-            # actual URL surface.
-            payload = await asyncio.to_thread(method, run_id)
-        if not isinstance(payload, Mapping):
-            raise ServiceException(message='collector API 完整题库快照结构不正确')
-        # Validate the header here as well as in ``_normalise_snapshot`` so a
-        # direct caller of this helper cannot accidentally consume an unlocked
-        # remote response.
-        _snapshot_header(payload, str(textbook_external_id))
-        return dict(payload)
-    return await asyncio.to_thread(_read_local_snapshot_sync, _source_path(), run_id, textbook_external_id)
+    payload = await asyncio.to_thread(
+        CollectorClient().run_snapshot,
+        run_id,
+        textbook_external_id=textbook_external_id,
+    )
+    if not isinstance(payload, Mapping):
+        raise ServiceException(message='collector API 完整题库快照结构不正确')
+    _snapshot_header(payload, str(textbook_external_id))
+    return dict(payload)
 
 
 def _summary_payload(raw: Mapping[str, Any]) -> dict[str, Any]:
@@ -748,27 +764,13 @@ def _summary_payload(raw: Mapping[str, Any]) -> dict[str, Any]:
         candidate = payload.get(wrapper)
         if not isinstance(candidate, Mapping):
             continue
-        has_summary_fields = any(
-            name in payload
-            for name in (
-                'run',
-                'counts',
-                'immutable',
-                'snapshotComplete',
-                'snapshot_complete',
-                'catalogCount',
-                'catalogItemCount',
-                'questionCount',
-                'questionItemCount',
-            )
-        )
-        if not has_summary_fields:
-            payload = candidate
-        else:
-            payload = {
-                **candidate,
-                **{key: value for key, value in payload.items() if key != wrapper},
-            }
+        # Preserve scalar markers left beside a wrapped response (for
+        # example ``available``) while taking run/count fields from the
+        # nested summary.  Top-level keys remain authoritative on conflicts.
+        payload = {
+            **candidate,
+            **{key: value for key, value in payload.items() if key not in {'data', 'summary'}},
+        }
         break
     return dict(payload)
 
@@ -888,6 +890,8 @@ def _normalise_snapshot_summary(  # noqa: PLR0912, PLR0915
         'collector_run_id',
         default=_pick(payload, 'id', 'runId', 'collectorRunId', 'collector_run_id'),
     )
+    if isinstance(run_id, bool):
+        raise ServiceException(message=f'collector 运行 {run_id or ""} 的运行 ID 无效')
     if provider != PROVIDER:
         raise ServiceException(message=f'collector 运行 {run_id or ""} 来源不受支持')
     status = str(_pick(run, 'status', default=_pick(payload, 'status', default='')) or '').strip().lower()
@@ -907,7 +911,8 @@ def _normalise_snapshot_summary(  # noqa: PLR0912, PLR0915
     )
     if error_count is None:
         raise ServiceException(message=f'collector 运行 {run_id or ""} 包含采集错误或缺少错误计数')
-    if not allow_incomplete and int(_as_int(error_count, field='error_count') or 0) != 0:
+    parsed_error_count = int(_as_int(error_count, field='error_count') or 0)
+    if not allow_incomplete and parsed_error_count != 0:
         raise ServiceException(message=f'collector 运行 {run_id or ""} 包含采集错误或缺少错误计数')
     if not _pick(run, 'finished_at', 'finishedAt', default=_pick(payload, 'finished_at', 'finishedAt')):
         raise ServiceException(message=f'collector 运行 {run_id or ""} 缺少完成时间')
@@ -1008,352 +1013,17 @@ def _normalise_snapshot_summary(  # noqa: PLR0912, PLR0915
     }
 
 
-def _read_local_snapshot_summary_sync(path: Path, run_id: int, textbook_external_id: str) -> dict[str, Any]:  # noqa: PLR0912, PLR0915
-    """Read only sync_runs metadata and exact scoped row counts.
-
-    No snapshot row is selected here.  This is the local equivalent of the
-    collector's ``/snapshot-summary`` endpoint and keeps task-detail requests
-    bounded even when a content run contains hundreds of thousands of rows.
-    """
-
-    if not path.is_file():
-        raise ServiceException(message=f'采集库不存在：{path}，没有可用的题库快照摘要')
-    connection: sqlite3.Connection | None = None
-    try:
-        connection = connect_collector_sqlite(path)
-        connection.row_factory = sqlite3.Row
-        names = {
-            str(row['name'])
-            for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
-        }
-        required = {'sync_runs', *_snapshot_tables()}
-        missing = sorted(required - names)
-        if missing:
-            raise ServiceException(message=f'采集库缺少不可变题库快照表：{", ".join(missing)}')
-        run_columns = _table_columns(connection, 'sync_runs')
-        required_run_columns = {'id', 'provider', 'status', 'finished_at'}
-        lock_column = next((name for name in ('snapshot_locked_at', 'snapshotLockedAt', 'locked') if name in run_columns), None)
-        complete_column = next((name for name in ('snapshot_complete', 'snapshotComplete', 'complete') if name in run_columns), None)
-        scope_column = next((name for name in ('scope_json', 'scopeJson', 'scope') if name in run_columns), None)
-        error_column = next((name for name in ('error_count', 'errorCount') if name in run_columns), None)
-        missing_run = sorted(required_run_columns - run_columns)
-        if lock_column is None:
-            missing_run.append('snapshot_locked_at')
-        if complete_column is None:
-            missing_run.append('snapshot_complete')
-        if scope_column is None:
-            missing_run.append('scope_json')
-        if error_column is None:
-            missing_run.append('error_count')
-        if missing_run:
-            raise ServiceException(message=f'采集库 sync_runs 缺少字段：{", ".join(sorted(set(missing_run)))}')
-        run_count_columns = _snapshot_count_columns(run_columns)
-
-        row = connection.execute('SELECT * FROM "sync_runs" WHERE "id" = ?', (int(run_id),)).fetchone()
-        if row is None:
-            raise ServiceException(message=f'collector 运行 {run_id} 不存在，没有可用快照摘要')
-        run = dict(row)
-        run.setdefault('snapshot_locked_at', run.get(lock_column))
-        run.setdefault('snapshot_complete', run.get(complete_column))
-        run.setdefault('scope_json', run.get(scope_column))
-        run.setdefault('error_count', run.get(error_column))
-        if int(_as_int(run.get('error_count'), field='error_count') or 0) != 0:
-            raise ServiceException(message=f'collector 运行 {run_id} 包含采集错误，不能应用')
-        columns_by_table = {table: _table_columns(connection, table) for table in _snapshot_tables()}
-        for table, columns in columns_by_table.items():
-            absent = sorted(_snapshot_required_columns()[table] - columns)
-            if absent:
-                raise ServiceException(message=f'采集库 {table} 缺少字段：{", ".join(absent)}')
-        filters = '"run_id" = ? AND "provider" = ? AND "textbook_external_id" = ?'
-        params = (int(run_id), PROVIDER, str(textbook_external_id))
-        table_keys = _snapshot_table_keys()
-        counts: dict[str, int] = {}
-        for table, key in table_keys.items():
-            value = connection.execute(f'SELECT COUNT(*) FROM "{table}" WHERE {filters}', params).fetchone()
-            counts[key] = int(value[0] if value else 0)
-
-        _validate_local_scope_references(connection, run_id, textbook_external_id)
-
-        # Persisted counters are aggregate declarations for the sealed run.
-        # Compare them with all immutable rows before using the scoped counts
-        # for eligibility projection.
-        for table, key in table_keys.items():
-            declared_value = run.get(run_count_columns[key])
-            if declared_value is None:
-                raise ServiceException(message=f'运行 {run_id} 缺少有效 {key} 快照计数')
-            declared = int(_as_int(declared_value, field=f'{key} count') or 0)
-            actual_row = connection.execute(
-                f'SELECT COUNT(*) FROM "{table}" WHERE "run_id" = ? AND "provider" = ?',
-                (int(run_id), PROVIDER),
-            ).fetchone()
-            actual = int(actual_row[0] if actual_row else 0)
-            if actual != declared:
-                raise ServiceException(message=f'运行 {run_id} 的 {key} 总计数不一致：{actual}/{declared}')
-
-        scope_ids = _run_scope_ids(run.get('scope_json'))
-        declared_counts: Mapping[str, Any] = {}
-        for field in ('snapshot_counts_json', 'snapshotCounts', 'counts_json', 'counts'):
-            candidate: Any = run.get(field)
-            if isinstance(candidate, str):
-                try:
-                    candidate = json.loads(candidate)
-                except (TypeError, json.JSONDecodeError):
-                    candidate = None
-            if isinstance(candidate, Mapping):
-                nested = candidate.get(str(textbook_external_id))
-                if isinstance(nested, Mapping):
-                    declared_counts = nested
-                elif len(scope_ids) <= 1:
-                    declared_counts = candidate
-                break
-        aliases_by_key = {
-            'catalogs': 'catalogItemCount',
-            'questions': 'questionItemCount',
-            'questionCatalogs': 'questionCatalogCount',
-            'tags': 'questionTagCount',
-            'assets': 'questionAssetCount',
-        }
-        for key, aliases in SNAPSHOT_COUNT_FIELDS.items():
-            row_key = aliases_by_key[key]
-            count_key = {
-                'catalogItemCount': 'catalogs',
-                'questionItemCount': 'questions',
-                'questionCatalogCount': 'questionCatalogs',
-                'questionTagCount': 'tags',
-                'questionAssetCount': 'assets',
-            }[row_key]
-            declared = next((declared_counts[name] for name in aliases if name in declared_counts), None)
-            if declared is None and len(scope_ids) <= 1:
-                declared = run.get(run_count_columns[key])
-            if declared is not None and _as_int(declared, field=f'{key} count') != counts[count_key]:
-                raise ServiceException(
-                    message=f'运行 {run_id} 教材 {textbook_external_id} 的 {key} 计数不一致：'
-                    f'{counts[count_key]}/{declared}'
-                )
-        if counts['catalogs'] <= 0 or counts['questions'] <= 0 or counts['questionCatalogs'] <= 0:
-            raise ServiceException(message=f'任务 0 教材 {textbook_external_id} 缺少必要目录、题目或目录关系')
-        # Validate the bounded header only after the exact scoped counts have
-        # been read.  Older local collector schemas do not persist aggregate
-        # counter columns on ``sync_runs``; the SQL counts are authoritative
-        # in that case and are supplied to the same validator used by remote
-        # summaries.  No snapshot row is selected or materialized here.
-        summary = _normalise_snapshot_summary(
-            {
-                'available': True,
-                'run': run,
-                'immutable': True,
-                'snapshotComplete': run.get('snapshot_complete'),
-                'counts': {
-                    'catalogItemCount': counts['catalogs'],
-                    'questionItemCount': counts['questions'],
-                    'questionCatalogCount': counts['questionCatalogs'],
-                    'questionTagCount': counts['tags'],
-                    'questionAssetCount': counts['assets'],
-                },
-            },
-            0,
-            str(textbook_external_id),
-        )
-        summary['counts'] = {
-            'catalogItemCount': counts['catalogs'],
-            'questionItemCount': counts['questions'],
-            'questionCatalogCount': counts['questionCatalogs'],
-            'questionTagCount': counts['tags'],
-            'questionAssetCount': counts['assets'],
-        }
-        return summary
-    except sqlite3.Error as exc:
-        raise ServiceException(message=f'采集库读取失败：{exc}') from exc
-    finally:
-        if connection is not None:
-            connection.close()
-
-
-def _read_local_partial_snapshot_summary_sync(  # noqa: PLR0912, PLR0915
-    path: Path,
-    run_id: int,
-    textbook_external_id: str,
-    *,
-    allow_failed: bool = False,
-    allow_blocked: bool = False,
-) -> dict[str, Any]:
-    """Read a bounded, sealed-but-incomplete collector snapshot.
-
-    This reader is deliberately separate from the complete-summary reader.
-    It never exposes row arrays and it never treats a partial run as eligible
-    for apply.  The service uses it only to bind a safe resume source after a
-    collector interruption (or, for legacy rows, a transient failed run).
-    Every one of the five snapshot tables is checked for exact provider and
-    textbook ownership so a run from another scope cannot be guessed into a
-    task merely because its numeric ID is nearby.
-    """
-
-    if not path.is_file():
-        raise ServiceException(message=f'采集库不存在：{path}，没有可用的中断快照')
-    try:
-        parsed_run_id = int(run_id)
-    except (TypeError, ValueError) as exc:
-        raise ServiceException(message='中断 collectorRunId 无效') from exc
-    if parsed_run_id <= 0 or not _safe_external_id(textbook_external_id):
-        raise ServiceException(message='中断快照缺少有效教材或运行 ID')
-
-    connection: sqlite3.Connection | None = None
-    try:
-        connection = connect_collector_sqlite(path)
-        connection.row_factory = sqlite3.Row
-        required_tables = {'sync_runs', *_snapshot_tables()}
-        table_names = {
-            str(row['name'])
-            for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
-        }
-        missing_tables = sorted(required_tables - table_names)
-        if missing_tables:
-            raise ServiceException(message=f'采集库缺少中断快照表：{", ".join(missing_tables)}')
-
-        run_columns = _table_columns(connection, 'sync_runs')
-        required_run = {'id', 'provider', 'status', 'finished_at'}
-        lock_column = next(
-            (name for name in ('snapshot_locked_at', 'snapshotLockedAt', 'locked') if name in run_columns),
-            None,
-        )
-        complete_column = next(
-            (name for name in ('snapshot_complete', 'snapshotComplete', 'complete') if name in run_columns),
-            None,
-        )
-        scope_column = next(
-            (name for name in ('scope_json', 'scopeJson', 'scope') if name in run_columns),
-            None,
-        )
-        missing_run = sorted(required_run - run_columns)
-        if lock_column is None:
-            missing_run.append('snapshot_locked_at')
-        if complete_column is None:
-            missing_run.append('snapshot_complete')
-        if scope_column is None:
-            missing_run.append('scope_json')
-        if missing_run:
-            raise ServiceException(message=f'采集库 sync_runs 缺少中断校验字段：{", ".join(sorted(set(missing_run)))}')
-        run_count_columns = _snapshot_count_columns(run_columns)
-        run_row = connection.execute('SELECT * FROM "sync_runs" WHERE "id" = ?', (parsed_run_id,)).fetchone()
-        if run_row is None:
-            raise ServiceException(message=f'collector 运行 {parsed_run_id} 不存在，无法安全续采')
-        run = dict(run_row)
-        status = str(run.get('status') or '').strip().lower()
-        allowed_statuses = (
-            {'interrupted'}
-            | ({'failed'} if allow_failed else set())
-            | ({'blocked'} if allow_blocked else set())
-        )
-        if status not in allowed_statuses:
-            raise ServiceException(message=f'collector 运行 {parsed_run_id} 不是可续采的中断状态')
-        if not run.get('finished_at'):
-            raise ServiceException(message=f'collector 运行 {parsed_run_id} 缺少完成时间，无法安全续采')
-        if str(run.get('provider') or '').strip() != PROVIDER:
-            raise ServiceException(message=f'collector 运行 {parsed_run_id} 来源不受支持')
-        run.setdefault('snapshot_locked_at', run.get(lock_column))
-        run.setdefault('snapshot_complete', run.get(complete_column))
-        run.setdefault('scope_json', run.get(scope_column))
-        if not _lock_present(run.get('snapshot_locked_at')):
-            raise ServiceException(message=f'collector 运行 {parsed_run_id} 未锁定，不能作为安全断点')
-        if _as_bool(run.get('snapshot_complete')):
-            raise ServiceException(message=f'collector 运行 {parsed_run_id} 已完整，不能作为中断断点')
-        scope_ids = _run_scope_ids(run.get('scope_json'))
-        if str(textbook_external_id) not in scope_ids:
-            raise ServiceException(message=f'collector 运行 {parsed_run_id} 与教材 {textbook_external_id} 不匹配')
-
-        table_keys = _snapshot_table_keys()
-        counts: dict[str, int] = {}
-        for table, key in table_keys.items():
-            columns = _table_columns(connection, table)
-            required_columns = _snapshot_required_columns()[table]
-            absent = sorted(required_columns - columns)
-            if absent:
-                raise ServiceException(message=f'采集库 {table} 缺少字段：{", ".join(absent)}')
-            total_row = connection.execute(
-                f'SELECT COUNT(*) FROM "{table}" WHERE "run_id" = ?',
-                (parsed_run_id,),
-            ).fetchone()
-            scoped_row = connection.execute(
-                f'SELECT COUNT(*) FROM "{table}" '
-                'WHERE "run_id" = ? AND "provider" = ? AND "textbook_external_id" = ?',
-                (parsed_run_id, PROVIDER, str(textbook_external_id)),
-            ).fetchone()
-            total = int(total_row[0] if total_row else 0)
-            scoped = int(scoped_row[0] if scoped_row else 0)
-            if total != scoped:
-                raise ServiceException(
-                    message=(
-                        f'collector 运行 {parsed_run_id} 的 {table} 存在跨 provider/textbook 行，'
-                        f'不属于教材 {textbook_external_id}'
-                    )
-                )
-            if scoped > MAX_SNAPSHOT_ROWS:
-                raise ServiceException(message=f'中断运行 {parsed_run_id} 快照超过安全上限 {MAX_SNAPSHOT_ROWS}')
-            counts[key] = scoped
-
-        if (
-            counts.get('catalogs', 0) <= 0
-            or counts.get('questions', 0) <= 0
-            or counts.get('questionCatalogs', 0) <= 0
-        ):
-            raise ServiceException(
-                message=f'collector 运行 {parsed_run_id} 没有可安全续采的完整页快照'
-            )
-
-        # Keep the declared run counters bounded/parseable when present, but
-        # do not require them to equal the partial row counts: interrupted
-        # collectors may be sealed before their aggregate counters are
-        # refreshed.  The exact scoped SQL counts above are authoritative.
-        for key, column in run_count_columns.items():
-            value = run.get(column)
-            if value is None:
-                continue
-            _as_int(value, field=f'{key} count')
-
-        return {
-            'available': True,
-            'immutable': True,
-            'partial': True,
-            'snapshotComplete': False,
-            'snapshot_complete': False,
-            'run': run,
-            'collector_run_id': parsed_run_id,
-            'textbook_external_id': str(textbook_external_id),
-            'counts': {
-                'catalogItemCount': counts['catalogs'],
-                'questionItemCount': counts['questions'],
-                'questionCatalogCount': counts['questionCatalogs'],
-                'questionTagCount': counts['tags'],
-                'questionAssetCount': counts['assets'],
-            },
-        }
-    except sqlite3.Error as exc:
-        raise ServiceException(message=f'采集库中断快照读取失败：{exc}') from exc
-    finally:
-        if connection is not None:
-            connection.close()
-
-
 async def _read_snapshot_summary(run_id: int, textbook_external_id: str) -> dict[str, Any]:
     """Read and validate only bounded immutable snapshot metadata/counts."""
-
-    if remote_collector_enabled():
-        client = CollectorClient()
-        method = getattr(client, 'run_snapshot_summary', None) or getattr(client, 'snapshot_summary', None)
-        if method is None:
-            raise ServiceException(message='collector 客户端不支持题库快照摘要接口')
-        try:
-            payload = await asyncio.to_thread(
-                method,
-                run_id,
-                textbook_external_id=textbook_external_id,
-            )
-        except TypeError:
-            payload = await asyncio.to_thread(method, run_id)
-        if hasattr(payload, '__await__'):
-            payload = await payload
-        return _normalise_snapshot_summary(payload, 0, str(textbook_external_id))
-    return await asyncio.to_thread(_read_local_snapshot_summary_sync, _source_path(), run_id, textbook_external_id)
+    payload = await asyncio.to_thread(
+        CollectorClient().run_snapshot_summary,
+        run_id,
+        textbook_external_id=textbook_external_id,
+    )
+    normalized = _normalise_snapshot_summary(payload, 0, str(textbook_external_id))
+    if int(normalized['collector_run_id']) != int(run_id):
+        raise ServiceException(message=f'collector 运行 ID 与教材 {textbook_external_id} 不一致')
+    return normalized
 
 
 def _normalise_snapshot(raw: Mapping[str, Any], task_id: int, textbook_external_id: str) -> dict[str, Any]:  # noqa: PLR0912, PLR0915
@@ -1363,6 +1033,8 @@ def _normalise_snapshot(raw: Mapping[str, Any], task_id: int, textbook_external_
     run_id = _pick(run, 'id', 'runId', 'collectorRunId')
     if run_id is None:
         raise ServiceException(message=f'任务 {task_id} 教材 {textbook_external_id} 缺少 collector 运行 ID')
+    if isinstance(run_id, bool):
+        raise ServiceException(message=f'任务 {task_id} 教材 {textbook_external_id} 的 collector 运行 ID 无效')
     try:
         normalized_run_id = int(run_id)
     except (TypeError, ValueError) as exc:
@@ -1670,13 +1342,14 @@ def _normalise_snapshot(raw: Mapping[str, Any], task_id: int, textbook_external_
         asset_key = str(_pick(row, 'asset_key', 'assetKey', default='') or '').strip()[:100]
         source_url = str(_pick(row, 'source_url', 'sourceUrl', 'url', default='') or '').strip()
         asset_type = str(_pick(row, 'asset_type', 'assetType', 'type', default='') or '').strip()
-        storage_path = _pick(row, 'storage_path', 'storagePath', 'local_path', 'localPath')
-        file_hash = _pick(row, 'content_sha256', 'contentSha256', 'sha256', 'file_hash', 'fileHash')
+        file_hash = str(
+            _pick(row, 'content_sha256', 'contentSha256', 'sha256', 'file_hash', 'fileHash', default='') or ''
+        ).strip().lower()
         if not has_scope_field(row) or row_provider(row) != PROVIDER or row_scope(row) != str(textbook_external_id) or question_id not in question_ids or not asset_key or not asset_type or not source_url:
             raise ServiceException(message=f'任务 {task_id} 教材 {textbook_external_id} 包含无效素材')
-        storage_path = _safe_storage_path(storage_path)
-        if storage_path is None or not str(file_hash or '').strip():
-            raise ServiceException(message=f'任务 {task_id} 教材 {textbook_external_id} 的素材 {asset_key} 未完整下载')
+        if len(file_hash) != ASSET_SHA256_LENGTH or any(char not in '0123456789abcdef' for char in file_hash):
+            raise ServiceException(message=f'任务 {task_id} 教材 {textbook_external_id} 的素材 {asset_key} 内容摘要无效')
+        storage_path = _asset_relative_path(file_hash, row)
         key = (question_id, asset_key)
         if key in asset_keys:
             raise ServiceException(message=f'任务 {task_id} 教材 {textbook_external_id} 的素材键重复')
@@ -1691,6 +1364,7 @@ def _normalise_snapshot(raw: Mapping[str, Any], task_id: int, textbook_external_
                 'mime_type': _pick(row, 'mime_type', 'mimeType'),
                 'file_name': _pick(row, 'file_name', 'fileName'),
                 'file_hash': file_hash,
+                'byte_size': _asset_byte_size(row),
                 'width': _pick(row, 'width'),
                 'height': _pick(row, 'height'),
                 'download_status': str(_pick(row, 'download_status', 'downloadStatus', default='downloaded') or 'downloaded'),
@@ -1747,20 +1421,129 @@ def _positive_run_id(value: Any) -> int | None:
     return parsed if parsed > 0 else None
 
 
-async def _load_task_and_scopes(db: AsyncSession, task_id: int) -> tuple[QbSyncJob, list[QbSyncJobScope]]:
-    # Task deletion uses this same task->state lock order. Holding the task
-    # row through immutable snapshot validation prevents a concurrent delete
-    # from leaving apply state pointing at a removed job.
-    result = await db.execute(
-        select(QbSyncJob)
-        .where(QbSyncJob.run_id == int(task_id), QbSyncJob.task_module == 'question')
-        .with_for_update()
+_TASK_SIGNATURE_FIELDS = (
+    'run_id',
+    'run_type',
+    'task_module',
+    'status',
+    'phase',
+    'metadata_run_id',
+    'source_task_id',
+    'retry_of_run_id',
+    'collector_job_id',
+    'options_json',
+    'catalog_count',
+    'question_count',
+    'question_catalog_count',
+    'question_tag_count',
+    'question_asset_count',
+    'snapshot_complete',
+    'snapshot_locked_at',
+)
+_SCOPE_SIGNATURE_FIELDS = (
+    'scope_id',
+    'run_id',
+    'local_version_id',
+    'local_textbook_id',
+    'version_name_snapshot',
+    'textbook_name_snapshot',
+    'source_provider',
+    'external_version_id',
+    'external_textbook_id',
+    'metadata_run_id',
+    'collector_job_id',
+    'collector_run_id',
+    'resume_from_collector_run_id',
+    'status',
+    'catalog_count',
+    'question_count',
+    'new_catalog_count',
+    'changed_catalog_count',
+    'new_question_count',
+    'changed_question_count',
+    'question_catalog_count',
+    'question_tag_count',
+    'question_asset_count',
+    'snapshot_complete',
+    'snapshot_locked_at',
+)
+
+
+def _freeze_signature_value(value: Any) -> Any:
+    """Copy row values into a recursively immutable comparison shape."""
+
+    if isinstance(value, datetime):
+        return ('datetime', value.isoformat())
+    if isinstance(value, Mapping):
+        return tuple(sorted(((str(key), _freeze_signature_value(item)) for key, item in value.items()), key=repr))
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_signature_value(item) for item in value)
+    if isinstance(value, (set, frozenset)):
+        return tuple(sorted((_freeze_signature_value(item) for item in value), key=repr))
+    if isinstance(value, bytearray):
+        return bytes(value)
+    return value
+
+
+def _row_signature(row: object, fields: tuple[str, ...]) -> tuple[tuple[str, Any], ...]:
+    return tuple((field, _freeze_signature_value(_task_value(row, field))) for field in fields)
+
+
+def _task_scope_signature(task: object, scopes: list[object]) -> tuple[Any, ...]:
+    task_signature = _row_signature(task, _TASK_SIGNATURE_FIELDS)
+    scope_signatures = tuple(
+        sorted(
+            (_row_signature(scope, _SCOPE_SIGNATURE_FIELDS) for scope in scopes),
+            key=repr,
+        )
     )
+    return task_signature, scope_signatures
+
+
+async def _rollback_read_transaction(db: AsyncSession) -> None:
+    """End the initial read transaction before any collector or disk I/O."""
+
+    rollback = getattr(db, 'rollback', None)
+    if not callable(rollback):
+        return
+    result = rollback()
+    if inspect.isawaitable(result):
+        await result
+
+
+async def _load_task_and_scopes(
+    db: AsyncSession,
+    task_id: int,
+    *,
+    for_update: bool = False,
+) -> tuple[QbSyncJob, list[QbSyncJobScope]]:
+    """Load a question task and all scopes, optionally acquiring row locks.
+
+    Apply uses this twice: an unlocked read creates an immutable signature,
+    then the HTTP/materialization phase runs after rollback, and finally this
+    function is called with ``for_update=True`` to lock and revalidate the
+    exact rows before formal writes begin.
+    """
+
+    task_query = select(QbSyncJob).where(
+        QbSyncJob.run_id == int(task_id),
+        QbSyncJob.task_module == 'question',
+    )
+    if for_update:
+        task_query = task_query.with_for_update()
+    result = await db.execute(task_query)
     scalar = getattr(result, 'scalars', None)
     task = next(iter(scalar().all()), None) if callable(scalar) else None
     if task is None:
         raise ServiceException(message='同步题库任务不存在')
-    scope_result = await db.execute(select(QbSyncJobScope).where(QbSyncJobScope.run_id == int(task_id)).order_by(QbSyncJobScope.scope_id))
+    scope_query = (
+        select(QbSyncJobScope)
+        .where(QbSyncJobScope.run_id == int(task_id))
+        .order_by(QbSyncJobScope.scope_id)
+    )
+    if for_update:
+        scope_query = scope_query.with_for_update()
+    scope_result = await db.execute(scope_query)
     scalar = getattr(scope_result, 'scalars', None)
     scopes = list(scalar().all()) if callable(scalar) else []
     return task, scopes
@@ -1768,12 +1551,13 @@ async def _load_task_and_scopes(db: AsyncSession, task_id: int) -> tuple[QbSyncJ
 
 async def _validate_task_snapshots(db: AsyncSession, task_id: int) -> tuple[QbSyncJob, list[QbSyncJobScope], list[dict[str, Any]]]:
     task, scopes = await _load_task_and_scopes(db, task_id)
+    initial_signature = _task_scope_signature(task, scopes)
     if str(_task_value(task, 'status', default='') or '').strip().lower() != 'completed':
         raise ServiceException(message='只有已成功完成的同步题库任务才能应用正式表')
     if not scopes:
         raise ServiceException(message='同步题库任务缺少教材范围，不能应用正式表')
     seen: set[str] = set()
-    snapshots: list[dict[str, Any]] = []
+    scope_inputs: list[tuple[str, int]] = []
     for scope in scopes:
         provider = str(_task_value(scope, 'source_provider', 'sourceProvider', default='') or '').strip()
         textbook_id = str(_task_value(scope, 'external_textbook_id', 'externalTextbookId', default='') or '').strip()
@@ -1790,14 +1574,43 @@ async def _validate_task_snapshots(db: AsyncSession, task_id: int) -> tuple[QbSy
             raise ServiceException(message=f'任务 {task_id} 教材 {textbook_id} 缺少 collectorRunId') from exc
         if collector_run_id <= 0:
             raise ServiceException(message=f'任务 {task_id} 教材 {textbook_id} 缺少 collectorRunId')
+        scope_inputs.append((textbook_id, collector_run_id))
+
+    # The first SELECT starts an AsyncSession transaction even without a row
+    # lock. End it before touching the remote collector or the local asset
+    # filesystem; no database transaction/lock spans network or disk latency.
+    await _rollback_read_transaction(db)
+
+    snapshots: list[dict[str, Any]] = []
+    for textbook_id, collector_run_id in scope_inputs:
         raw = await _read_snapshot(collector_run_id, textbook_id)
         snapshot = _normalise_snapshot(raw, task_id, textbook_id)
         if int(snapshot['collector_run_id'] or 0) != collector_run_id:
             raise ServiceException(message=f'collector 运行 ID 与任务 {task_id} 教材 {textbook_id} 不一致')
-        snapshot['scope'] = scope
-        snapshot['task_id'] = int(task_id)
+        await _download_snapshot_assets(snapshot)
         snapshots.append(snapshot)
-    return task, scopes, snapshots
+
+    # Re-read and lock both the task and every scope only after all remote and
+    # asset work has completed. Any status, scope membership, identity or run
+    # change during the unlocked phase fails closed before formal writes.
+    locked_task, locked_scopes = await _load_task_and_scopes(db, task_id, for_update=True)
+    if _task_scope_signature(locked_task, locked_scopes) != initial_signature:
+        raise ServiceException(message='同步题库任务或教材范围在快照读取期间发生变化，请刷新后重试')
+    locked_by_key = {
+        (
+            str(_task_value(scope, 'source_provider', 'sourceProvider', default='') or '').strip(),
+            str(_task_value(scope, 'external_textbook_id', 'externalTextbookId', default='') or '').strip(),
+        ): scope
+        for scope in locked_scopes
+    }
+    for snapshot in snapshots:
+        key = (PROVIDER, str(snapshot['textbook_external_id']))
+        locked_scope = locked_by_key.get(key)
+        if locked_scope is None:
+            raise ServiceException(message='同步题库任务教材范围在锁定复核期间发生变化，请刷新后重试')
+        snapshot['scope'] = locked_scope
+        snapshot['task_id'] = int(task_id)
+    return locked_task, locked_scopes, snapshots
 
 
 def _stats_bucket() -> dict[str, int]:
@@ -2674,8 +2487,5 @@ __all__ = [
     'QuestionApplyService',
     '_normalise_snapshot',
     '_normalise_snapshot_summary',
-    '_read_local_partial_snapshot_summary_sync',
-    '_read_local_snapshot_summary_sync',
-    '_read_local_snapshot_sync',
     '_read_snapshot_summary',
 ]

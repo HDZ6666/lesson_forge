@@ -1,9 +1,8 @@
-"""Run the source collectors behind the bank synchronization API.
+"""Orchestrate bank synchronization through the collector HTTP service.
 
-The collector scripts are deliberately kept as separate Node processes.  This
-module only orchestrates them and persists a bounded, operator-facing status in
-MySQL; the scripts continue to write their candidate data to SQLite and never
-receive a client supplied command, path, or arbitrary argument.
+The service owns task state in MySQL while the collector owns immutable
+metadata/content snapshots.  No collector database or local crawler process
+is used here.
 """
 
 from __future__ import annotations
@@ -13,16 +12,11 @@ import json
 import os
 import re
 import secrets
-import shutil
-import signal
-import sqlite3
-import time
 from collections import deque
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from decimal import Decimal
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
@@ -40,34 +34,19 @@ from plugins.bank.entity.vo.bank_vo import (
     SyncRunPageQueryModel,
     SyncRunStartRequestModel,
 )
-from plugins.bank.service.catalog_progress import read_catalog_progress_sync
-from plugins.bank.service.collector_client import CollectorClient, remote_collector_enabled
-from plugins.bank.service.collector_sqlite import connect_collector_sqlite
-from plugins.bank.service.question_apply_service import (
-    _normalise_snapshot_summary,
-    _read_local_partial_snapshot_summary_sync,
-    _read_local_snapshot_summary_sync,
-    _run_scope_ids,
-)
-from plugins.bank.service.sync_service import _read_metadata_snapshot_rows_sync
+from plugins.bank.service.collector_client import CollectorClient
+from plugins.bank.service.question_apply_service import _normalise_snapshot_summary
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[4]
-COLLECTOR_ROOT = PROJECT_ROOT / 'collector'
-METADATA_SCRIPT = COLLECTOR_ROOT / 'zujuan_metadata_sync.cjs'
-QUESTION_SCRIPT = COLLECTOR_ROOT / 'zujuan_sync.cjs'
-DEFAULT_COLLECTOR_DB = COLLECTOR_ROOT / 'data' / 'zujuan.sqlite3'
 PROVIDER = 'zujuan'
 SOURCE_HOST = 'zujuan.xkw.com'
 SOURCE_BANK_PATH = 'czsx'
 MAX_LOG_LINES = 160
 MAX_LOG_CHARS = 24000
 PROCESS_POLL_SECONDS = 0.8
-PROCESS_TERM_GRACE_SECONDS = 12.0
-STATUS_PERSIST_INTERVAL_SECONDS = 0.8
 WORKER_HEARTBEAT_TIMEOUT_SECONDS = 30.0
 # Startup recovery is deliberately retried while the service is alive.  A
 # one-shot startup hook cannot know whether a recent heartbeat belongs to a
@@ -77,8 +56,6 @@ RECOVERY_MONITOR_INTERVAL_SECONDS = max(1.0, min(10.0, WORKER_HEARTBEAT_TIMEOUT_
 SITE_PAGE_LIMIT = 1000
 MAX_SELECTED_TEXTBOOKS = 200
 SYNC_RUN_TYPES = frozenset({'metadata', 'content'})
-QUESTION_TERMINAL_STATUSES = frozenset({'completed', 'failed', 'blocked', 'cancelled', 'interrupted'})
-INTERRUPTED_STATUSES = frozenset({'interrupted'})
 MAX_PARTIAL_RUN_SCAN = 50
 TRANSIENT_ERROR_RE = re.compile(
     r'(?:timeout|timed\s*out|etimedout|econnreset|econnrefused|enetunreach|eai_again|network|fetch\s+failed|'
@@ -122,13 +99,12 @@ _RECOVERY_IN_PROGRESS = False
 class _WorkerHandle:
     """In-process cancellation identity for one task.
 
-    A PID from the database is never sufficient to signal a process.  The
-    worker token and the live subprocess object must also match this handle.
+    The worker token and remote collector job ID are kept here so a restart
+    can safely resume polling the server-owned job.
     """
 
     token: str
     task: asyncio.Task[None] | None = None
-    process: asyncio.subprocess.Process | None = None
     remote_job_id: str | None = None
     recovered: bool = False
     terminate_sent: bool = False
@@ -139,7 +115,6 @@ class _WorkerHandle:
     run_type: str = 'metadata'
     task_module: str = 'center'
     metadata_run_id: int | None = None
-    metadata_watermark: int | None = None
     textbook_external_ids: list[str] = field(default_factory=list)
     # Server-resolved textbook identity used by independent question tasks.
     # This is rebuilt from durable scope rows/options during recovery.
@@ -147,40 +122,6 @@ class _WorkerHandle:
     # A same-ID resume request sets this marker so the remote adapter can
     # omit already completed scopes from the newly-created collector job.
     resumed: bool = False
-
-
-@dataclass
-class _ScriptResult:
-    returncode: int
-    lines: list[str]
-    metadata_run_id: int = 0
-    catalog_count_base: int = 0
-    question_count_base: int = 0
-    catalog_count: int = 0
-    question_count: int = 0
-    versions_count: int = 0
-    textbooks_count: int = 0
-    # A content script creates one immutable collector run per textbook.  The
-    # line is parsed for local execution; remote execution supplies the same
-    # value through the per-textbook scope payload.
-    collector_run_id: int = 0
-
-
-@dataclass(frozen=True)
-class _MetadataBatch:
-    run_id: int
-    versions_count: int
-    textbooks: list[dict[str, str | None]]
-    textbooks_count: int | None = None
-
-
-def _collector_path() -> Path:
-    configured = os.environ.get('BANK_COLLECTOR_DB')
-    if not configured:
-        return DEFAULT_COLLECTOR_DB
-    path = Path(configured).expanduser()
-    return path if path.is_absolute() else PROJECT_ROOT / path
-
 
 def _max_pages() -> int:
     """Allow an operator/test environment to reduce the site page ceiling."""
@@ -196,61 +137,21 @@ def _max_pages() -> int:
         raise ServiceException(message=f'配置的 BANK_SYNC_MAX_PAGES 必须在 1 到 {SITE_PAGE_LIMIT} 之间')
     return value
 
-
-def _node_command() -> str:
-    configured = os.environ.get('BANK_NODE_BIN')
-    if configured:
-        path = Path(configured).expanduser()
-        if path.is_file() and os.access(path, os.X_OK):
-            return str(path)
-        raise ServiceException(message='配置的 BANK_NODE_BIN 不可执行')
-    node = shutil.which('node')
-    if not node:
-        raise ServiceException(message='后端未找到 Node.js，无法启动同步脚本')
-    return node
-
-
-def _headful() -> bool:
-    """Whether local collector Chrome should show a window.
-
-    This site blocks cold headless sessions.  Backend-spawned local runs
-    therefore default to headed Chrome.  Operators can set
-    ``BANK_COLLECTOR_HEADFUL=false`` on machines without a display.
-    The HTTP request cannot supply this flag.
-    """
-
-    raw = os.environ.get('BANK_COLLECTOR_HEADFUL', '').strip()
-    if not raw:
-        return True
-    normalized = raw.lower()
-    if normalized in {'1', 'true', 'yes', 'y', 'on'}:
-        return True
-    if normalized in {'0', 'false', 'no', 'n', 'off'}:
-        return False
-    raise ServiceException(message='配置的 BANK_COLLECTOR_HEADFUL 必须是 true/false')
-
-
-def _with_headful(command: list[str]) -> list[str]:
-    if _headful() and '--headful' not in command:
-        return [*command, '--headful']
-    return list(command)
-
-
 def _safe_external_id(value: object) -> bool:
     text = str(value or '').strip()
     return bool(text and re.fullmatch(r'(?:\d+|[A-Za-z0-9][A-Za-z0-9._-]{0,63})', text))
 
 
 def _metadata_value(row: Mapping[str, Any] | object, *names: str, default: Any = None) -> Any:
-    """Read a metadata field from either the SQLite or collector API shape."""
+    """Read a metadata field from a collector API shape or test double."""
 
     for name in names:
         if isinstance(row, Mapping):
             if name in row:
                 return row[name]
         else:
-            # ``sqlite3.Row`` is subscriptable but is not a Mapping, while
-            # collector/API test doubles commonly expose attributes.
+            # Collector/API test doubles may expose attributes instead of a
+            # mapping interface.
             try:
                 return row[name]  # type: ignore[index]
             except (KeyError, IndexError, TypeError):
@@ -385,144 +286,14 @@ def _validate_metadata_textbook_entry(  # noqa: PLR0912
     return bootstrap or None
 
 
-def _metadata_run_watermark_sync(path: Path) -> int:
-    """Return the latest collector metadata-run ID before a new run starts."""
 
-    if not path.is_file():
-        return 0
-    connection: sqlite3.Connection | None = None
-    try:
-        connection = connect_collector_sqlite(path)
-        table = connection.execute(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'source_metadata_runs'"
-        ).fetchone()
-        if table is None:
-            return 0
-        row = connection.execute('SELECT COALESCE(MAX(id), 0) FROM source_metadata_runs').fetchone()
-        return int(row[0] or 0) if row else 0
-    except sqlite3.Error as exc:
-        raise ServiceException(message=f'采集库元数据运行状态读取失败：{exc}') from exc
-    finally:
-        if connection is not None:
-            connection.close()
-
-
-def _metadata_run_id_after_sync(path: Path, watermark: int) -> int:
-    """Find the newest collector run created after ``watermark``."""
-
-    if not path.is_file():
-        return 0
-    connection: sqlite3.Connection | None = None
-    try:
-        connection = connect_collector_sqlite(path)
-        table = connection.execute(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'source_metadata_runs'"
-        ).fetchone()
-        if table is None:
-            return 0
-        row = connection.execute(
-            'SELECT COALESCE(MAX(id), 0) FROM source_metadata_runs WHERE id > ?',
-            (watermark,),
-        ).fetchone()
-        return int(row[0] or 0) if row else 0
-    except sqlite3.Error as exc:
-        raise ServiceException(message=f'采集库元数据运行状态读取失败：{exc}') from exc
-    finally:
-        if connection is not None:
-            connection.close()
-
-
-def _content_run_ids_after_sync(
-    path: Path,
-    watermark: int,
-    textbook_external_id: str,
-    *,
-    statuses: set[str] | frozenset[str] | tuple[str, ...] | None = None,
-) -> list[int]:
-    """Find bounded collector content runs for one textbook."""
-
-    if not path.is_file():
-        return []
-    connection: sqlite3.Connection | None = None
-    try:
-        connection = connect_collector_sqlite(path)
-        connection.row_factory = sqlite3.Row
-        table = connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='sync_runs'").fetchone()
-        if table is None:
-            return []
-        rows = connection.execute(
-            'SELECT id, scope_json, status FROM sync_runs WHERE id > ? ORDER BY id DESC LIMIT ?',
-            (watermark, MAX_PARTIAL_RUN_SCAN),
-        ).fetchall()
-        accepted = set(statuses or {'success', 'completed'})
-        matches: list[int] = []
-        for row in rows:
-            try:
-                scope = json.loads(str(row['scope_json'] or '{}'))
-            except (TypeError, json.JSONDecodeError):
-                scope = {}
-            scope_ids = _run_scope_ids(scope)
-            if str(textbook_external_id) in scope_ids and str(row['status'] or '').strip().lower() in accepted:
-                matches.append(int(row['id']))
-        return matches
-    except (sqlite3.Error, OSError):
-        return []
-    finally:
-        if connection is not None:
-            connection.close()
-
-
-def _content_run_id_after_sync(
-    path: Path,
-    watermark: int,
-    textbook_external_id: str,
-    *,
-    statuses: set[str] | frozenset[str] | tuple[str, ...] | None = None,
-) -> int:
-    """Return the newest matching content run (legacy single-ID helper)."""
-
-    matches = _content_run_ids_after_sync(
-        path,
-        watermark,
-        textbook_external_id,
-        statuses=statuses,
-    )
-    return matches[0] if matches else 0
-
-
-def _collector_run_ids_from_output(lines: list[str] | deque[str]) -> list[int]:
-    """Extract only explicit collector run IDs from bounded child output.
-
-    The parser is intentionally narrow.  It does not infer a run from a
-    generic number (page count, textbook ID, or error code), which is the
-    critical safety property when binding a partial SQLite snapshot to a
-    service scope.
-    """
-
-    text = _tail_text(lines)
-    patterns = (
-        r'(?i)\bcollector(?:[_ -]?run)?(?:[_ -]?id)?\s*[:=]\s*(\d+)\b',
-        r'(?i)\bcollectorRunId\s*[:=]\s*(\d+)\b',
-        r'(?i)\bcontent[-_ ]?run[-_ ]?id\s*[:=]\s*(\d+)\b',
-        r'(?i)\bsync[-_ ]?run[-_ ]?id\s*[:=]\s*(\d+)\b',
-        r'(?im)(?:^|[\s\[])run(?:Id)?\s*[:=]\s*(\d+)\b',
-    )
-    found: list[int] = []
-    for pattern in patterns:
-        for match in re.finditer(pattern, text):
-            parsed = _positive_collector_run_id(match.group(1))
-            if parsed is not None and parsed not in found:
-                found.append(parsed)
-    return found
-
-
-def _has_safe_partial_progress(summary: Mapping[str, Any], result: _ScriptResult | None = None) -> bool:
+def _has_safe_partial_progress(summary: Mapping[str, Any]) -> bool:
     """Require a usable immutable page snapshot before offering resume.
 
     A tag/asset/progress counter alone is not enough: the Collector clone
     contract needs the core catalog, question and question-catalog tables to
-    be non-empty.  These exact scoped counts are authoritative for both the
-    local and remote bounded summary readers.
+    be non-empty. These exact scoped counts are authoritative for the remote
+    bounded summary reader.
     """
 
     def positive(value: Any) -> bool:
@@ -553,385 +324,6 @@ def _has_safe_partial_progress(summary: Mapping[str, Any], result: _ScriptResult
 def _is_transient_error(message: Any) -> bool:
     return bool(TRANSIENT_ERROR_RE.search(str(message or '')))
 
-
-def _partial_summary_for_local_failure(
-    path: Path,
-    watermark: int,
-    textbook_external_id: str,
-    result: _ScriptResult,
-    error_message: str,
-) -> dict[str, Any] | None:
-    """Bind one strict partial run to a failed child process.
-
-    Explicit output IDs win.  If the child omitted one, the bounded SQLite
-    lookup is allowed only when it yields exactly one matching candidate. A
-    mismatch, multiple candidates, unlocked row, or cross-scope table row is
-    a hard refusal rather than a best-effort guess.
-    """
-
-    explicit = [run_id for run_id in _collector_run_ids_from_output(result.lines) if run_id > watermark]
-    if result.collector_run_id > watermark and result.collector_run_id not in explicit:
-        explicit.insert(0, result.collector_run_id)
-    candidate_ids = explicit
-    if not candidate_ids:
-        candidate_ids = _content_run_ids_after_sync(
-            path,
-            watermark,
-            textbook_external_id,
-            statuses=('interrupted', 'failed'),
-        )
-    if len(candidate_ids) != 1:
-        return None
-    try:
-        summary = _read_local_partial_snapshot_summary_sync(
-            path,
-            candidate_ids[0],
-            textbook_external_id,
-            allow_failed=True,
-        )
-    except (ServiceException, OSError, sqlite3.Error):
-        return None
-    run = summary.get('run') if isinstance(summary.get('run'), Mapping) else {}
-    status = str(run.get('status') or '').strip().lower()
-    run_error = ' '.join(
-        str(run.get(key) or '') for key in ('error', 'error_message', 'errorMessage', 'message')
-    )
-    if status == 'failed' and not _is_transient_error(
-        f'{error_message}\n{_tail_text(result.lines)}\n{run_error}'
-    ):
-        return None
-    if not _has_safe_partial_progress(summary, result):
-        return None
-    return summary
-
-
-def _content_run_watermark_sync(path: Path) -> int:
-    """Return the latest content-run ID before a textbook crawl starts."""
-
-    if not path.is_file():
-        return 0
-    connection: sqlite3.Connection | None = None
-    try:
-        connection = connect_collector_sqlite(path)
-        table = connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='sync_runs'").fetchone()
-        if table is None:
-            return 0
-        row = connection.execute('SELECT COALESCE(MAX(id), 0) FROM sync_runs').fetchone()
-        return int(row[0] or 0) if row else 0
-    except sqlite3.Error as exc:
-        raise ServiceException(message=f'采集库内容运行状态读取失败：{exc}') from exc
-    finally:
-        if connection is not None:
-            connection.close()
-
-
-def _content_snapshot_counts_sync(
-    path: Path,
-    run_id: int,
-    textbook_external_id: str,
-) -> tuple[int, int]:
-    """Read immutable snapshot counts for one completed content run."""
-
-    if not path.is_file() or run_id <= 0:
-        return 0, 0
-    connection: sqlite3.Connection | None = None
-    try:
-        connection = connect_collector_sqlite(path)
-        connection.row_factory = sqlite3.Row
-        tables = {
-            str(row[0])
-            for row in connection.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name IN "
-                "('sync_runs', 'sync_run_catalog_items', 'sync_run_question_items')"
-            ).fetchall()
-        }
-        required_tables = {'sync_runs', 'sync_run_catalog_items', 'sync_run_question_items'}
-        missing_tables = sorted(required_tables - tables)
-        if missing_tables:
-            raise ServiceException(
-                message=f'采集库缺少运行快照表：{", ".join(missing_tables)}，无法绑定 collectorRunId'
-            )
-        run = connection.execute(
-            'SELECT provider, status, scope_json, finished_at FROM sync_runs WHERE id = ?',
-            (run_id,),
-        ).fetchone()
-        if run is None:
-            raise ServiceException(message=f'collector 运行 {run_id} 不存在，无法绑定快照')
-        if str(run['provider'] or '') != PROVIDER:
-            raise ServiceException(message=f'collector 运行 {run_id} 来源不受支持')
-        if str(run['status'] or '') not in {'success', 'completed'} or not run['finished_at']:
-            raise ServiceException(message=f'collector 运行 {run_id} 未成功完成，无法绑定快照')
-        try:
-            scope = json.loads(str(run['scope_json'] or '{}'))
-        except (TypeError, json.JSONDecodeError):
-            raise ServiceException(message=f'collector 运行 {run_id} 缺少有效教材范围') from None
-        if not isinstance(scope, dict):
-            raise ServiceException(message=f'collector 运行 {run_id} 缺少有效教材范围')
-        candidate = scope.get('textbookId') or scope.get('textbookExternalId')
-        if candidate is None or str(candidate) != str(textbook_external_id):
-            raise ServiceException(message=f'collector 运行 {run_id} 与教材 {textbook_external_id} 不匹配')
-        catalog_count = 0
-        question_count = 0
-        catalog_count = int(
-            connection.execute(
-                'SELECT COUNT(*) FROM sync_run_catalog_items '
-                'WHERE run_id = ? AND provider = ? AND textbook_external_id = ?',
-                (run_id, PROVIDER, textbook_external_id),
-            ).fetchone()[0]
-            or 0
-        )
-        question_count = int(
-            connection.execute(
-                'SELECT COUNT(*) FROM sync_run_question_items '
-                'WHERE run_id = ? AND provider = ? AND textbook_external_id = ?',
-                (run_id, PROVIDER, textbook_external_id),
-            ).fetchone()[0]
-            or 0
-        )
-        return catalog_count, question_count
-    except sqlite3.Error as exc:
-        raise ServiceException(message=f'采集库运行快照读取失败：{exc}') from exc
-    finally:
-        if connection is not None:
-            connection.close()
-
-
-def _read_metadata_run_sync(path: Path, run_id: int) -> dict[str, Any]:
-    """Read and validate one completed collector metadata run.
-
-    A caller must always name the run it intends to use.  The helper never
-    falls back to the newest row because doing so could silently mix a user's
-    selection with a later metadata refresh.
-    """
-
-    if not path.is_file():
-        raise ServiceException(message=f'采集库不存在：{path}，请先完成版本和教材同步')
-    connection: sqlite3.Connection | None = None
-    try:
-        connection = connect_collector_sqlite(path)
-        connection.row_factory = sqlite3.Row
-        table = connection.execute(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'source_metadata_runs'"
-        ).fetchone()
-        if table is None:
-            raise ServiceException(message='采集库缺少 source_metadata_runs 表，请先完成版本和教材同步')
-        row = connection.execute(
-            """
-            SELECT id, provider, started_at, finished_at, status, version_count, textbook_count
-            FROM source_metadata_runs
-            WHERE id = ?
-            """,
-            (run_id,),
-        ).fetchone()
-        if row is None:
-            raise ServiceException(message=f'元数据运行 {run_id} 不存在，不能同步教材内容')
-        if str(row['provider'] or '') != PROVIDER:
-            raise ServiceException(message=f'元数据运行 {run_id} 来源不受支持')
-        if str(row['status'] or '') != 'success' or not row['finished_at']:
-            raise ServiceException(message=f'元数据运行 {run_id} 未成功完成，不能同步教材内容')
-        if not row['started_at']:
-            raise ServiceException(message=f'元数据运行 {run_id} 缺少有效时间窗口')
-        return dict(row)
-    except sqlite3.Error as exc:
-        raise ServiceException(message=f'采集库读取失败：{exc}') from exc
-    finally:
-        if connection is not None:
-            connection.close()
-
-
-def _read_metadata_batch_sync(  # noqa: PLR0912, PLR0915
-    path: Path,
-    run_id: int,
-    selected_ids: list[str] | None = None,
-) -> _MetadataBatch:
-    """Read only textbooks observed by the metadata run just launched.
-
-    ``source_textbooks`` is owned by the metadata script.  We require an
-    active row, a stable source ID, and a source entry that is consistent with
-    that ID when one is present.  The textbook ID itself is a valid fallback
-    entry for the question script, so a discovered bootstrap chapter is
-    optional.
-    """
-
-    if not path.is_file():
-        raise ServiceException(message=f'采集库不存在：{path}，元数据同步可能未完成')
-    connection: sqlite3.Connection | None = None
-    try:
-        connection = connect_collector_sqlite(path)
-        connection.row_factory = sqlite3.Row
-        tables = {
-            str(row['name'])
-            for row in connection.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'table' "
-                "AND name IN ('source_metadata_runs', 'source_textbooks')"
-            ).fetchall()
-        }
-        if 'source_metadata_runs' not in tables:
-            raise ServiceException(message='采集库缺少元数据运行表，元数据同步未产出结果')
-        run_columns = {
-            str(row['name']) for row in connection.execute('PRAGMA table_info("source_metadata_runs")').fetchall()
-        }
-        if 'provider' in run_columns:
-            metadata_run = connection.execute(
-                """
-                SELECT id, provider, started_at, finished_at, status, version_count, textbook_count
-                FROM source_metadata_runs WHERE id = ?
-                """,
-                (run_id,),
-            ).fetchone()
-        else:
-            metadata_run = connection.execute(
-                """
-                SELECT id, started_at, finished_at, status, version_count, textbook_count
-                FROM source_metadata_runs WHERE id = ?
-                """,
-                (run_id,),
-            ).fetchone()
-        if metadata_run is None:
-            raise ServiceException(message='元数据脚本未生成本次运行记录')
-        if 'provider' in run_columns and str(metadata_run['provider'] or '') != PROVIDER:
-            raise ServiceException(message='本次元数据运行来源不受支持')
-        if str(metadata_run['status'] or '') != 'success' or not metadata_run['finished_at']:
-            raise ServiceException(message='本次元数据运行未完整成功，不会继续同步历史教材')
-        expected_textbooks = int(metadata_run['textbook_count'] or 0)
-        snapshot_rows = _read_metadata_snapshot_rows_sync(
-            connection,
-            'textbook',
-            int(metadata_run['id']),
-            source_provider=PROVIDER,
-            expected_count=expected_textbooks,
-            include_columns=('raw_json',),
-        )
-        if snapshot_rows is not None:
-            snapshot_columns = {
-                str(row['name'])
-                for row in connection.execute('PRAGMA table_info("source_metadata_run_textbooks")').fetchall()
-            }
-            required_snapshot = {
-                'run_id',
-                'provider',
-                'external_textbook_id',
-                'textbook_name',
-                'version_external_id',
-                'status',
-                'sort_order',
-            }
-            missing_snapshot = sorted(required_snapshot - snapshot_columns)
-            if missing_snapshot:
-                raise ServiceException(
-                    message=(f'collector 表 source_metadata_run_textbooks 缺少字段：{", ".join(missing_snapshot)}')
-                )
-            rows: list[Mapping[str, Any]] = snapshot_rows
-        else:
-            if 'source_textbooks' not in tables:
-                raise ServiceException(message='采集库缺少教材表，元数据同步未产出结果')
-            columns = {
-                str(row['name']) for row in connection.execute('PRAGMA table_info("source_textbooks")').fetchall()
-            }
-            required = {
-                'provider',
-                'external_textbook_id',
-                'textbook_name',
-                'version_external_id',
-                'last_seen_at',
-                'status',
-                'sort_order',
-            }
-            missing = sorted(required - columns)
-            if missing:
-                raise ServiceException(message=f'采集库 source_textbooks 缺少字段：{", ".join(missing)}')
-            optional_columns = [
-                column
-                for column in ('source_url', 'raw_json', 'bootstrap_chapter_external_id')
-                if column in columns
-            ]
-            selected_columns = [
-                'provider',
-                'external_textbook_id',
-                'textbook_name',
-                'version_external_id',
-                *optional_columns,
-            ]
-            rows = connection.execute(
-                f"""
-                SELECT {', '.join(selected_columns)}
-                FROM source_textbooks
-                WHERE provider = ?
-                  AND COALESCE(status, '0') <> '1'
-                  AND last_seen_at >= ?
-                  AND last_seen_at <= ?
-                ORDER BY version_external_id ASC, sort_order ASC, external_textbook_id ASC
-                """,
-                (PROVIDER, metadata_run['started_at'], metadata_run['finished_at']),
-            ).fetchall()
-        result: list[dict[str, str | None]] = []
-        all_rows_by_id: dict[str, Mapping[str, Any]] = {}
-        seen: set[str] = set()
-        invalid: list[str] = []
-        for row in rows:
-            textbook_id = str(row['external_textbook_id'] or '').strip()
-            if textbook_id:
-                all_rows_by_id.setdefault(textbook_id, row)
-            if not _safe_external_id(textbook_id) or textbook_id in seen:
-                invalid.append(textbook_id or '缺少教材 ID')
-                continue
-            bootstrap = _validate_metadata_textbook_entry(row, textbook_id)
-            seen.add(textbook_id)
-            result.append(
-                {
-                    'external_textbook_id': textbook_id,
-                    'textbook_name': str(row['textbook_name'] or '').strip() or textbook_id,
-                    'version_external_id': str(row['version_external_id'] or '').strip() or None,
-                    'bootstrap_chapter_external_id': bootstrap,
-                }
-            )
-        if invalid and selected_ids is None:
-            sample = '、'.join(invalid[:5])
-            raise ServiceException(message=f'本次发现的教材缺少稳定来源 ID：{sample}')
-        expected_textbooks = int(metadata_run['textbook_count'] or 0)
-        if selected_ids is None and len(result) != expected_textbooks:
-            raise ServiceException(
-                message=(
-                    f'本次元数据记录包含 {expected_textbooks} 本教材，但只能安全识别 {len(result)} 本，已停止后续抓取'
-                )
-            )
-        if selected_ids is not None:
-            requested = [str(value or '').strip() for value in selected_ids]
-            if not requested or len(requested) > MAX_SELECTED_TEXTBOOKS:
-                raise ServiceException(message=f'教材选择数量必须在 1 到 {MAX_SELECTED_TEXTBOOKS} 之间')
-            if len(requested) != len(set(requested)):
-                raise ServiceException(message='教材选择列表不能包含重复 ID')
-            invalid_ids = [value for value in requested if not _safe_external_id(value)]
-            if invalid_ids:
-                raise ServiceException(message=f'教材来源 ID 不安全：{", ".join(invalid_ids[:5])}')
-            available = set(all_rows_by_id)
-            unknown = [value for value in requested if value not in available]
-            if unknown:
-                raise ServiceException(message=f'教材不属于元数据运行 {run_id} 的快照：{", ".join(unknown[:5])}')
-            selected_result: list[dict[str, str | None]] = []
-            for value in requested:
-                row = all_rows_by_id[value]
-                bootstrap = _validate_metadata_textbook_entry(row, value)
-                selected_result.append(
-                    {
-                        'external_textbook_id': value,
-                        'textbook_name': str(row['textbook_name'] or '').strip() or value,
-                        'version_external_id': str(row['version_external_id'] or '').strip() or None,
-                        'bootstrap_chapter_external_id': bootstrap,
-                    }
-                )
-            result = selected_result
-        return _MetadataBatch(
-            run_id=int(metadata_run['id']),
-            versions_count=int(metadata_run['version_count'] or 0),
-            textbooks=result,
-            textbooks_count=expected_textbooks,
-        )
-    except sqlite3.Error as exc:
-        raise ServiceException(message=f'采集库读取失败：{exc}') from exc
-    finally:
-        if connection is not None:
-            connection.close()
 
 
 def _tail_text(lines: deque[str] | list[str]) -> str:
@@ -1421,28 +813,37 @@ async def _materialize_textbook_scopes(  # noqa: PLR0912, PLR0915
     appearing completed without its immutable metadata binding.
     """
 
-    if remote_collector_enabled():
-        payload = await asyncio.to_thread(CollectorClient().metadata_snapshot, metadata_run_id)
-        if not isinstance(payload, dict):
-            raise ServiceException(message='collector 元数据快照结构不正确')
-        raw_versions = payload.get('versions')
-        raw_textbooks = payload.get('textbooks')
-        run_payload = payload.get('run')
-        expected_textbooks = _scope_field(run_payload, 'textbook_count', 'textbookCount', default=None)
-        if expected_textbooks is None:
-            raise ServiceException(message='collector 元数据快照缺少教材数量')
-        try:
-            expected_textbooks = int(expected_textbooks)
-        except (TypeError, ValueError) as exc:
-            raise ServiceException(message='collector 元数据快照教材数量无效') from exc
-    else:
-        batch = await asyncio.to_thread(_read_metadata_batch_sync, _collector_path(), metadata_run_id, None)
-        raw_textbooks = batch.textbooks
-        raw_versions = []
-        expected_textbooks = batch.textbooks_count
-        if expected_textbooks is None:
-            expected_textbooks = len(raw_textbooks)
-
+    payload = await asyncio.to_thread(CollectorClient().metadata_snapshot, metadata_run_id)
+    if not isinstance(payload, Mapping) or payload.get('available') is not True:
+        raise ServiceException(message='collector 元数据快照不可用')
+    if payload.get('immutable') is not True:
+        raise ServiceException(message='collector 元数据快照未锁定，无法物化教材范围')
+    if not isinstance(payload.get('run'), Mapping):
+        raise ServiceException(message='collector 元数据快照结构不正确')
+    raw_versions = payload.get('versions')
+    raw_textbooks = payload.get('textbooks')
+    run_payload = payload.get('run')
+    remote_run_id = _scope_field(run_payload, 'id', 'runId', 'metadataRunId', default=None)
+    if isinstance(remote_run_id, bool) or _positive_collector_run_id(remote_run_id) != int(metadata_run_id):
+        raise ServiceException(message=f'元数据运行 {metadata_run_id} 的 collector 运行 ID 不一致')
+    run_status = str(_scope_field(run_payload, 'status', default='') or '').strip().lower()
+    if run_status not in {'success', 'completed'}:
+        raise ServiceException(message=f'元数据运行 {metadata_run_id} 未成功完成')
+    if _scope_field(run_payload, 'snapshot_locked_at', 'snapshotLockedAt', 'locked', default=None) in (
+        None,
+        '',
+        0,
+        '0',
+        False,
+    ):
+        raise ServiceException(message=f'元数据运行 {metadata_run_id} 尚未锁定')
+    expected_textbooks = _scope_field(run_payload, 'textbook_count', 'textbookCount', default=None)
+    if expected_textbooks is None:
+        raise ServiceException(message='collector 元数据快照缺少教材数量')
+    try:
+        expected_textbooks = int(expected_textbooks)
+    except (TypeError, ValueError) as exc:
+        raise ServiceException(message='collector 元数据快照教材数量无效') from exc
     if not isinstance(raw_textbooks, list):
         raise ServiceException(message='collector 元数据教材快照结构不正确')
     if expected_textbooks < 0 or len(raw_textbooks) != expected_textbooks:
@@ -1846,55 +1247,6 @@ def _lock_present(value: Any) -> bool:
     return bool(value)
 
 
-async def _validate_local_question_scopes(  # noqa: PLR0912
-    run_id: int, expected_external_ids: list[str]
-) -> None:
-    """Fail closed unless every local question scope owns a completed run.
-
-    The remote path performs the same check plus an HTTP ownership probe.
-    Local compatibility mode still needs this durable boundary; otherwise a
-    failed scope-table write could be hidden when ``_finish`` finalizes the
-    parent task and marks unfinished scopes completed.
-    """
-
-    expected = [str(value).strip() for value in expected_external_ids if str(value).strip()]
-    if not expected or len(expected) != len(set(expected)):
-        raise ServiceException(message='题库本地任务缺少有效且唯一的教材范围')
-    scopes = await _load_scopes(run_id)
-    by_external_id: dict[str, QbSyncJobScope] = {}
-    for scope in scopes:
-        external_id = str(_scope_field(scope, 'external_textbook_id', 'externalTextbookId', default='') or '').strip()
-        if not external_id or external_id in by_external_id:
-            raise ServiceException(message='题库本地任务的教材范围缺失或重复')
-        by_external_id[external_id] = scope
-    if set(by_external_id) != set(expected):
-        raise ServiceException(message='题库本地任务的持久化教材范围与创建选项不一致')
-    for external_id in expected:
-        scope = by_external_id[external_id]
-        if str(_scope_field(scope, 'status', 'state', default='') or '').lower() != 'completed':
-            raise ServiceException(message=f'教材 {external_id} 的本地采集范围未成功完成')
-        if _positive_collector_run_id(_scope_field(scope, 'collector_run_id', 'collectorRunId', default=None)) is None:
-            raise ServiceException(message=f'教材 {external_id} 的本地采集范围缺少合法 collectorRunId')
-        if not _status_flag(_scope_field(scope, 'snapshot_complete', 'snapshotComplete', 'complete', default=False)):
-            raise ServiceException(message=f'教材 {external_id} 的本地采集范围快照未完成')
-        if not _lock_present(_scope_field(scope, 'snapshot_locked_at', 'snapshotLockedAt', 'lockedAt', default=None)):
-            raise ServiceException(message=f'教材 {external_id} 的本地采集范围快照未锁定')
-        for count_label, aliases in (
-            ('目录', ('catalog_count', 'catalogCount')),
-            ('题目', ('question_count', 'questionCount')),
-            ('目录关系', ('question_catalog_count', 'questionCatalogCount', 'relation_count', 'relationCount')),
-            ('标签', ('question_tag_count', 'questionTagCount', 'tag_count', 'tagCount')),
-            ('素材', ('question_asset_count', 'questionAssetCount', 'asset_count', 'assetCount')),
-        ):
-            value = _scope_field(scope, *aliases, default=None)
-            if value is None:
-                raise ServiceException(message=f'教材 {external_id} 的本地采集范围缺少{count_label}计数')
-            try:
-                if int(value) < 0:
-                    raise ValueError
-            except (TypeError, ValueError) as exc:
-                raise ServiceException(message=f'教材 {external_id} 的本地采集范围{count_label}计数无效') from exc
-
 
 async def _persist_remote_scope(  # noqa: PLR0912
     run_id: int,
@@ -2217,54 +1569,41 @@ async def _resume_partial_summary(
 ) -> dict[str, Any]:
     """Validate one durable partial run before using it as a resume source."""
 
-    if remote_collector_enabled():
-        client = CollectorClient()
-        method = getattr(client, 'run_snapshot_summary', None) or getattr(client, 'snapshot_summary', None)
-        if not callable(method):
-            raise ServiceException(message='collector 客户端不支持不完整题库快照摘要接口')
+    client = CollectorClient()
+    method = getattr(client, 'run_snapshot_summary', None) or getattr(client, 'snapshot_summary', None)
+    if not callable(method):
+        raise ServiceException(message='collector 客户端不支持不完整题库快照摘要接口')
+    try:
         try:
+            payload = await asyncio.to_thread(
+                method,
+                collector_run_id,
+                textbook_external_id=textbook_external_id,
+                allow_incomplete=True,
+            )
+        except TypeError:
             try:
                 payload = await asyncio.to_thread(
                     method,
                     collector_run_id,
                     textbook_external_id=textbook_external_id,
-                    allow_incomplete=True,
+                    allowIncomplete=True,
                 )
             except TypeError:
-                # Small compatibility doubles may not yet expose the new
-                # keyword. Production clients always receive the explicit
-                # allowIncomplete query parameter above.
-                try:
-                    payload = await asyncio.to_thread(
-                        method,
-                        collector_run_id,
-                        textbook_external_id=textbook_external_id,
-                        allowIncomplete=True,
-                    )
-                except TypeError:
-                    payload = await asyncio.to_thread(
-                        method,
-                        collector_run_id,
-                        textbook_external_id=textbook_external_id,
-                    )
-            payload = await _maybe_await(payload)
-        except Exception as exc:
-            raise ServiceException(message=f'无法读取教材 {textbook_external_id} 的中断快照摘要') from exc
-        summary = _normalise_snapshot_summary(
-            payload,
-            0,
-            str(textbook_external_id),
-            allow_incomplete=True,
-        )
-    else:
-        summary = await asyncio.to_thread(
-            _read_local_partial_snapshot_summary_sync,
-            _collector_path(),
-            collector_run_id,
-            textbook_external_id,
-            allow_failed=True,
-            allow_blocked=True,
-        )
+                payload = await asyncio.to_thread(
+                    method,
+                    collector_run_id,
+                    textbook_external_id=textbook_external_id,
+                )
+        payload = await _maybe_await(payload)
+    except Exception as exc:
+        raise ServiceException(message=f'无法读取教材 {textbook_external_id} 的中断快照摘要') from exc
+    summary = _normalise_snapshot_summary(
+        payload,
+        0,
+        str(textbook_external_id),
+        allow_incomplete=True,
+    )
     if _positive_collector_run_id(summary.get('collector_run_id')) != int(collector_run_id):
         raise ServiceException(message=f'collector 运行 {collector_run_id} 的摘要身份不一致')
     run = summary.get('run') if isinstance(summary.get('run'), Mapping) else {}
@@ -2284,310 +1623,21 @@ async def _resume_partial_summary(
     return summary
 
 
-async def _reconcile_legacy_question_tasks() -> int:  # noqa: PLR0915
-    """Upgrade narrowly identifiable legacy failed question rows.
-
-    This startup compatibility pass is intentionally conservative: it only
-    examines a bounded set of local ``question`` + ``failed`` rows, requires
-    one explicit run ID in the stored tail, and then performs the same strict
-    SQLite provider/scope/lock/five-table checks used by a live failure.  No
-    collector row is changed.
-    """
-
-    if remote_collector_enabled():
-        return 0
-    source_path = _collector_path()
-    try:
-        async with DataSourceRegistry.session() as db:
-            result = await db.execute(
-                select(QbSyncJob)
-                .where(QbSyncJob.task_module == 'question', QbSyncJob.status == 'failed')
-                .order_by(QbSyncJob.run_id)
-                .limit(MAX_PARTIAL_RUN_SCAN)
-                .with_for_update()
-            )
-            scalar_result = getattr(result, 'scalars', None)
-            rows = list(scalar_result().all()) if callable(scalar_result) else []
-            changed = 0
-            now = datetime.now()
-            for row in rows:
-                log_tail = _scope_field(row, 'log_tail', 'logTail', default='')
-                if isinstance(log_tail, list):
-                    log_tail = '\n'.join(str(item) for item in log_tail)
-                else:
-                    log_tail = str(log_tail or '')
-                error_message = str(_scope_field(row, 'error_message', 'errorMessage', default='') or '')
-                if not _is_transient_error(f'{error_message}\n{log_tail}'):
-                    continue
-                run_ids = _collector_run_ids_from_output(log_tail.splitlines())
-                if len(run_ids) != 1:
-                    continue
-                scope_result = await db.execute(
-                    select(QbSyncJobScope)
-                    .where(QbSyncJobScope.run_id == int(row.run_id))
-                    .order_by(QbSyncJobScope.scope_id)
-                    .with_for_update()
-                )
-                scalar_scopes = getattr(scope_result, 'scalars', None)
-                scopes = list(scalar_scopes().all()) if callable(scalar_scopes) else []
-                if len(scopes) != 1:
-                    # A multi-textbook legacy row needs an explicit per-scope
-                    # run mapping; choosing one ID would be unsafe.
-                    continue
-                scope = scopes[0]
-                external_id = str(
-                    _scope_field(scope, 'external_textbook_id', 'externalTextbookId', default='') or ''
-                ).strip()
-                if not _safe_external_id(external_id):
-                    continue
-                old_run_id = _positive_collector_run_id(
-                    _scope_field(scope, 'collector_run_id', 'collectorRunId', default=None)
-                )
-                explicit_run_id = run_ids[0]
-                if old_run_id is not None and old_run_id != explicit_run_id:
-                    continue
-                try:
-                    summary = await asyncio.to_thread(
-                        _read_local_partial_snapshot_summary_sync,
-                        source_path,
-                        explicit_run_id,
-                        external_id,
-                        allow_failed=True,
-                    )
-                except (ServiceException, OSError, sqlite3.Error):
-                    continue
-                partial_counts = summary.get('counts') or {}
-                partial_run = summary.get('run') or {}
-                partial_lock = _scope_datetime(
-                    _scope_field(partial_run, 'snapshot_locked_at', 'snapshotLockedAt', 'locked')
-                )
-                scope.status = 'interrupted'
-                scope.collector_run_id = explicit_run_id
-                scope.resume_from_collector_run_id = explicit_run_id
-                scope.catalog_count = int(partial_counts.get('catalogItemCount', 0) or 0)
-                scope.question_count = int(partial_counts.get('questionItemCount', 0) or 0)
-                scope.question_catalog_count = int(partial_counts.get('questionCatalogCount', 0) or 0)
-                scope.question_tag_count = int(partial_counts.get('questionTagCount', 0) or 0)
-                scope.question_asset_count = int(partial_counts.get('questionAssetCount', 0) or 0)
-                scope.snapshot_complete = 0
-                scope.snapshot_locked_at = partial_lock
-                scope.error_message = error_message[:2000] or 'collector 采集被中断'
-                scope.finished_at = now
-                scope.update_time = now
-                row.status = 'interrupted'
-                row.phase = 'interrupted'
-                row.active_slot = None
-                row.process_id = None
-                row.worker_token = None
-                row.collector_job_id = None
-                row.finished_at = now
-                row.error_message = error_message[:2000] or 'collector 采集被中断'
-                row.catalog_count = scope.catalog_count
-                row.question_count = scope.question_count
-                row.question_catalog_count = scope.question_catalog_count
-                row.question_tag_count = scope.question_tag_count
-                row.question_asset_count = scope.question_asset_count
-                row.total_textbooks = max(1, int(_scope_field(row, 'total_textbooks', 'totalTextbooks', default=1) or 1))
-                row.completed_textbooks = 0
-                row.snapshot_complete = 0
-                row.snapshot_locked_at = partial_lock
-                row.progress_percent = _progress_for(int(row.total_textbooks), 0, 'catalogs_questions')
-                row.update_time = now
-                changed += 1
-            if changed:
-                await db.commit()
-            return changed
-    except (SQLAlchemyError, OSError):
-        return 0
-
-
-def _looks_blocked(lines: list[str]) -> bool:
-    text = '\n'.join(lines).lower()
-    markers = (
-        '验证码',
-        '安全验证',
-        '异常访问',
-        '访问过于频繁',
-        '已阻断',
-        '阻断页面',
-        '安全威胁',
-        '访问被阻断',
-        'robots',
-        '熔断',
-        '契约',
-        '授权范围',
-        'http 401',
-        'http 403',
-        '收到 sig',
-    )
-    return any(marker in text for marker in markers)
-
-
-def _parse_script_line(line: str, result: _ScriptResult) -> None:
-    metadata_run_match = re.search(r'metadata-run=(\d+)', line)
-    if metadata_run_match:
-        result.metadata_run_id = max(result.metadata_run_id, int(metadata_run_match.group(1)))
-    # ``zujuan_sync.cjs`` emits ``run=<id>`` once the immutable content run
-    # row has been created.  Do not let the metadata-run marker be mistaken
-    # for this value.
-    content_run_match = re.search(r'(?:^|[\s\[])run=(\d+)', line)
-    if content_run_match and 'metadata-run=' not in line:
-        result.collector_run_id = max(result.collector_run_id, int(content_run_match.group(1)))
-    version_match = re.search(r'发现\s+(\d+)\s+个版本', line)
-    if version_match:
-        result.versions_count = max(result.versions_count, int(version_match.group(1)))
-    textbook_match = re.search(r'textbooksSeen:\s*(\d+)', line)
-    if textbook_match:
-        result.textbooks_count = max(result.textbooks_count, int(textbook_match.group(1)))
-    catalog_match = re.search(r'本次同步\s+(\d+)\s+个节点', line)
-    if catalog_match:
-        result.catalog_count = max(result.catalog_count, int(catalog_match.group(1)))
-    question_match = re.search(r'questionsSeen:\s*(\d+)', line)
-    if question_match:
-        result.question_count = max(result.question_count, int(question_match.group(1)))
-
-
-def _record_script_line(handle: _WorkerHandle, result: _ScriptResult, line: str) -> None:
-    """Keep both persisted and in-memory diagnostics within a fixed bound."""
-
-    handle.log_lines.append(line)
-    result.lines.append(line)
-    if len(result.lines) > MAX_LOG_LINES:
-        del result.lines[:-MAX_LOG_LINES]
-    _parse_script_line(line, result)
-
-
-async def _signal_process_group(handle: _WorkerHandle, sig: signal.Signals) -> bool:
-    process = handle.process
-    if process is None or process.returncode is not None or process.pid is None:
-        return False
-    pid = int(process.pid)
-    try:
-        # start_new_session=True gives the Node process a private process
-        # group.  Never signal a PID read from the request or database alone.
-        if os.getpgid(pid) != pid:
-            return False
-        os.killpg(pid, sig)
-        return True
-    except (OSError, ProcessLookupError):
-        return False
-
-
 async def _terminate_process(handle: _WorkerHandle) -> None:
+    """Cancel the server-owned collector job, if this worker has one."""
+
     if handle.terminate_sent:
         return
     handle.terminate_sent = True
-    if handle.remote_job_id:
-        try:
-            await asyncio.to_thread(CollectorClient().cancel_job, handle.remote_job_id)
-        except Exception:
-            # The remote job may already be terminal or the collector may be
-            # unavailable during shutdown.  The service-side durable status is
-            # still finalized by the normal worker/recovery boundary.
-            pass
-        return
-    if not await _signal_process_group(handle, signal.SIGTERM):
-        return
-    process = handle.process
-    if process is None:
+    if not handle.remote_job_id:
         return
     try:
-        await asyncio.wait_for(process.wait(), timeout=PROCESS_TERM_GRACE_SECONDS)
-    except asyncio.TimeoutError:
-        await _signal_process_group(handle, signal.SIGKILL)
-        await process.wait()
-
-
-async def _persist_output(run_id: int, handle: _WorkerHandle, result: _ScriptResult, *, force: bool = False) -> None:
-    now = time.monotonic()
-    last = handle.last_persist
-    if not force and now - last < STATUS_PERSIST_INTERVAL_SECONDS:
-        return
-    handle.last_persist = now
-    values: dict[str, Any] = {'log_tail': _tail_text(handle.log_lines)}
-    if result.versions_count:
-        values['total_versions'] = result.versions_count
-    if result.textbooks_count:
-        values['total_textbooks'] = result.textbooks_count
-    if result.catalog_count:
-        values['catalog_count'] = result.catalog_count_base + result.catalog_count
-    if result.question_count:
-        values['question_count'] = result.question_count_base + result.question_count
-    try:
-        await _update_row(run_id, values)
-    except SQLAlchemyError:
-        # A transient status write must not interrupt the crawler itself.  The
-        # terminal update retries through the normal task error path.
-        return
-
-
-async def _run_script(run_id: int, handle: _WorkerHandle, command: list[str], result: _ScriptResult) -> _ScriptResult:
-    process = await asyncio.create_subprocess_exec(
-        *command,
-        cwd=str(COLLECTOR_ROOT),
-        stdin=asyncio.subprocess.DEVNULL,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        start_new_session=True,
-    )
-    handle.process = process
-    try:
-        await _update_row(run_id, {'process_id': process.pid, 'worker_token': handle.token})
+        await asyncio.to_thread(CollectorClient().cancel_job, handle.remote_job_id)
     except Exception:
-        # The child has already been created.  If its first durable status
-        # write fails, clean up the private process group before propagating
-        # the database error to the worker boundary.
-        await _terminate_process(handle)
-        raise
-
-    async def consume(stream: asyncio.StreamReader | None, label: str) -> None:
-        if stream is None:
-            return
-        while True:
-            raw = await stream.readline()
-            if not raw:
-                break
-            line = raw.decode('utf-8', errors='replace').rstrip()
-            if not line:
-                continue
-            rendered = f'[{label}] {line}' if label == 'stderr' else line
-            _record_script_line(handle, result, rendered)
-            await _persist_output(run_id, handle, result)
-
-    readers = [
-        asyncio.create_task(consume(process.stdout, 'stdout')),
-        asyncio.create_task(consume(process.stderr, 'stderr')),
-    ]
-    waiter = asyncio.create_task(process.wait())
-    try:
-        while not waiter.done():
-            await asyncio.sleep(PROCESS_POLL_SECONDS)
-            # Keep a durable heartbeat even while the collector is quiet.  A
-            # different backend worker may only recover genuinely stale jobs.
-            await _persist_output(run_id, handle, result)
-            status = await _current_status(run_id)
-            if status == 'cancelling':
-                await _terminate_process(handle)
-            elif status not in {'starting', 'running'}:
-                # The durable row is authoritative.  If another worker has
-                # recovered or terminally changed it, this worker must not
-                # leave its Node/Chrome process running in the background.
-                await _terminate_process(handle)
-        # ``Process.wait`` returns the child exit status.  Persist it on the
-        # result before evaluating the next phase; the result starts at zero
-        # only as a placeholder while the subprocess is running.
-        result.returncode = await waiter
-        await asyncio.gather(*readers)
-    finally:
-        if not waiter.done():
-            waiter.cancel()
-        await asyncio.gather(waiter, return_exceptions=True)
-        for reader in readers:
-            if not reader.done():
-                reader.cancel()
-        await asyncio.gather(*readers, return_exceptions=True)
-        await _persist_output(run_id, handle, result, force=True)
-    return result
+        # The remote job may already be terminal or the collector may be
+        # unavailable during shutdown. Durable service state is finalized by
+        # the normal worker/recovery boundary.
+        return
 
 
 def _remote_status_values(payload: dict[str, Any]) -> dict[str, Any]:
@@ -3100,8 +2150,7 @@ async def _execute_remote(  # noqa: PLR0912, PLR0915
         return
 
 
-async def _execute(run_id: int, handle: _WorkerHandle) -> None:  # noqa: PLR0911, PLR0912, PLR0915
-    metadata_result = _ScriptResult(returncode=0, lines=[])
+async def _execute(run_id: int, handle: _WorkerHandle) -> None:  # noqa: PLR0912, PLR0915
     try:
         # Rehydrate module/options from the durable row.  This is important
         # after a process restart and also keeps the worker from trusting
@@ -3202,10 +2251,9 @@ async def _execute(run_id: int, handle: _WorkerHandle) -> None:  # noqa: PLR0911
                 return
             if durable_status == 'queued':
                 # Queued rows are deliberately recovered after a process
-                # restart.  Claim them before starting a local child or
-                # polling a remote collector; otherwise the heartbeat loop
-                # would treat the still-queued row as an orphan and terminate
-                # the newly started child.
+                # restart. Claim them before polling a remote collector;
+                # otherwise the heartbeat loop could treat the still-queued
+                # row as an orphan and start a duplicate remote job.
                 claimed = await _update_row(
                     run_id,
                     {
@@ -3279,521 +2327,8 @@ async def _execute(run_id: int, handle: _WorkerHandle) -> None:  # noqa: PLR0911
                     await _finish(run_id, handle, 'cancelled', 'cancelled', '同步在启动前被停止')
                 return
         max_pages = _max_pages()
-        if remote_collector_enabled():
-            await _execute_remote(run_id, handle, max_pages)
-            return
-        node = _node_command()
-        collector_db = _collector_path()
-        if run_type == 'metadata':
-            metadata_watermark = handle.metadata_watermark
-            if metadata_watermark is None:
-                metadata_watermark = await asyncio.to_thread(_metadata_run_watermark_sync, collector_db)
-            metadata_command = _with_headful(
-                [
-                    node,
-                    str(METADATA_SCRIPT),
-                    '--acknowledge-source-policy',
-                    '--db',
-                    str(collector_db),
-                ]
-            )
-            metadata_result = await _run_script(run_id, handle, metadata_command, metadata_result)
-            # A user cancellation terminates the child with a signal/non-zero
-            # code.  Check durable intent before interpreting that code.
-            if await _current_status(run_id) == 'cancelling':
-                await _finish(run_id, handle, 'cancelled', 'cancelled', '同步已停止')
-                return
-            if metadata_result.returncode != 0:
-                status = 'blocked' if _looks_blocked(metadata_result.lines) else 'failed'
-                message = _last_error(metadata_result.lines, '版本和教材同步脚本执行失败')
-                await _finish(run_id, handle, status, status, message)
-                return
-            collector_run_id = metadata_result.metadata_run_id
-            if collector_run_id <= metadata_watermark:
-                collector_run_id = await asyncio.to_thread(
-                    _metadata_run_id_after_sync, collector_db, metadata_watermark
-                )
-            if collector_run_id <= metadata_watermark:
-                await _finish(run_id, handle, 'failed', 'failed', '无法确认本次元数据运行 ID')
-                return
-            metadata_run = await asyncio.to_thread(
-                _read_metadata_run_sync,
-                collector_db,
-                collector_run_id,
-            )
-            handle.metadata_run_id = int(metadata_run['id'])
-            await _update_row(
-                run_id,
-                {
-                    'metadata_run_id': int(metadata_run['id']),
-                    'total_versions': int(metadata_run.get('version_count') or 0),
-                    'completed_versions': int(metadata_run.get('version_count') or 0),
-                    'total_textbooks': int(metadata_run.get('textbook_count') or 0),
-                    'completed_textbooks': int(metadata_run.get('textbook_count') or 0),
-                    'progress_percent': _progress_for(
-                        int(metadata_run.get('textbook_count') or 0),
-                        0,
-                        'metadata',
-                    ),
-                },
-            )
-            if handle.task_module == 'textbook':
-                try:
-                    await _materialize_textbook_scopes(run_id, int(metadata_run['id']))
-                except Exception as exc:
-                    await _finish(
-                        run_id,
-                        handle,
-                        'failed',
-                        'failed',
-                        f'教材范围物化失败：{_exception_message(exc, "教材范围物化失败")}',
-                    )
-                    return
-            await _finish(
-                run_id,
-                handle,
-                'completed',
-                'completed',
-                None,
-                total_textbooks=int(metadata_run.get('textbook_count') or 0),
-                completed_textbooks=int(metadata_run.get('textbook_count') or 0),
-            )
-            return
-
-        metadata_run_id = handle.metadata_run_id
-        if handle.task_module == 'question':
-            # Question tasks own their complete selection in qb_sync_job_scope.
-            # Never reread mutable collector metadata, even when a historical
-            # row happens to retain a metadataRunId for display compatibility.
-            textbooks = [
-                {
-                    'external_textbook_id': identity['externalTextbookId'],
-                    'textbook_name': identity.get('textbookName') or identity['externalTextbookId'],
-                    'version_external_id': identity.get('externalVersionId') or None,
-                    'bootstrap_chapter_external_id': None,
-                }
-                for identity in handle.textbook_scopes
-                if identity.get('externalTextbookId')
-            ]
-        else:
-            if metadata_run_id is None:
-                await _finish(run_id, handle, 'failed', 'failed', '内容任务缺少 metadataRunId')
-                return
-            textbooks = (
-                await asyncio.to_thread(
-                    _read_metadata_batch_sync,
-                    collector_db,
-                    metadata_run_id,
-                    list(handle.textbook_external_ids),
-                )
-            ).textbooks
-        if not textbooks:
-            await _finish(run_id, handle, 'failed', 'failed', '未选择可同步的教材')
-            return
-        durable_scopes: list[object] = []
-        durable_scopes_by_id: dict[str, object] = {}
-        if handle.task_module == 'question' and persisted_row is not None:
-            try:
-                durable_scopes = await _load_scopes(run_id)
-            except Exception:
-                durable_scopes = []
-            durable_scopes_by_id = {
-                str(_scope_field(scope, 'external_textbook_id', 'externalTextbookId', default='') or '').strip(): scope
-                for scope in durable_scopes
-                if str(_scope_field(scope, 'external_textbook_id', 'externalTextbookId', default='') or '').strip()
-            }
-        completed_scope_ids = {
-            external_id
-            for external_id, scope in durable_scopes_by_id.items()
-            if str(_scope_field(scope, 'status', 'state', default='') or '').strip().lower() == 'completed'
-        }
-        content_values: dict[str, Any] = {
-            'phase': 'catalogs_questions',
-            'total_textbooks': len(textbooks),
-            'completed_textbooks': len(completed_scope_ids),
-            'progress_percent': _progress_for(len(textbooks), len(completed_scope_ids), 'catalogs_questions'),
-        }
-        if metadata_run_id is not None and handle.task_module != 'question':
-            content_values['metadata_run_id'] = metadata_run_id
-        await _update_row(run_id, content_values)
-
-        total_catalogs = sum(
-            int(_scope_field(scope, 'catalog_count', 'catalogCount', default=0) or 0)
-            for external_id, scope in durable_scopes_by_id.items()
-            if external_id in completed_scope_ids
-        )
-        total_questions = sum(
-            int(_scope_field(scope, 'question_count', 'questionCount', default=0) or 0)
-            for external_id, scope in durable_scopes_by_id.items()
-            if external_id in completed_scope_ids
-        )
-        total_question_catalogs = sum(
-            int(_scope_field(scope, 'question_catalog_count', 'questionCatalogCount', default=0) or 0)
-            for external_id, scope in durable_scopes_by_id.items()
-            if external_id in completed_scope_ids
-        )
-        total_question_tags = sum(
-            int(_scope_field(scope, 'question_tag_count', 'questionTagCount', default=0) or 0)
-            for external_id, scope in durable_scopes_by_id.items()
-            if external_id in completed_scope_ids
-        )
-        total_question_assets = sum(
-            int(_scope_field(scope, 'question_asset_count', 'questionAssetCount', default=0) or 0)
-            for external_id, scope in durable_scopes_by_id.items()
-            if external_id in completed_scope_ids
-        )
-        snapshot_locks: list[datetime] = []
-        snapshot_locks.extend(
-            _scope_datetime(_scope_field(scope, 'snapshot_locked_at', 'snapshotLockedAt', 'lockedAt'))
-            for external_id, scope in durable_scopes_by_id.items()
-            if external_id in completed_scope_ids
-            and _scope_datetime(_scope_field(scope, 'snapshot_locked_at', 'snapshotLockedAt', 'lockedAt')) is not None
-        )
-        completed = len(completed_scope_ids)
-        for textbook in textbooks:
-            if await _current_status(run_id) == 'cancelling':
-                await _finish(run_id, handle, 'cancelled', 'cancelled', '同步已停止')
-                return
-            textbook_id = str(textbook['external_textbook_id'])
-            textbook_name = str(textbook['textbook_name'] or textbook_id)
-            if textbook_id in completed_scope_ids:
-                # Completed scopes are immutable inputs on a resumed task.
-                # Their counters are already part of the aggregate above;
-                # never invoke the collector a second time for them.
-                continue
-            durable_scope = durable_scopes_by_id.get(textbook_id)
-            resume_from_run_id = _positive_collector_run_id(
-                _scope_field(
-                    durable_scope,
-                    'resume_from_collector_run_id',
-                    'resumeFromCollectorRunId',
-                    default=None,
-                )
-                if durable_scope is not None
-                else next(
-                    (
-                        identity.get('resumeFromCollectorRunId')
-                        for identity in handle.textbook_scopes
-                        if identity.get('externalTextbookId') == textbook_id
-                    ),
-                    None,
-                )
-            )
-            scope_started = await _update_scope_values(
-                run_id,
-                {
-                    'status': 'running',
-                    'started_at': datetime.now(),
-                    'error_message': None,
-                },
-                external_textbook_id=textbook_id,
-                expected_statuses=('queued', 'starting', 'running'),
-            )
-            if handle.task_module == 'question' and not scope_started:
-                await _finish(
-                    run_id,
-                    handle,
-                    'failed',
-                    'failed',
-                    f'教材 {textbook_name} 的同步范围无法进入运行状态',
-                    catalog_count=total_catalogs,
-                    question_count=total_questions,
-                )
-                return
-            await _update_row(
-                run_id,
-                {
-                    'phase': 'catalogs_questions',
-                    'current_textbook_id': textbook_id,
-                    'current_textbook_name': textbook_name,
-                },
-            )
-            question_result = _ScriptResult(
-                returncode=0,
-                lines=[],
-                catalog_count_base=total_catalogs,
-                question_count_base=total_questions,
-            )
-            content_watermark = await asyncio.to_thread(_content_run_watermark_sync, collector_db)
-            question_command = _with_headful(
-                [
-                    node,
-                    str(QUESTION_SCRIPT),
-                    '--acknowledge-source-policy',
-                    '--db',
-                    str(collector_db),
-                    '--textbook-id',
-                    textbook_id,
-                    '--resume-run-id',
-                    str(resume_from_run_id),
-                ]
-                if resume_from_run_id is not None
-                else [
-                    node,
-                    str(QUESTION_SCRIPT),
-                    '--acknowledge-source-policy',
-                    '--db',
-                    str(collector_db),
-                    '--textbook-id',
-                    textbook_id,
-                    '--no-resume',
-                ]
-            )
-            question_result = await _run_script(run_id, handle, question_command, question_result)
-            if await _current_status(run_id) == 'cancelling':
-                await _finish(
-                    run_id,
-                    handle,
-                    'cancelled',
-                    'cancelled',
-                    '同步已停止',
-                    catalog_count=total_catalogs,
-                    question_count=total_questions,
-                )
-                return
-            script_catalog_count = question_result.catalog_count
-            script_question_count = question_result.question_count
-            if question_result.returncode != 0:
-                status = 'blocked' if _looks_blocked(question_result.lines) else 'failed'
-                message = _last_error(question_result.lines, f'教材 {textbook_name} 同步失败')
-                partial_summary = None
-                if handle.task_module == 'question' and status != 'blocked':
-                    partial_summary = await asyncio.to_thread(
-                        _partial_summary_for_local_failure,
-                        collector_db,
-                        content_watermark,
-                        textbook_id,
-                        question_result,
-                        message,
-                    )
-                if partial_summary is not None:
-                    partial_counts = partial_summary.get('counts') or {}
-                    partial_run = partial_summary.get('run') or {}
-                    partial_run_id = _positive_collector_run_id(partial_summary.get('collector_run_id'))
-                    partial_lock = _scope_datetime(
-                        _scope_field(partial_run, 'snapshot_locked_at', 'snapshotLockedAt', 'locked')
-                    )
-                    partial_scope_values = {
-                        'status': 'interrupted',
-                        'collector_run_id': partial_run_id,
-                        'resume_from_collector_run_id': partial_run_id,
-                        'catalog_count': int(partial_counts.get('catalogItemCount', 0) or 0),
-                        'question_count': int(partial_counts.get('questionItemCount', 0) or 0),
-                        'question_catalog_count': int(partial_counts.get('questionCatalogCount', 0) or 0),
-                        'question_tag_count': int(partial_counts.get('questionTagCount', 0) or 0),
-                        'question_asset_count': int(partial_counts.get('questionAssetCount', 0) or 0),
-                        'snapshot_complete': False,
-                        'snapshot_locked_at': partial_lock,
-                        'error_message': message,
-                        'finished_at': datetime.now(),
-                    }
-                    partial_scope_saved = await _update_scope_values(
-                        run_id,
-                        partial_scope_values,
-                        external_textbook_id=textbook_id,
-                        expected_statuses=('queued', 'starting', 'running'),
-                    )
-                    if not partial_scope_saved:
-                        await _finish(
-                            run_id,
-                            handle,
-                            'failed',
-                            'failed',
-                            f'教材 {textbook_name} 的中断快照状态无法持久化',
-                            catalog_count=total_catalogs,
-                            question_count=total_questions,
-                        )
-                        return
-                    partial_catalog_count = int(partial_counts.get('catalogItemCount', 0) or 0)
-                    partial_question_count = int(partial_counts.get('questionItemCount', 0) or 0)
-                    partial_relation_count = int(partial_counts.get('questionCatalogCount', 0) or 0)
-                    partial_tag_count = int(partial_counts.get('questionTagCount', 0) or 0)
-                    partial_asset_count = int(partial_counts.get('questionAssetCount', 0) or 0)
-                    if partial_run_id is not None:
-                        auto_pending = await _mark_auto_resume_pending(run_id, partial_run_id)
-                        if auto_pending:
-                            handle.log_lines.append(
-                                f'[自动续采] collectorRunId={partial_run_id} 已保留，将按退避策略续采'
-                            )
-                    await _finish(
-                        run_id,
-                        handle,
-                        'interrupted',
-                        'interrupted',
-                        message,
-                        catalog_count=total_catalogs + partial_catalog_count,
-                        question_count=total_questions + partial_question_count,
-                        question_catalog_count=total_question_catalogs + partial_relation_count,
-                        question_tag_count=total_question_tags + partial_tag_count,
-                        question_asset_count=total_question_assets + partial_asset_count,
-                        total_textbooks=len(textbooks),
-                        completed_textbooks=completed,
-                        snapshot_complete=False,
-                        snapshot_locked_at=min(
-                            [*snapshot_locks, partial_lock] if partial_lock is not None else snapshot_locks,
-                            default=None,
-                        ),
-                    )
-                    return
-                await _update_scope_values(
-                    run_id,
-                    {
-                        'status': status,
-                        'error_message': message,
-                        'finished_at': datetime.now(),
-                    },
-                    external_textbook_id=textbook_id,
-                    expected_statuses=('queued', 'starting', 'running'),
-                )
-                await _finish(
-                    run_id,
-                    handle,
-                    status,
-                    status,
-                    message,
-                    catalog_count=total_catalogs,
-                    question_count=total_questions,
-                )
-                return
-            collector_run_id = question_result.collector_run_id
-            if collector_run_id <= content_watermark:
-                collector_run_id = await asyncio.to_thread(
-                    _content_run_id_after_sync,
-                    collector_db,
-                    content_watermark,
-                    textbook_id,
-                )
-            snapshot_summary: dict[str, Any] | None = None
-            if collector_run_id > 0:
-                # Eligibility and task completion use the same bounded
-                # summary contract as the remote collector.  Do not use the
-                # legacy two-table counter helper here: it cannot prove the
-                # lock/completion markers or the question relation/tag/asset
-                # counts that the apply path depends on.
-                snapshot_summary = await asyncio.to_thread(
-                    _read_local_snapshot_summary_sync,
-                    collector_db,
-                    collector_run_id,
-                    textbook_id,
-                )
-            elif collector_db.is_file():
-                # Local content tasks are only successful when the collector
-                # has persisted the immutable run that the comparison APIs
-                # will later read.  Test doubles without a collector DB keep
-                # the legacy orchestration contract and use script counters.
-                await _update_scope_values(
-                    run_id,
-                    {
-                        'status': 'failed',
-                        'error_message': '无法确认本次教材的 collectorRunId',
-                        'finished_at': datetime.now(),
-                    },
-                    external_textbook_id=textbook_id,
-                    expected_statuses=('queued', 'starting', 'running'),
-                )
-                await _finish(
-                    run_id,
-                    handle,
-                    'failed',
-                    'failed',
-                    f'教材 {textbook_name} 缺少 collectorRunId',
-                    catalog_count=total_catalogs,
-                    question_count=total_questions,
-                )
-                return
-            if collector_run_id > 0 and snapshot_summary is not None:
-                # The immutable collector snapshot is authoritative.  A
-                # legitimate empty snapshot must remain zero instead of
-                # falling back to a progress-line counter.
-                summary_counts = snapshot_summary.get('counts') or {}
-                snapshot_catalogs = int(summary_counts.get('catalogItemCount', 0) or 0)
-                snapshot_questions = int(summary_counts.get('questionItemCount', 0) or 0)
-                total_question_catalogs += int(summary_counts.get('questionCatalogCount', 0) or 0)
-                total_question_tags += int(summary_counts.get('questionTagCount', 0) or 0)
-                total_question_assets += int(summary_counts.get('questionAssetCount', 0) or 0)
-                total_catalogs += snapshot_catalogs
-                total_questions += snapshot_questions
-            else:
-                # Test doubles and legacy local collectors without the run
-                # snapshot tables retain the old script-counter behaviour.
-                total_catalogs += script_catalog_count
-                total_questions += script_question_count
-            if collector_run_id > 0 and snapshot_summary is not None:
-                summary_counts = snapshot_summary.get('counts') or {}
-                summary_run = snapshot_summary.get('run') or {}
-                summary_lock = _scope_datetime(
-                    _scope_field(summary_run, 'snapshot_locked_at', 'snapshotLockedAt', 'locked')
-                )
-                if summary_lock is not None:
-                    snapshot_locks.append(summary_lock)
-                scope_completed = await _update_scope_values(
-                    run_id,
-                    {
-                        'status': 'completed',
-                        'collector_run_id': collector_run_id,
-                        'resume_from_collector_run_id': None,
-                        'catalog_count': int(summary_counts.get('catalogItemCount', 0) or 0),
-                        'question_count': int(summary_counts.get('questionItemCount', 0) or 0),
-                        'question_catalog_count': int(summary_counts.get('questionCatalogCount', 0) or 0),
-                        'question_tag_count': int(summary_counts.get('questionTagCount', 0) or 0),
-                        'question_asset_count': int(summary_counts.get('questionAssetCount', 0) or 0),
-                        'snapshot_complete': True,
-                        'snapshot_locked_at': _scope_datetime(
-                            _scope_field(summary_run, 'snapshot_locked_at', 'snapshotLockedAt', 'locked')
-                        ),
-                        'finished_at': datetime.now(),
-                        'error_message': None,
-                    },
-                    external_textbook_id=textbook_id,
-                    expected_statuses=('queued', 'starting', 'running'),
-                )
-                if handle.task_module == 'question' and not scope_completed:
-                    await _finish(
-                        run_id,
-                        handle,
-                        'failed',
-                        'failed',
-                        f'教材 {textbook_name} 的 collectorRunId 无法持久化',
-                        catalog_count=total_catalogs,
-                        question_count=total_questions,
-                    )
-                    return
-            completed += 1
-            await _update_row(
-                run_id,
-                {
-                    'completed_textbooks': completed,
-                    'catalog_count': total_catalogs,
-                    'question_count': total_questions,
-                    'progress_percent': _progress_for(len(textbooks), completed, 'catalogs_questions'),
-                },
-            )
-
-        if handle.task_module == 'question':
-            await _validate_local_question_scopes(run_id, list(handle.textbook_external_ids))
-        finish_snapshot_values = (
-            {
-                'question_catalog_count': total_question_catalogs,
-                'question_tag_count': total_question_tags,
-                'question_asset_count': total_question_assets,
-                'snapshot_complete': True,
-                'snapshot_locked_at': min(snapshot_locks) if snapshot_locks else None,
-            }
-            if handle.task_module == 'question'
-            else {}
-        )
-        await _finish(
-            run_id,
-            handle,
-            'completed',
-            'completed',
-            None,
-            catalog_count=total_catalogs,
-            question_count=total_questions,
-            **finish_snapshot_values,
-            total_textbooks=len(textbooks),
-            completed_textbooks=completed,
-        )
+        await _execute_remote(run_id, handle, max_pages)
+        return
     except asyncio.CancelledError:
         # Application shutdown can cancel the Python task after signalling the
         # child.  Keep a durable terminal state for the next process.
@@ -3815,15 +2350,6 @@ async def _execute(run_id: int, handle: _WorkerHandle) -> None:  # noqa: PLR0911
         await _finish(run_id, handle, 'failed', 'failed', f'同步任务异常：{exc}')
     finally:
         _WORKERS.pop(run_id, None)
-
-
-def _last_error(lines: list[str], fallback: str) -> str:
-    for line in reversed(lines):
-        if '[错误]' in line or '[stderr]' in line or 'Error' in line:
-            text = line.split('] ', 1)[-1].strip()
-            if text:
-                return text[:2000]
-    return fallback
 
 
 async def _finalize_scopes(
@@ -3993,19 +2519,9 @@ class SyncRunService:
             metadata_run_id = int(metadata_run_id)
         if not acknowledge_source_policy:
             raise ServiceException(message='开始同步前必须确认已核对来源站规则、授权范围和内容使用边界')
-        remote = remote_collector_enabled()
-        if remote:
-            await asyncio.to_thread(CollectorClient().health)
-        else:
-            _node_command()
-            if run_type == 'metadata' and not METADATA_SCRIPT.is_file():
-                raise ServiceException(message='元数据同步脚本不存在，无法启动同步任务')
-            if run_type == 'content' and not QUESTION_SCRIPT.is_file():
-                raise ServiceException(message='题库同步脚本不存在，无法启动同步任务')
-        collector_db = None if remote else _collector_path()
-        metadata_watermark = None
-        if not remote and run_type == 'metadata':
-            metadata_watermark = await asyncio.to_thread(_metadata_run_watermark_sync, collector_db)
+        # Fail closed at task creation: every worker, resume, and status path
+        # relies on the configured collector HTTP service.
+        await asyncio.to_thread(CollectorClient().health)
         selected = list(textbook_external_ids or [])
         if len(selected) > MAX_SELECTED_TEXTBOOKS:
             raise ServiceException(message=f'教材选择数量不能超过 {MAX_SELECTED_TEXTBOOKS}')
@@ -4062,7 +2578,6 @@ class SyncRunService:
             'catalogLevels': [1, 2, 3],
             'maxPages': _max_pages(),
             'runType': run_type,
-            'executionMode': 'remote' if remote else 'local',
         }
         if task_module == 'question':
             options.update(
@@ -4074,19 +2589,9 @@ class SyncRunService:
                     'autoResumeNextAt': None,
                 }
             )
-        if remote:
-            options['collectorUrl'] = CollectorClient().base_url
-        else:
-            options.update(
-                {
-                    'metadataScript': 'collector/zujuan_metadata_sync.cjs',
-                    'collectorDb': str(collector_db),
-                    'headful': _headful(),
-                }
-            )
         if run_type == 'content':
-            # This is a server-generated execution snapshot.  Do not put
-            # worker tokens, process IDs, or arbitrary client arguments here.
+            # This is a server-generated execution snapshot. Do not persist
+            # collector URLs, database paths, scripts, or process settings.
             options.update(
                 {
                     'metadataRunId': metadata_run_id if task_module != 'question' else None,
@@ -4095,8 +2600,6 @@ class SyncRunService:
             )
             if task_module == 'question':
                 options['textbookScopes'] = resolved_textbook_scopes
-            if not remote:
-                options['questionScript'] = 'collector/zujuan_sync.cjs'
         if source_task_id is not None:
             if int(source_task_id) <= 0:
                 raise ServiceException(message='sourceTaskId 必须是正整数')
@@ -4106,10 +2609,24 @@ class SyncRunService:
                 raise ServiceException(message='retryOfRunId 必须是正整数')
             options['retryOfRunId'] = int(retry_of_run_id)
         if extra_options:
-            # All callers pass server-resolved values.  Serialise through the
-            # same bounded JSON conversion used by comparison snapshots so a
-            # datetime/Decimal in a test double cannot break task creation.
-            options.update(_jsonable(extra_options))
+            # Only server-resolved display/identity values may be persisted.
+            # Runtime collector configuration must come from the environment.
+            # Reject configuration-shaped keys by family so spelling/case
+            # variants cannot smuggle a local endpoint, script, or browser
+            # mode into the durable task options.  Keep the concrete legacy
+            # names out of runtime source: they are historical input values,
+            # never supported service configuration.
+            forbidden_modes = {'headful', 'executionmode'}
+            safe_extra = {
+                key: value
+                for key, value in extra_options.items()
+                if (
+                    (normalized_key := re.sub(r'[^a-z0-9]', '', str(key).lower())) not in forbidden_modes
+                    and 'collector' not in normalized_key
+                    and 'script' not in normalized_key
+                )
+            }
+            options.update(_jsonable(safe_extra))
         # Identity fields are always reconstructed from the validated scope
         # rows after optional display options. This prevents an internal
         # caller from replacing the server-owned collector selection.
@@ -4177,7 +2694,6 @@ class SyncRunService:
             run_type=run_type,
             task_module=task_module,
             metadata_run_id=None if task_module == 'question' else metadata_run_id,
-            metadata_watermark=metadata_watermark,
             textbook_external_ids=selected,
             textbook_scopes=resolved_textbook_scopes,
         )
@@ -4211,10 +2727,7 @@ class SyncRunService:
 
         if not payload.acknowledge_source_policy:
             raise ServiceException(message='开始同步前必须确认已核对来源站规则、授权范围和内容使用边界')
-        remote = remote_collector_enabled()
-        if not remote:
-            _node_command()
-        collector_db = None if remote else _collector_path()
+        await asyncio.to_thread(CollectorClient().health)
         selected = [str(value or '').strip() for value in payload.textbook_external_ids]
         if not selected or len(selected) > MAX_SELECTED_TEXTBOOKS:
             raise ServiceException(message=f'教材选择数量必须在 1 到 {MAX_SELECTED_TEXTBOOKS} 之间')
@@ -4222,18 +2735,13 @@ class SyncRunService:
             raise ServiceException(message='教材选择列表不能包含重复 ID')
         if any(not _safe_external_id(value) for value in selected):
             raise ServiceException(message='教材来源 ID 不安全')
-        if not remote and (not METADATA_SCRIPT.is_file() or not QUESTION_SCRIPT.is_file()):
-            raise ServiceException(message='同步脚本不存在，无法启动同步任务')
         # Validation is done before creating the MySQL task row so an invalid
         # snapshot can never occupy the global activity slot.
-        if remote:
-            await asyncio.to_thread(
-                CollectorClient().validate_metadata,
-                payload.metadata_run_id,
-                selected,
-            )
-        else:
-            await asyncio.to_thread(_read_metadata_batch_sync, collector_db, payload.metadata_run_id, selected)
+        await asyncio.to_thread(
+            CollectorClient().validate_metadata,
+            payload.metadata_run_id,
+            selected,
+        )
         return await SyncRunService._create_job(
             db,
             run_type='content',
@@ -4245,11 +2753,9 @@ class SyncRunService:
 
     @staticmethod
     async def catalog_progress() -> dict[str, Any]:
-        """Read chapter/section/point crawl progress from collector SQLite."""
+        """Read chapter/section/point crawl progress from the collector API."""
 
-        if remote_collector_enabled():
-            return await asyncio.to_thread(CollectorClient().catalog_progress)
-        return await asyncio.to_thread(read_catalog_progress_sync, _collector_path())
+        return await asyncio.to_thread(CollectorClient().catalog_progress)
 
     @staticmethod
     async def current(db: AsyncSession) -> dict[str, Any] | None:
@@ -4487,12 +2993,6 @@ class SyncRunService:
         return _status_from_row(row, scopes) or {}
 
     @staticmethod
-    async def reconcile_legacy_question_tasks() -> int:
-        return await _reconcile_legacy_question_tasks()
-
-    _reconcile_legacy_question_tasks = reconcile_legacy_question_tasks
-
-    @staticmethod
     async def cancel(db: AsyncSession, run_id: int) -> dict[str, Any]:
         row = await SyncJobDao.get(db, run_id)
         if row is None:
@@ -4506,17 +3006,16 @@ class SyncRunService:
         if cancelled is None:
             cancelled = await SyncJobDao.get(db, run_id)
         remote_job_id = str(getattr(cancelled, 'collector_job_id', '') or '').strip()
-        if remote_job_id and remote_collector_enabled():
+        if remote_job_id:
             try:
                 await asyncio.to_thread(CollectorClient().cancel_job, remote_job_id)
             except ServiceException:
                 # The worker will retry cancellation while polling.  A remote
                 # terminal job is also safe to treat as already cancelled.
                 pass
-        # The owning worker polls this durable state and terminates its own
-        # process group.  Returning immediately keeps cancellation reliable
-        # across workers and prevents the HTTP request waiting for the full
-        # SIGTERM grace period.
+        # The owning worker polls this durable state and cancels the
+        # server-owned job. Returning immediately keeps cancellation reliable
+        # across workers and avoids waiting for the remote crawl to finish.
         module = str(getattr(cancelled, 'task_module', None) or getattr(row, 'task_module', None) or '')
         scopes = await SyncTaskDao.scopes(db, run_id) if module in {'textbook', 'question'} else []
         return _status_from_row(cancelled, scopes) or {}
@@ -4534,7 +3033,6 @@ class SyncRunService:
                 # independent task columns or a narrow test double.
                 active_rows = []
             count = 0
-            remote = remote_collector_enabled()
             for row in active_rows:
                 run_id = int(row.run_id)
                 if run_id in _WORKERS:
@@ -4576,7 +3074,7 @@ class SyncRunService:
                         if updated:
                             terminalized.append((run_id, 'failed', message))
                         continue
-                if remote and remote_job_id:
+                if remote_job_id:
                     textbook_scopes = question_scopes
                     handle = _WorkerHandle(
                         token=secrets.token_hex(32),
@@ -4592,9 +3090,9 @@ class SyncRunService:
                     )
                     recovered.append((run_id, handle))
                     continue
-                # A local process cannot be safely reattached after a Python
-                # restart.  Only queued jobs may be started afresh; stale
-                # starting/running jobs are finalized as interrupted.
+                # A remote job without a durable ID cannot be reattached after
+                # a Python restart. Only queued jobs may be started afresh;
+                # stale starting/running rows are finalized below.
                 if str(getattr(row, 'status', '') or '') == 'queued':
                     handle = _WorkerHandle(
                         token=secrets.token_hex(32),
@@ -4783,14 +3281,12 @@ async def on_startup(context: object | None = None) -> None:
 
     if context is not None and not bool(getattr(context, 'startup_write_enabled', True)):
         return
+    # Validate operator configuration during the plugin startup hook, without
+    # making a network request.  Every task/status path constructs the same
+    # client later; failing here prevents a bank plugin from appearing ready
+    # while its collector URL is absent or malformed.
+    CollectorClient()
     await SyncRunService.recover_orphans()
-    # Migration 010 installs the interrupted state before this lifecycle hook
-    # runs.  Keep legacy reconciliation bounded and best-effort; a temporary
-    # collector/database outage must not prevent normal startup recovery.
-    try:
-        await SyncRunService.reconcile_legacy_question_tasks()
-    except Exception:
-        pass
     try:
         await SyncRunService.resume_pending_question_tasks()
     except Exception:

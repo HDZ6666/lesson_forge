@@ -31,6 +31,7 @@ backend:
     - migrations/mysql/008_textbook_apply.py
     - migrations/mysql/009_question_apply.py
     - migrations/mysql/010_question_resume.py
+    - migrations/mysql/011_remove_local_collector_options.py
   seeds:
     - seeds/mysql/001_dict.sql
   hooks:

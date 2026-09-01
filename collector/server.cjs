@@ -2,6 +2,7 @@
 'use strict';
 
 const http = require('node:http');
+const fs = require('node:fs');
 const path = require('node:path');
 const { randomUUID, timingSafeEqual } = require('node:crypto');
 const { spawn } = require('node:child_process');
@@ -16,10 +17,12 @@ const {
   readCandidates,
   readCatalogProgress,
   readMetadataSnapshot,
+  readRunAsset,
   readRunCatalogs,
   readRunQuestion,
   readRunQuestions,
   readRunSnapshot,
+  readRunSnapshotPage,
   readRunSnapshotSummary,
   safeExternalId,
   validateMetadataSelection,
@@ -1019,6 +1022,101 @@ function sendJson(response, statusCode, payload) {
   response.end(body);
 }
 
+function sendAssetResponse(response, asset) {
+  const contentLength = Number(asset?.contentLength);
+  if (!Number.isSafeInteger(contentLength) || contentLength < 0) {
+    sendJson(response, 500, {
+      error: { code: 'asset_unavailable', message: '素材响应长度无效' },
+    });
+    return;
+  }
+  const fileDescriptor = Number.isInteger(asset?.fileDescriptor)
+    ? asset.fileDescriptor : null;
+  let stream;
+  if (contentLength === 0 && fileDescriptor != null) {
+    try {
+      response.writeHead(200, {
+        'content-type': String(asset.contentType || 'application/octet-stream'),
+        'content-length': 0,
+        etag: String(asset.etag || ''),
+        'cache-control': String(asset.cacheControl || 'public, max-age=31536000, immutable'),
+      });
+      response.end();
+    } finally {
+      try { fs.closeSync(fileDescriptor); } catch {}
+    }
+    return;
+  }
+  try {
+    // `fileDescriptor` is a non-enumerable internal value produced only after
+    // the collector has validated the run scope, root containment, and
+    // digest.  Use a bounded descriptor stream when available so a path
+    // replacement after validation cannot redirect the response.  The path
+    // fallback preserves compatibility for direct callers using older asset
+    // result objects.
+    stream = fileDescriptor != null
+      ? fs.createReadStream(null, {
+        fd: fileDescriptor,
+        autoClose: true,
+        start: 0,
+        end: contentLength - 1,
+      })
+      : fs.createReadStream(asset.filePath);
+  } catch {
+    if (fileDescriptor != null) {
+      try { fs.closeSync(fileDescriptor); } catch {}
+    }
+    sendJson(response, 404, {
+      error: { code: 'asset_not_found', message: '素材文件不存在或不可用' },
+    });
+    return;
+  }
+  stream.once('error', () => {
+    // A filesystem race can still happen after the read-only validation.  Do
+    // not emit a second JSON response after bytes have started flowing and
+    // never let the stream error become an uncaught process exception.
+    if (!response.destroyed && !response.headersSent && !response.writableEnded) {
+      sendJson(response, 404, {
+        error: { code: 'asset_not_found', message: '素材文件不存在或不可用' },
+      });
+    } else if (!response.destroyed) {
+      response.destroy();
+    }
+  });
+  response.once('close', () => {
+    if (!stream.destroyed) stream.destroy();
+  });
+  const startStreaming = () => {
+    if (response.destroyed || response.writableEnded) {
+      stream.destroy();
+      return;
+    }
+    try {
+      response.writeHead(200, {
+        'content-type': String(asset.contentType || 'application/octet-stream'),
+        'content-length': contentLength,
+        etag: String(asset.etag || ''),
+        'cache-control': String(asset.cacheControl || 'public, max-age=31536000, immutable'),
+      });
+      stream.pipe(response);
+    } catch {
+      stream.destroy();
+      if (!response.destroyed && !response.headersSent && !response.writableEnded) {
+        sendJson(response, 500, {
+          error: { code: 'asset_unavailable', message: '素材响应失败' },
+        });
+      } else if (!response.destroyed) {
+        response.destroy();
+      }
+    }
+  };
+  // A stream created from an already-open fd does not emit `open`; a path
+  // stream does.  Start the former immediately while retaining the latter's
+  // open-time error boundary.
+  if (fileDescriptor != null) startStreaming();
+  else stream.once('open', startStreaming);
+}
+
 async function readJson(request) {
   const chunks = [];
   let size = 0;
@@ -1085,6 +1183,34 @@ function createCollectorServer(options = {}) {
           page: url.searchParams.get('page'),
           pageSize: url.searchParams.get('pageSize'),
         }));
+        return;
+      }
+      const runSnapshotPageMatch = url.pathname.match(/^\/v1\/runs\/([^/]+)\/snapshot-page\/?$/i);
+      if (request.method === 'GET' && runSnapshotPageMatch) {
+        sendJson(response, 200, readRunSnapshotPage(
+          manager.dbPath,
+          decodeURIComponent(runSnapshotPageMatch[1]),
+          {
+            collection: url.searchParams.get('collection'),
+            textbookExternalId: url.searchParams.get('textbookExternalId'),
+            cursor: url.searchParams.get('cursor'),
+            pageSize: url.searchParams.get('pageSize'),
+          },
+        ));
+        return;
+      }
+      const runAssetMatch = url.pathname.match(/^\/v1\/runs\/([^/]+)\/assets\/([^/]+)\/?$/i);
+      if (request.method === 'GET' && runAssetMatch) {
+        const asset = readRunAsset(
+          manager.dbPath,
+          decodeURIComponent(runAssetMatch[1]),
+          decodeURIComponent(runAssetMatch[2]),
+          {
+            textbookExternalId: url.searchParams.get('textbookExternalId'),
+            dataDir: manager.dataDir,
+          },
+        );
+        sendAssetResponse(response, asset);
         return;
       }
       const runSnapshotMatch = url.pathname.match(/^\/v1\/runs\/([^/]+)\/snapshot\/?$/i);

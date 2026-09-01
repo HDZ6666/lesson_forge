@@ -12,10 +12,10 @@
 ## 数据流
 
 ```text
-来源站点 -> collector -> SQLite 候选库
-                     ^             |
-                     | HTTP API    v
-service 持久任务 ----+      同步管理对比/审核
+来源站点 -> 独立 collector -> 不可变快照
+                             ^
+                             | HTTP API
+service 持久任务 ------------+      同步管理对比/审核
                               |
                     已通过（仅待发布决定）
                               |
@@ -40,14 +40,16 @@ MySQL 迁移均使用 InnoDB/`utf8mb4`，采用幂等建表和种子脚本。
 
 - 原“同步中心”保持原有单一工作流入口，分成两个由用户主动触发的阶段：
   1. “刷新版本与教材”只启动一个元数据任务，一次发现来源中的全部版本和教材；
-  2. 用户在版本分组下用左右穿梭框选择教材后，点击“同步所选教材内容”，只创建一个内容任务。该任务把所选教材作为一个整体范围，内部可以顺序调用 `zujuan_sync.cjs`，但不会为每本教材创建独立任务；每本教材的完整目录和题目由同一次内容任务一起采集。
+  2. 用户在版本分组下用左右穿梭框选择教材后，点击“同步所选教材内容”，只创建一个内容任务。该任务把所选教材作为一个整体范围，由独立 collector 负责采集；不会为每本教材创建独立任务。
 - 元数据任务完成后，教材选择绑定到明确的 `metadataRunId` 快照；刷新元数据不会静默改写用户已经提交的内容任务范围；
-- 任务支持持久化进度、有限日志、恢复查询和停止。目录和题目共享同一个任务状态和取消边界，结果仍只进入 SQLite 候选库；
+- 任务支持持久化进度、有限日志、恢复查询和停止。目录和题目共享同一个任务状态和取消边界，采集结果保留在 collector 的不可变快照中；
 - 同一时间只允许一个同步任务，启动与停止需要 `bank:sync:run`，任务状态允许任一同步列表权限读取；
 - 独立部署通过 `BANK_COLLECTOR_URL` 和 `BANK_COLLECTOR_TOKEN` 连接 collector，令牌不会写入任务记录；
 - `BANK_COLLECTOR_TIMEOUT_SECONDS` 控制单次 API 请求超时；候选快照和日志均有服务端上限；
-- 未配置 `BANK_COLLECTOR_URL` 时启用同机开发兼容模式：`BANK_COLLECTOR_DB` 默认为 `collector/data/zujuan.sqlite3`，SQLite 通过普通文件路径连接并立即启用 `PRAGMA query_only`，兼容 WAL 伴随文件且不允许业务写入；
-- 无论哪种模式，请求参数都不能指定脚本、命令、SQL 或任意文件路径；
+- 大型快照通过 collector 的 `GET /v1/runs/{runId}/snapshot-page` 分页读取，参数为 `collection`、`cursor`、`pageSize`、`textbookExternalId`；service 校验运行封存标记、教材范围、集合计数和游标推进后才合并结果，不把整库或 SQLite 文件搬入 service；
+- 素材通过 `GET /v1/runs/{runId}/assets/{sha256}` 按内容摘要传输。collector 校验文件后返回字节，service 再校验 SHA-256，并按 `assets/<前两位>/<sha256>.<扩展名>` 保存到 `BANK_ASSET_ROOT`；生产环境配置为 `/app/runtime/bank`，由 `service_runtime` 持久化，数据库中不得保存 collector 宿主绝对路径；
+- `BANK_COLLECTOR_URL` 为必需配置；未配置或不可用时同步、快照和素材操作均失败关闭。服务不会读取 collector 数据库、执行 collector 脚本或持久化 collector 宿主路径；
+- 请求参数不能指定脚本、命令、SQL、collector 数据库或任意 collector 文件路径；
 - 稳定身份是 `source_provider + external_id`；
 - 对比状态为 `new/changed/unchanged/conflict`；
 - 审核状态为 `pending/approved/rejected/stale`；

@@ -52,13 +52,15 @@ npm start
 - `COLLECTOR_NODE_BIN`：运行采集脚本的 Node 可执行文件。
 - `COLLECTOR_HEADFUL`：部署侧是否显示 Chrome 窗口（`true/false`，默认 `false`）；任务请求不能覆盖此配置。
 
-`service` 通过 `BANK_COLLECTOR_URL` 和 `BANK_COLLECTOR_TOKEN` 连接此 API。API 只接受固定任务类型、服务端允许的教材 ID 和页数上限，不接受 SQL、脚本路径、数据库路径或任意命令。主要接口为：
+`service` 必须通过 `BANK_COLLECTOR_URL` 和 `BANK_COLLECTOR_TOKEN`（如启用）连接此 API。即使是本地开发，也先运行 `cd collector && npm start`，再在 service 中设置 `BANK_COLLECTOR_URL=http://127.0.0.1:9110`；默认 loopback collector 不启用 token。API 只接受固定任务类型、服务端允许的教材 ID 和页数上限，不接受 SQL、脚本路径、数据库路径或任意命令。主要接口为：
 
 - `POST /v1/jobs`、`GET /v1/jobs/:id`、`POST /v1/jobs/:id/cancel`；
 - `POST /v1/metadata/validate`、`GET /v1/metadata/snapshot`；
 - `GET /v1/candidates`、`GET /v1/catalog-progress`；
+- `GET /v1/runs/{runId}/snapshot-page`：按 `collection`、`cursor`、`pageSize` 和 `textbookExternalId` 读取一个不可变运行快照页；`collection` 只能是 `catalogs`、`questions`、`questionCatalogs`、`tags` 或 `assets`，响应会受行数和字节上限约束，并返回 `nextCursor`；
+- `GET /v1/runs/{runId}/assets/{sha256}`：按素材 SHA-256 和可选的 `textbookExternalId` 下载素材字节；collector 会校验快照归属、路径安全性、文件大小及实际 SHA-256 后才开始传输；
 - `GET /health` 用于无敏感信息存活检查，`GET /v1/health` 需要认证。
 
 ## 独立部署边界
 
-`collector` 自持 `data/` 和 `.cache/`，独立部署时应对这两个目录做持久化。`service` 不需要挂载 collector SQLite，`collector` 也不需要连接 MySQL。当 `BANK_COLLECTOR_URL` 为空时，`service` 仅为本地开发兼容保留同机脚本/SQLite 模式，正式的分离部署应显式配置 API 地址和令牌。
+`collector` 自持 `data/` 和 `.cache/`，独立部署时应对这两个目录做持久化。`service` 不挂载 collector SQLite，`collector` 也不连接 MySQL；service 只通过上述 HTTP API 分页读取已封存快照。素材不会把 collector 宿主路径交给 service：collector 通过 `/assets/{sha256}` 传输经校验的字节，service 再校验 SHA-256 并保存到自己的 `BANK_ASSET_ROOT`（生产 Compose 使用持久化的 `/app/runtime/bank`）。

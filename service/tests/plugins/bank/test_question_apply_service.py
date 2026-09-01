@@ -7,10 +7,10 @@
 from __future__ import annotations
 
 import copy
-import sqlite3
+import hashlib
 from datetime import datetime
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any
+from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
@@ -41,9 +41,6 @@ from plugins.bank.entity.vo.bank_vo import QuestionApplyRequestModel
 from plugins.bank.service import question_apply_service as module
 from plugins.bank.service.question_apply_service import QuestionApplyService
 from plugins.bank.service.task_service import SyncTaskService
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 
 @compiles(BigInteger, 'sqlite')
@@ -98,7 +95,7 @@ def _raw(run_id: int, textbook: str, question: str = 'q-1', catalog: str = 'c-1'
         'asset_key': 'image-1',
         'asset_type': 'image',
         'source_url': 'https://assets.example/q.png',
-        'content_sha256': 'a' * 64,
+        'content_sha256': hashlib.sha256(b'asset-bytes').hexdigest(),
         'storage_path': 'assets/aa/q.png',
     }]
     return {
@@ -201,7 +198,7 @@ async def _seed(db: AsyncSession, tasks: dict[int, list[tuple[str, int, int]]]) 
 
 
 @pytest.fixture
-def snapshot_reader(monkeypatch: pytest.MonkeyPatch) -> dict[int, dict[str, Any]]:
+def snapshot_reader(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> dict[int, dict[str, Any]]:
     snapshots = {
         101: _raw(101, 'tb-a', tag='A', asset=True),
         102: _raw(102, 'tb-b', tag='B'),
@@ -213,6 +210,9 @@ def snapshot_reader(monkeypatch: pytest.MonkeyPatch) -> dict[int, dict[str, Any]
         return copy.deepcopy(snapshots[run_id])
 
     monkeypatch.setattr(module, '_read_snapshot', read)
+    monkeypatch.setenv('BANK_COLLECTOR_URL', 'http://collector.test')
+    monkeypatch.setenv('BANK_ASSET_ROOT', str(tmp_path / 'assets'))
+    monkeypatch.setattr(module.CollectorClient, 'run_asset_bytes', lambda *_args, **_kwargs: b'asset-bytes')
     return snapshots
 
 
@@ -227,16 +227,11 @@ def test_snapshot_normalization_rejects_incomplete_detail_and_material() -> None
     with pytest.raises(ServiceException, match='详情未完整'):
         module._normalise_snapshot(raw, 9, 'tb-a')
 
-    raw = _raw(1, 'tb-a', asset=True)
-    raw['assets'][0]['storage_path'] = None
-    with pytest.raises(ServiceException, match='未完整下载'):
-        module._normalise_snapshot(raw, 9, 'tb-a')
-
     normalized = module._normalise_snapshot(_raw(1, 'tb-a', tag='x', asset=True), 9, 'tb-a')
     assert normalized['questions'][0].get('answer_html') is None
     assert normalized['questions'][0].get('analysis_html') is None
     assert normalized['tags'][0]['tag_type'] == 'knowledge'
-    assert normalized['assets'][0]['file_hash'] == 'a' * 64
+    assert normalized['assets'][0]['file_hash'] == hashlib.sha256(b'asset-bytes').hexdigest()
 
 
 @pytest.mark.asyncio
@@ -600,7 +595,7 @@ async def test_task_apply_status_projects_internal_summary_counts(
 
 
 @pytest.mark.asyncio
-async def test_apply_task_loader_locks_job_before_reading_scopes() -> None:
+async def test_apply_task_loader_can_read_without_lock_then_lock_task_and_scopes() -> None:
     statements: list[Any] = []
 
     class Result:
@@ -618,11 +613,94 @@ async def test_apply_task_loader_locks_job_before_reading_scopes() -> None:
             statements.append(statement)
             return Result([SimpleNamespace(run_id=9)]) if len(statements) == 1 else Result([])
 
-    task, scopes = await module._load_task_and_scopes(Db(), 9)
+    db = Db()
+    task, scopes = await module._load_task_and_scopes(db, 9)
+
+    assert task.run_id == 9 and scopes == []
+    assert statements[0]._for_update_arg is None
+    assert statements[1]._for_update_arg is None
+
+    statements.clear()
+    task, scopes = await module._load_task_and_scopes(db, 9, for_update=True)
 
     assert task.run_id == 9 and scopes == []
     assert statements[0]._for_update_arg is not None
-    assert statements[1]._for_update_arg is None
+    assert statements[1]._for_update_arg is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('mutation', ['task', 'scope'])
+async def test_question_apply_rechecks_task_scope_signature_after_remote_reads(
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+) -> None:
+    initial_task = SimpleNamespace(
+        run_id=9,
+        task_module='question',
+        run_type='content',
+        status='completed',
+        phase='completed',
+        options_json={},
+    )
+    initial_scope = SimpleNamespace(
+        scope_id=91,
+        run_id=9,
+        source_provider='zujuan',
+        external_textbook_id='tb-a',
+        collector_run_id=101,
+        status='completed',
+    )
+    locked_task = SimpleNamespace(**vars(initial_task))
+    locked_scope = SimpleNamespace(**vars(initial_scope))
+    if mutation == 'task':
+        locked_task.status = 'failed'
+    else:
+        locked_scope.collector_run_id = 102
+
+    class Result:
+        def __init__(self, rows: list[Any]) -> None:
+            self.rows = rows
+
+        def scalars(self) -> Result:
+            return self
+
+        def all(self) -> list[Any]:
+            return self.rows
+
+    class Db:
+        def __init__(self) -> None:
+            self.statements: list[Any] = []
+            self.rollbacks = 0
+
+        async def execute(self, statement: Any) -> Result:
+            self.statements.append(statement)
+            if len(self.statements) == 1:
+                return Result([initial_task])
+            if len(self.statements) == 2:
+                return Result([initial_scope])
+            if len(self.statements) == 3:
+                return Result([locked_task])
+            return Result([locked_scope])
+
+        async def rollback(self) -> None:
+            self.rollbacks += 1
+
+    async def read_snapshot(_run_id: int, _textbook_id: str) -> dict[str, Any]:
+        return _raw(101, 'tb-a')
+
+    monkeypatch.setattr(module, '_read_snapshot', read_snapshot)
+    monkeypatch.setattr(module, '_download_snapshot_assets', AsyncMock())
+    db = Db()
+
+    with pytest.raises(ServiceException, match='在快照读取期间发生变化'):
+        await module._validate_task_snapshots(db, 9)
+
+    assert db.rollbacks == 1
+    assert len(db.statements) == 4
+    assert db.statements[0]._for_update_arg is None
+    assert db.statements[1]._for_update_arg is None
+    assert db.statements[2]._for_update_arg is not None
+    assert db.statements[3]._for_update_arg is not None
 
 
 def test_question_apply_route_and_request_vo_are_registered() -> None:
@@ -632,119 +710,6 @@ def test_question_apply_route_and_request_vo_are_registered() -> None:
     assert '/bank/sync/question/tasks/{task_id}/apply' in schema['paths']
     request = QuestionApplyRequestModel.model_validate({'expectedCurrentTaskId': None, 'expectedStateToken': {'tb-a': None}})
     assert request.expected_state_token == {'tb-a': None}
-
-
-def test_local_snapshot_requires_complete_marker_and_exact_counts(tmp_path: Path) -> None:
-    path = tmp_path / 'collector.sqlite3'
-    connection = sqlite3.connect(path)
-    connection.executescript(
-        """
-        CREATE TABLE sync_runs (id INTEGER, provider TEXT, status TEXT, finished_at TEXT,
-          snapshot_locked_at TEXT, snapshot_complete INTEGER, scope_json TEXT, error_count INTEGER,
-          catalog_item_count INTEGER, question_item_count INTEGER, question_catalog_count INTEGER,
-          question_tag_count INTEGER, question_asset_count INTEGER);
-        CREATE TABLE sync_run_catalog_items (run_id INTEGER, provider TEXT, textbook_external_id TEXT, catalog_external_id TEXT, name TEXT);
-        CREATE TABLE sync_run_question_items (run_id INTEGER, provider TEXT, textbook_external_id TEXT, question_external_id TEXT, content_html TEXT, plain_text TEXT, question_type TEXT, detail_fetched INTEGER, detail_content_hash TEXT);
-        CREATE TABLE sync_run_question_catalogs (run_id INTEGER, provider TEXT, textbook_external_id TEXT, question_external_id TEXT, catalog_external_id TEXT);
-        CREATE TABLE sync_run_question_tags (run_id INTEGER, provider TEXT, textbook_external_id TEXT, question_external_id TEXT, dimension TEXT, tag_value TEXT);
-        CREATE TABLE sync_run_question_assets (run_id INTEGER, provider TEXT, textbook_external_id TEXT, question_external_id TEXT, asset_key TEXT, asset_type TEXT, source_url TEXT, content_sha256 TEXT, storage_path TEXT);
-        """
-    )
-    connection.execute(
-        'INSERT INTO sync_runs VALUES (1,?,?,?,?,?,?,?,?,?,?,?,?)',
-        ('zujuan', 'completed', 'done', 'locked', 1, '{"textbookExternalId":"tb-a"}', 0, 1, 1, 1, 0, 0),
-    )
-    connection.execute('INSERT INTO sync_run_catalog_items VALUES (1,"zujuan","tb-a","c-1","目录")')
-    connection.execute('INSERT INTO sync_run_question_items VALUES (1,"zujuan","tb-a","q-1","html","text","单选",1,"h")')
-    connection.execute('INSERT INTO sync_run_question_catalogs VALUES (1,"zujuan","tb-a","q-1","c-1")')
-    connection.commit()
-    connection.close()
-    payload = module._read_local_snapshot_sync(path, 1, 'tb-a')
-    assert payload['counts']['questionItemCount'] == 1
-    summary = module._read_local_snapshot_summary_sync(path, 1, 'tb-a')
-    assert summary['counts']['questionCatalogCount'] == 1
-    orphan = sqlite3.connect(path)
-    orphan.execute(
-        'INSERT INTO sync_run_question_tags VALUES (1,"zujuan","tb-a","missing-q","knowledge","x")'
-    )
-    orphan.execute('UPDATE sync_runs SET question_tag_count = 1')
-    orphan.commit()
-    orphan.close()
-    with pytest.raises(ServiceException, match='孤儿行'):
-        module._read_local_snapshot_summary_sync(path, 1, 'tb-a')
-    repaired = sqlite3.connect(path)
-    repaired.execute('DELETE FROM sync_run_question_tags')
-    repaired.execute('UPDATE sync_runs SET question_tag_count = 0')
-    repaired.commit()
-    repaired.close()
-    broken = sqlite3.connect(path)
-    broken.execute('UPDATE sync_runs SET snapshot_complete = 0')
-    broken.commit()
-    broken.close()
-    with pytest.raises(ServiceException, match='未完成'):
-        module._read_local_snapshot_sync(path, 1, 'tb-a')
-    missing_counter = sqlite3.connect(path)
-    missing_counter.execute('UPDATE sync_runs SET snapshot_complete = 1')
-    missing_counter.execute(
-        'ALTER TABLE sync_runs RENAME COLUMN question_asset_count TO legacy_question_asset_count'
-    )
-    missing_counter.commit()
-    missing_counter.close()
-    with pytest.raises(ServiceException, match='question_asset_count'):
-        module._read_local_snapshot_sync(path, 1, 'tb-a')
-
-
-def test_partial_snapshot_requires_catalog_question_and_relation_rows(tmp_path: Path) -> None:
-    path = tmp_path / 'partial.sqlite3'
-    connection = sqlite3.connect(path)
-    connection.executescript(
-        """
-        CREATE TABLE sync_runs (id INTEGER, provider TEXT, status TEXT, finished_at TEXT,
-          snapshot_locked_at TEXT, snapshot_complete INTEGER, scope_json TEXT, error_count INTEGER,
-          catalog_item_count INTEGER, question_item_count INTEGER, question_catalog_count INTEGER,
-          question_tag_count INTEGER, question_asset_count INTEGER);
-        CREATE TABLE sync_run_catalog_items (run_id INTEGER, provider TEXT, textbook_external_id TEXT,
-          catalog_external_id TEXT, name TEXT);
-        CREATE TABLE sync_run_question_items (run_id INTEGER, provider TEXT, textbook_external_id TEXT,
-          question_external_id TEXT, content_html TEXT, plain_text TEXT, question_type TEXT, detail_fetched INTEGER);
-        CREATE TABLE sync_run_question_catalogs (run_id INTEGER, provider TEXT, textbook_external_id TEXT,
-          question_external_id TEXT, catalog_external_id TEXT);
-        CREATE TABLE sync_run_question_tags (run_id INTEGER, provider TEXT, textbook_external_id TEXT,
-          question_external_id TEXT, dimension TEXT, tag_value TEXT);
-        CREATE TABLE sync_run_question_assets (run_id INTEGER, provider TEXT, textbook_external_id TEXT,
-          question_external_id TEXT, asset_key TEXT, asset_type TEXT, source_url TEXT,
-          content_sha256 TEXT, storage_path TEXT);
-        INSERT INTO sync_runs VALUES
-          (1,'zujuan','interrupted','done','locked',0,'{"textbookId":"tb-a"}',1,1,1,0,2,3);
-        INSERT INTO sync_run_catalog_items VALUES (1,'zujuan','tb-a','c-1','目录');
-        INSERT INTO sync_run_question_items VALUES (1,'zujuan','tb-a','q-1','html','text','单选',0);
-        INSERT INTO sync_run_question_tags VALUES (1,'zujuan','tb-a','q-1','knowledge','标签');
-        INSERT INTO sync_run_question_assets VALUES (1,'zujuan','tb-a','q-1','a-1','image','https://x/a',NULL,NULL);
-        """
-    )
-    connection.commit()
-    connection.close()
-
-    with pytest.raises(ServiceException, match='没有可安全续采的完整页快照'):
-        module._read_local_partial_snapshot_summary_sync(path, 1, 'tb-a')
-
-    connection = sqlite3.connect(path)
-    connection.execute(
-        "INSERT INTO sync_run_question_catalogs VALUES (1,'zujuan','tb-a','q-1','c-1')"
-    )
-    connection.execute("UPDATE sync_runs SET status = 'blocked', question_catalog_count = 1")
-    connection.commit()
-    connection.close()
-    with pytest.raises(ServiceException, match='不是可续采的中断状态'):
-        module._read_local_partial_snapshot_summary_sync(path, 1, 'tb-a')
-    summary = module._read_local_partial_snapshot_summary_sync(
-        path,
-        1,
-        'tb-a',
-        allow_blocked=True,
-    )
-    assert summary['collector_run_id'] == 1
-    assert summary['counts']['questionItemCount'] == 1
 
 
 @pytest.mark.asyncio

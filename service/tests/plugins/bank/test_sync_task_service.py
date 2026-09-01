@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import sqlite3
 from types import SimpleNamespace
 from typing import Any
 
@@ -11,6 +10,7 @@ from plugins.bank.controller.bank_controller import bank_controller
 from plugins.bank.service import sync_run_service, task_service
 
 TASK_ID = 11
+COLLECTOR_RUN_ID = 44
 SOURCE_TASK_ID = 7
 RETRY_TASK_ID = 22
 BLOCKED_COLLECTOR_RUN_ID = 20
@@ -310,44 +310,6 @@ async def test_retry_question_creates_fresh_queued_scope_state(monkeypatch: pyte
     assert captured['metadata_run_id'] is None
 
 
-def test_content_snapshot_counts_require_matching_completed_immutable_run(tmp_path: Any) -> None:
-    path = tmp_path / 'collector.sqlite3'
-    connection = sqlite3.connect(path)
-    connection.executescript(
-        """
-        CREATE TABLE sync_runs (
-            id INTEGER PRIMARY KEY,
-            provider TEXT NOT NULL,
-            status TEXT NOT NULL,
-            scope_json TEXT NOT NULL,
-            finished_at TEXT
-        );
-        CREATE TABLE sync_run_catalog_items (
-            run_id INTEGER,
-            provider TEXT,
-            textbook_external_id TEXT
-        );
-        CREATE TABLE sync_run_question_items (
-            run_id INTEGER,
-            provider TEXT,
-            textbook_external_id TEXT
-        );
-        INSERT INTO sync_runs VALUES
-            (4, 'zujuan', 'completed', '{"textbookId":"tb-8"}', '2026-08-28T10:00:00Z');
-        INSERT INTO sync_run_catalog_items VALUES (4, 'zujuan', 'tb-8');
-        INSERT INTO sync_run_catalog_items VALUES (4, 'zujuan', 'tb-8');
-        INSERT INTO sync_run_question_items VALUES (4, 'zujuan', 'tb-8');
-        """
-    )
-    connection.commit()
-    connection.close()
-
-    assert sync_run_service._content_snapshot_counts_sync(path, 4, 'tb-8') == (2, 1)
-    with pytest.raises(ServiceException) as error:
-        sync_run_service._content_snapshot_counts_sync(path, 4, 'other')
-    assert '不匹配' in error.value.message
-
-
 def test_catalog_tree_breaks_parent_cycles_without_recursion() -> None:
     rows = [
         {
@@ -461,3 +423,139 @@ def test_remote_projection_does_not_erase_durable_job_id_when_omitted() -> None:
     values = sync_run_service._remote_status_values({'status': 'running', 'progressPercent': 10})
 
     assert 'collector_job_id' not in values
+
+
+def _collector_summary(run_id: int, textbook_id: str, *, catalogs: int = 0, questions: int = 0) -> dict[str, Any]:
+    return {
+        'available': True,
+        'immutable': True,
+        'snapshotComplete': True,
+        'run': {
+            'id': run_id,
+            'provider': 'zujuan',
+            'status': 'completed',
+            'snapshotComplete': True,
+            'snapshotLockedAt': '2026-08-31T10:00:00Z',
+            'finishedAt': '2026-08-31T10:00:01Z',
+            'scope': {'textbookExternalId': textbook_id},
+        },
+        'textbookExternalId': textbook_id,
+        'counts': {
+            'catalogItemCount': catalogs,
+            'questionItemCount': questions,
+            'questionCatalogCount': 0,
+            'questionTagCount': 0,
+            'questionAssetCount': 0,
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_collector_rows_use_summary_and_specialized_bounded_pages_without_full_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[tuple[str, int]] = []
+
+    class Client:
+        def run_snapshot(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+            raise AssertionError('comparison must not materialize all five snapshot collections')
+
+        def run_snapshot_summary(self, run_id: int, *, textbook_external_id: str) -> dict[str, Any]:
+            events.append(('summary', run_id))
+            return _collector_summary(run_id, textbook_external_id, catalogs=2)
+
+        def run_catalogs(
+            self,
+            run_id: int,
+            *,
+            textbook_external_id: str,
+            page: int,
+            page_size: int,
+        ) -> dict[str, Any]:
+            events.append((f'catalogs:{page}', page_size))
+            return {
+                'available': True,
+                'run': _collector_summary(run_id, textbook_external_id, catalogs=2)['run'],
+                'total': 2,
+                'page': page,
+                'pageSize': page_size,
+                'rows': [
+                    {
+                        'sourceProvider': 'zujuan',
+                        'externalCatalogId': f'c-{page}',
+                        'externalTextbookId': textbook_external_id,
+                        'name': f'目录 {page}',
+                    }
+                ],
+            }
+
+    monkeypatch.setattr(task_service, 'CollectorClient', Client)
+
+    run, rows = await task_service._collector_rows(COLLECTOR_RUN_ID, 'catalog', 'tb-8')
+
+    assert run['id'] == COLLECTOR_RUN_ID
+    assert [item['externalCatalogId'] for item in rows] == ['c-1', 'c-2']
+    assert events == [('summary', COLLECTOR_RUN_ID), ('catalogs:1', 500), ('catalogs:2', 500)]
+
+
+@pytest.mark.asyncio
+async def test_collector_question_detail_uses_summary_and_detail_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+
+    class Client:
+        def run_snapshot(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+            raise AssertionError('detail must not fetch the full snapshot')
+
+        def run_snapshot_summary(self, run_id: int, *, textbook_external_id: str) -> dict[str, Any]:
+            events.append(f'summary:{run_id}:{textbook_external_id}')
+            return _collector_summary(run_id, textbook_external_id, questions=1)
+
+        def run_question_detail(
+            self,
+            run_id: int,
+            external_id: str,
+            *,
+            textbook_external_id: str,
+        ) -> dict[str, Any]:
+            events.append(f'detail:{run_id}:{external_id}:{textbook_external_id}')
+            return {
+                'available': True,
+                'run': _collector_summary(run_id, textbook_external_id, questions=1)['run'],
+                'item': {
+                    'sourceProvider': 'zujuan',
+                    'externalTextbookId': textbook_external_id,
+                    'externalQuestionId': external_id,
+                    'contentHtml': '<p>题干</p>',
+                },
+            }
+
+    monkeypatch.setattr(task_service, 'CollectorClient', Client)
+
+    result = await task_service._collector_question_detail(44, 'q-1', 'tb-8')
+
+    assert result['externalQuestionId'] == 'q-1'
+    assert events == ['summary:44:tb-8', 'detail:44:q-1:tb-8']
+
+
+@pytest.mark.asyncio
+async def test_collector_rows_reject_page_count_larger_than_summary(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Client:
+        def run_snapshot_summary(self, run_id: int, *, textbook_external_id: str) -> dict[str, Any]:
+            return _collector_summary(run_id, textbook_external_id, catalogs=1)
+
+        def run_catalogs(self, run_id: int, *, textbook_external_id: str, page: int, page_size: int) -> dict[str, Any]:
+            return {
+                'available': True,
+                'run': _collector_summary(run_id, textbook_external_id, catalogs=1)['run'],
+                'total': 2,
+                'page': page,
+                'pageSize': page_size,
+                'rows': [],
+            }
+
+    monkeypatch.setattr(task_service, 'CollectorClient', Client)
+
+    with pytest.raises(ServiceException, match='计数与摘要不一致'):
+        await task_service._collector_rows(44, 'catalog', 'tb-8')
