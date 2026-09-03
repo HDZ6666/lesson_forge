@@ -6,6 +6,7 @@
   "scripts": {
     "start": "node server.cjs",
     "sync:zujuan": "node zujuan_sync.cjs",
+    "sync:zujuan:questions": "node zujuan_question_sync.cjs",
     "sync:zujuan:book": "node zujuan_sync.cjs --acknowledge-source-policy --headful",
     "sync:zujuan:metadata": "node zujuan_metadata_sync.cjs",
     "sync:zujuan:chapter5": "sh zujuan_sync.sh --all-catalogs --catalog-level 3 --within-chapter 261314 --max-pages ${ZUJUAN_MAX_PAGES:-3}",

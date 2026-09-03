@@ -65,6 +65,8 @@ TRANSIENT_ERROR_RE = re.compile(
 AUTO_RESUME_MAX_ATTEMPTS = 3
 AUTO_RESUME_HARD_MAX_ATTEMPTS = 10
 AUTO_RESUME_DELAYS_SECONDS = (30, 90, 300)
+MAX_LIVE_PROJECTION_NODES = 1000
+MAX_LIVE_PROJECTION_BYTES = 4 * 1024 * 1024
 
 
 def _exception_message(exc: BaseException, fallback: str) -> str:
@@ -88,6 +90,10 @@ def _jsonable(value: Any) -> Any:
     if isinstance(value, (tuple, list)):
         return [_jsonable(item) for item in value]
     return str(value)
+
+
+def _stable_json(value: Any) -> str:
+    return json.dumps(_jsonable(value), ensure_ascii=False, sort_keys=True, separators=(',', ':'))
 
 
 _WORKERS: dict[int, _WorkerHandle] = {}
@@ -694,6 +700,192 @@ def _row_options(row: Mapping[str, Any] | object | None) -> dict[str, Any]:
             return {}
         return dict(parsed) if isinstance(parsed, Mapping) else {}
     return {}
+
+
+def _bound_live_node(value: Any, budget: list[int]) -> dict[str, Any] | None:
+    """Keep only renderable fields from one collector live-tree node."""
+
+    if not isinstance(value, Mapping) or budget[0] <= 0:
+        return None
+    budget[0] -= 1
+    output: dict[str, Any] = {}
+    for key in (
+        'nodeKey', 'externalId', 'externalCatalogId', 'textbookExternalId',
+        'parentExternalId', 'level', 'nodeLevel', 'type', 'nodeType',
+        'name', 'label', 'sourcePath', 'path', 'sortOrder',
+        'expectedTotal', 'expected', 'total', 'collectedCount', 'collected',
+        'listSeenCount', 'questionCount', 'expectedPages', 'lastCompletedPage',
+        'status', 'queried', 'hasProgress', 'observedAt',
+    ):
+        if key in value and value[key] is not None:
+            output[key] = _jsonable(value[key])
+    children = value.get('children')
+    if isinstance(children, list) and budget[0] > 0:
+        output['children'] = []
+        for child in children:
+            bounded = _bound_live_node(child, budget)
+            if bounded is None:
+                break
+            output['children'].append(bounded)
+    else:
+        output['children'] = []
+    return output
+
+
+def _bound_live_projection(value: Any, *, include_tree: bool = True, max_nodes: int = MAX_LIVE_PROJECTION_NODES) -> dict[str, Any] | None:
+    """Bound a collector live projection before persisting it in task JSON."""
+
+    if not isinstance(value, Mapping):
+        return None
+    output: dict[str, Any] = {}
+    scalar_keys = (
+        'available', 'live', 'message', 'runId', 'collectorRunId',
+        'textbookExternalId', 'status', 'startedAt', 'finishedAt',
+        'summaryStrategy', 'textbookExpectedTotal',
+        'firstRoundComplete', 'totalsKnown', 'statisticsPending',
+        'totalQuestionCount', 'expectedQuestionCount', 'collectedQuestionCount',
+        'uniqueQuestionCount', 'questionItemsAvailable', 'listSeenCount',
+        'progressPercent', 'progress', 'chapterCount',
+        'knowledgePointCount', 'secondaryKnowledgePointCount', 'catalogCount',
+        'summaryCatalogLevel', 'summaryNodeCount', 'treeNodeCount', 'treeTruncated', 'treeAvailable',
+    )
+    for key in scalar_keys:
+        if key in value:
+            output[key] = _jsonable(value[key])
+    level_counts = value.get('catalogLevelCounts')
+    if isinstance(level_counts, Mapping):
+        normalized_levels: dict[str, int] = {}
+        for key, item in list(level_counts.items())[:32]:
+            try:
+                normalized_levels[str(key)[:32]] = max(0, int(item or 0))
+            except (TypeError, ValueError, OverflowError):
+                continue
+        output['catalogLevelCounts'] = normalized_levels
+    summary_ids = value.get('summaryCatalogIds')
+    if isinstance(summary_ids, (list, tuple)):
+        output['summaryCatalogIds'] = [str(item)[:128] for item in summary_ids[:MAX_LIVE_PROJECTION_NODES]]
+    raw_tree = value.get('tree') or value.get('catalogs') or value.get('catalogTree')
+    budget = [max(0, min(MAX_LIVE_PROJECTION_NODES, int(max_nodes or 0)))]
+    tree: list[dict[str, Any]] = []
+    if include_tree and isinstance(raw_tree, list) and budget[0] > 0:
+        for node in raw_tree:
+            bounded = _bound_live_node(node, budget)
+            if bounded is None:
+                break
+            tree.append(bounded)
+        # Persist only one tree field.  `catalogs`/`catalogTree` remain input
+        # aliases for older collector responses, never stored copies.
+        output['tree'] = tree
+        if budget[0] <= 0 and raw_tree:
+            output['treeTruncated'] = True
+    try:
+        encoded = json.dumps(output, ensure_ascii=False, separators=(',', ':'))
+    except (TypeError, ValueError):
+        return None
+    if len(encoded.encode('utf-8')) > MAX_LIVE_PROJECTION_BYTES:
+        if include_tree:
+            output['tree'] = []
+        output['treeTruncated'] = True
+    return output
+
+
+def _remote_live_projection(payload: Mapping[str, Any]) -> tuple[dict[str, Any] | None, dict[str, dict[str, Any]]]:
+    """Extract and bound live data without making it part of scalar row state."""
+
+    raw_scopes = payload.get('liveProgressByScope') or payload.get('live_progress_by_scope')
+    scope_count = len(raw_scopes) if isinstance(raw_scopes, Mapping) else 0
+    per_scope_nodes = max(
+        1,
+        min(
+            MAX_LIVE_PROJECTION_NODES,
+            MAX_LIVE_PROJECTION_NODES // max(1, min(MAX_SELECTED_TEXTBOOKS, scope_count)),
+        ),
+    )
+    primary = _bound_live_projection(
+        payload.get('liveProgress') or payload.get('live_progress'),
+        max_nodes=per_scope_nodes,
+    )
+    by_scope: dict[str, dict[str, Any]] = {}
+    if isinstance(raw_scopes, Mapping):
+        for key, item in list(raw_scopes.items())[:MAX_SELECTED_TEXTBOOKS]:
+            bounded = _bound_live_projection(item, max_nodes=per_scope_nodes)
+            if bounded is not None:
+                by_scope[str(key)[:128]] = bounded
+    if not by_scope and primary is not None:
+        textbook_id = primary.get('textbookExternalId')
+        if textbook_id not in (None, ''):
+            by_scope[str(textbook_id)[:128]] = primary
+    return primary, by_scope
+
+
+async def _persist_live_progress(run_id: int, payload: Mapping[str, Any] | None) -> bool:
+    """Best-effort persistence of the mutable collector progress projection."""
+
+    if not isinstance(payload, Mapping):
+        return False
+    try:
+        primary, by_scope = _remote_live_projection(payload)
+        if primary is None and not by_scope:
+            return False
+        row = await _load_row(run_id)
+        if row is None:
+            return False
+        options = _row_options(row)
+        existing_by_scope = options.get('liveProgressByScope') or options.get('live_progress_by_scope')
+        merged_by_scope: dict[str, dict[str, Any]] = {}
+        bounded_by_scope: dict[str, dict[str, Any]] = {}
+        if isinstance(existing_by_scope, Mapping):
+            merged_by_scope.update({str(key)[:128]: item for key, item in existing_by_scope.items()})
+        merged_by_scope.update(by_scope)
+        if merged_by_scope:
+            scope_count = min(MAX_SELECTED_TEXTBOOKS, len(merged_by_scope))
+            per_scope_nodes = max(
+                1,
+                min(MAX_LIVE_PROJECTION_NODES, MAX_LIVE_PROJECTION_NODES // max(1, scope_count)),
+            )
+            for key, item in list(merged_by_scope.items())[:MAX_SELECTED_TEXTBOOKS]:
+                bounded = _bound_live_projection(item, max_nodes=per_scope_nodes)
+                if bounded is not None:
+                    bounded_by_scope[key] = bounded
+            if bounded_by_scope:
+                options['liveProgressByScope'] = bounded_by_scope
+            else:
+                options.pop('liveProgressByScope', None)
+            options.pop('live_progress_by_scope', None)
+        else:
+            options.pop('liveProgressByScope', None)
+            options.pop('live_progress_by_scope', None)
+        # Keep a compatibility summary without a tree at the top level. The
+        # one authoritative renderable tree per scope lives only in
+        # liveProgressByScope; this prevents primary + by-scope payloads from
+        # tripling the same ~220-node tree in options_json.
+        primary_summary_source = primary
+        if primary_summary_source is None and bounded_by_scope:
+            primary_summary_source = next(iter(bounded_by_scope.values()))
+        primary_summary = _bound_live_projection(
+            primary_summary_source,
+            include_tree=False,
+            max_nodes=0,
+        ) if primary_summary_source is not None else None
+        if primary_summary is not None:
+            options['liveProgress'] = primary_summary
+            options.pop('live_progress', None)
+        else:
+            options.pop('liveProgress', None)
+            options.pop('live_progress', None)
+        current = _row_options(row)
+        if _stable_json(current.get('liveProgress')) == _stable_json(options.get('liveProgress')) \
+            and _stable_json(current.get('liveProgressByScope')) == _stable_json(options.get('liveProgressByScope')):
+            return False
+        return await _update_row(
+            run_id,
+            {'options_json': options},
+            expected_statuses=('starting', 'running', 'cancelling'),
+        )
+    except Exception:
+        # Live progress is diagnostic/UI data. A locked MySQL row, malformed
+        # legacy options value, or collector payload must never fail a crawl.
+        return False
 
 
 def _auto_resume_enabled(options: Mapping[str, Any]) -> bool:
@@ -1823,6 +2015,10 @@ async def _execute_remote(  # noqa: PLR0912, PLR0915
             # independent question task.
             values.pop('metadata_run_id', None)
         await _update_row(run_id, values)
+        # The live tree is mutable and best-effort. Persist it separately in
+        # options_json so the task detail API can serve it without touching
+        # immutable snapshot/compare paths.
+        await _persist_live_progress(run_id, remote)
         # New collector versions expose immutable per-textbook scope data on
         # the job response.  Copy only bounded identity/progress fields into
         # the service scope table; unknown/legacy payloads are ignored.

@@ -161,6 +161,37 @@ def _task_options(row: object) -> dict[str, Any]:
     return {}
 
 
+def _live_projection_summary(value: Any) -> dict[str, Any] | None:
+    """Return live scalar fields without copying a renderable tree."""
+
+    if not isinstance(value, Mapping):
+        return None
+    return {
+        str(key): _jsonable(item)
+        for key, item in value.items()
+        if str(key) not in {'tree', 'catalogs', 'catalogTree', 'catalog_tree'}
+    }
+
+
+def _live_projection_tree(value: Any) -> dict[str, Any] | None:
+    """Normalize one persisted scope to exactly one renderable tree field."""
+
+    if not isinstance(value, Mapping):
+        return None
+    output = {str(key): _jsonable(item) for key, item in value.items()}
+    raw_tree = output.get('tree')
+    if not isinstance(raw_tree, list):
+        raw_tree = next(
+            (output.get(key) for key in ('catalogs', 'catalogTree', 'catalog_tree')
+             if isinstance(output.get(key), list)),
+            [],
+        )
+    for key in ('catalogs', 'catalogTree', 'catalog_tree'):
+        output.pop(key, None)
+    output['tree'] = raw_tree
+    return output
+
+
 def _scope_payload(scope: object) -> dict[str, Any]:
     local_version_id = _pick(scope, 'local_version_id', 'localVersionId', 'version_id', 'versionId')
     local_textbook_id = _pick(scope, 'local_textbook_id', 'localTextbookId', 'textbook_id', 'textbookId')
@@ -340,6 +371,35 @@ def task_payload(row: object, scopes: list[object] | None = None) -> dict[str, A
         )
     except (TypeError, ValueError):
         auto_resume_max_attempts = 3
+    raw_live_by_scope = options.get('liveProgressByScope') or options.get('live_progress_by_scope')
+    live_by_scope = {}
+    if isinstance(raw_live_by_scope, Mapping):
+        for key, item in raw_live_by_scope.items():
+            normalized = _live_projection_tree(item)
+            if normalized is not None:
+                live_by_scope[str(key)] = normalized
+    # The per-scope map is authoritative for trees. Derive only a scalar
+    # top-level compatibility summary from the current/first scope so the API
+    # does not send or persist another copy of the same tree.
+    current_textbook_id = _pick(row, 'current_textbook_id', 'currentTextbookId')
+    selected_live = None
+    if live_by_scope:
+        candidate_keys = []
+        if current_textbook_id not in (None, ''):
+            candidate_keys.append(str(current_textbook_id))
+        candidate_keys.extend(
+            str(item.get('externalTextbookId'))
+            for item in scope_payloads
+            if item.get('externalTextbookId') not in (None, '')
+        )
+        for key in candidate_keys:
+            if key in live_by_scope:
+                selected_live = live_by_scope[key]
+                break
+        if selected_live is None:
+            selected_live = next(iter(live_by_scope.values()))
+    raw_live_progress = options.get('liveProgress') or options.get('live_progress')
+    live_progress = _live_projection_summary(selected_live or raw_live_progress)
     return {
         'taskId': run_id,
         'taskNo': str(run_id),
@@ -403,6 +463,10 @@ def task_payload(row: object, scopes: list[object] | None = None) -> dict[str, A
             options.get('autoResumePending', options.get('auto_resume_pending', False))
         ),
         'autoResumeNextAt': options.get('autoResumeNextAt') or options.get('auto_resume_next_at'),
+        # Mutable, read-only progress projection. Formal comparison/apply
+        # endpoints continue to use the immutable collector snapshot APIs.
+        'liveProgress': live_progress,
+        'liveProgressByScope': live_by_scope,
     }
 
 

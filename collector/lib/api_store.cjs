@@ -20,6 +20,10 @@ const MAX_RUN_TEXT_LENGTH = 120000;
 const MAX_RUN_RAW_JSON_LENGTH = 160000;
 const MAX_RUN_ERRORS = 50;
 const MAX_RUN_SNAPSHOT_ROWS = 20000;
+// The live tree is only a progress projection.  Keep it deliberately bounded
+// so a malformed/very large provider tree can never turn every polling
+// response into a large untrusted payload.
+const MAX_LIVE_TREE_NODES = 1000;
 // The page API deliberately uses a lower target than the HTTP hard limit.
 // This leaves room for the response envelope and keeps a page safe even
 // when a caller and the HTTP layer use slightly different limits.  Rows are
@@ -278,7 +282,12 @@ function escapeLike(value) {
 function openReadOnly(dbPath) {
   const resolved = path.resolve(dbPath);
   if (!fs.existsSync(resolved) || !fs.statSync(resolved).isFile()) return null;
-  return new DatabaseSync(resolved, { readOnly: true });
+  const db = new DatabaseSync(resolved, { readOnly: true });
+  // A page save runs in a short IMMEDIATE transaction.  WAL lets this
+  // reader observe the previous committed snapshot while that transaction
+  // is in flight, and busy_timeout covers the small checkpoint/lock window.
+  try { db.exec('PRAGMA busy_timeout = 5000; PRAGMA query_only = true;'); } catch {}
+  return db;
 }
 
 function tableNames(db) {
@@ -593,6 +602,28 @@ function readRunCatalogs(dbPath, runId, options = {}) {
       parameters.push(textbookExternalId);
     }
     const where = predicates.join(' AND ');
+    const pageColumns = tableNames(db).has('sync_run_catalog_pages')
+      ? tableColumns(db, 'sync_run_catalog_pages') : new Set();
+    const hasPageOccurrenceSnapshot = [
+      'run_id', 'provider', 'textbook_external_id', 'catalog_external_id', 'question_count',
+    ].every((column) => pageColumns.has(column));
+    const questionCountSql = hasPageOccurrenceSnapshot
+      ? `(
+           SELECT COALESCE(SUM(page.question_count), 0)
+           FROM sync_run_catalog_pages AS page
+           WHERE page.run_id = item.run_id
+             AND page.provider = item.provider
+             AND page.textbook_external_id = item.textbook_external_id
+             AND page.catalog_external_id = item.catalog_external_id
+         )`
+      : `(
+           SELECT COUNT(*)
+           FROM sync_run_question_catalogs AS link
+           WHERE link.run_id = item.run_id
+             AND link.provider = item.provider
+             AND link.textbook_external_id = item.textbook_external_id
+             AND link.catalog_external_id = item.catalog_external_id
+         )`;
     const total = Number(db.prepare(`
       SELECT COUNT(*) AS total FROM sync_run_catalog_items AS item WHERE ${where}
     `).get(...parameters).total || 0);
@@ -607,14 +638,7 @@ function readRunCatalogs(dbPath, runId, options = {}) {
              ${optionalSelect(itemColumns, 'item', 'catalog_path')},
              ${optionalSelect(itemColumns, 'item', 'sort_order')},
              ${optionalSelect(itemColumns, 'item', 'captured_at')},
-             (
-               SELECT COUNT(DISTINCT link.question_external_id)
-               FROM sync_run_question_catalogs AS link
-               WHERE link.run_id = item.run_id
-                 AND link.provider = item.provider
-                 AND link.textbook_external_id = item.textbook_external_id
-                 AND link.catalog_external_id = item.catalog_external_id
-             ) AS question_count
+             ${questionCountSql} AS question_count
       FROM sync_run_catalog_items AS item
       WHERE ${where}
       ORDER BY item.textbook_external_id ASC,
@@ -647,6 +671,301 @@ function readRunCatalogs(dbPath, runId, options = {}) {
     };
   } finally {
     db.close();
+  }
+}
+
+/**
+ * Read the small, mutable progress projection used by the task detail page.
+ *
+ * This intentionally does not use the apply/compare snapshot readers above:
+ * a running run is expected here. Per-catalog page counters are occurrence
+ * counters (the same question appearing in two catalog queries counts twice),
+ * while the textbook summary is the unique-question row count from
+ * sync_run_question_items.
+ * Every error is converted into an unavailable projection so polling this
+ * endpoint can never make the collector worker fail.
+ */
+function readLiveRunProgress(dbPath, runId, options = {}) {
+  const requestedTextbookId = optionalExternalId(
+    options.textbookExternalId,
+    'textbookExternalId',
+  );
+  let db = null;
+  const unavailable = (message = 'collector 实时进度暂不可用', error = null) => ({
+    available: false,
+    live: false,
+    runId: Number.isSafeInteger(Number(runId)) ? Number(runId) : null,
+    textbookExternalId: requestedTextbookId,
+    message: boundedString(message, 400),
+    errorCode: error?.code || null,
+  });
+
+  try {
+    db = openReadOnly(dbPath);
+    if (!db) return unavailable('collector SQLite 不存在');
+    const run = resolveContentRun(db, runId);
+    const tables = tableNames(db);
+    const required = ['sync_run_catalog_items', 'sync_run_catalog_progress'];
+    const missing = required.filter((table) => !tables.has(table));
+    if (missing.length) return unavailable(`collector SQLite 缺少实时进度表：${missing.join(', ')}`);
+    assertRunTextbook(db, run, requestedTextbookId);
+
+    const textbookExternalId = requestedTextbookId || run.textbookExternalId || null;
+    const predicates = ['item.run_id = ?', 'item.provider = ?'];
+    const parameters = [run.id, PROVIDER];
+    if (textbookExternalId) {
+      predicates.push('item.textbook_external_id = ?');
+      parameters.push(textbookExternalId);
+    }
+    const where = predicates.join(' AND ');
+    const itemColumns = tableColumns(db, 'sync_run_catalog_items');
+    const progressPredicates = [
+      'progress.run_id = ?', 'progress.provider = ?',
+    ];
+    const progressParameters = [run.id, PROVIDER];
+    if (textbookExternalId) {
+      progressPredicates.push('progress.textbook_external_id = ?');
+      progressParameters.push(textbookExternalId);
+    }
+    const progressWhere = progressPredicates.join(' AND ');
+    const maxNodes = Math.min(
+      MAX_LIVE_TREE_NODES,
+      Number.isSafeInteger(Number(options.maxNodes)) && Number(options.maxNodes) > 0
+        ? Number(options.maxNodes) : MAX_LIVE_TREE_NODES,
+    );
+    const catalogCount = Number(db.prepare(`
+      SELECT COUNT(*) AS n FROM sync_run_catalog_items AS item WHERE ${where}
+    `).get(...parameters).n || 0);
+    const levelCounts = new Map(db.prepare(`
+      SELECT COALESCE(item.node_level, 0) AS level, COUNT(*) AS n
+      FROM sync_run_catalog_items AS item
+      WHERE ${where}
+      GROUP BY COALESCE(item.node_level, 0)
+    `).all(...parameters).map((row) => [Number(row.level || 0), Number(row.n || 0)]));
+    const progressRows = db.prepare(`
+      SELECT progress.catalog_external_id, progress.expected_total,
+             progress.page_capacity, progress.expected_pages,
+             progress.last_completed_page, progress.list_seen_count,
+             progress.status, progress.observed_at
+      FROM sync_run_catalog_progress AS progress
+      WHERE ${progressWhere}
+    `).all(...progressParameters);
+    // Derive the occurrence counter from the idempotent page snapshot when
+    // available.  Progress rows are copied during resume, so trusting their
+    // historical counter alone could preserve a pre-fix double count.
+    const pageColumns = tables.has('sync_run_catalog_pages')
+      ? tableColumns(db, 'sync_run_catalog_pages') : new Set();
+    const pageOccurrencesByCatalog = new Map();
+    if (['run_id', 'provider', 'textbook_external_id', 'catalog_external_id', 'question_count']
+      .every((column) => pageColumns.has(column))) {
+      const pagePredicates = [
+        'page.run_id = ?', 'page.provider = ?',
+      ];
+      const pageParameters = [run.id, PROVIDER];
+      if (textbookExternalId) {
+        pagePredicates.push('page.textbook_external_id = ?');
+        pageParameters.push(textbookExternalId);
+      }
+      const pageRows = db.prepare(`
+        SELECT page.catalog_external_id, COALESCE(SUM(page.question_count), 0) AS n
+        FROM sync_run_catalog_pages AS page
+        WHERE ${pagePredicates.join(' AND ')}
+        GROUP BY page.catalog_external_id
+      `).all(...pageParameters);
+      for (const row of pageRows) {
+        pageOccurrencesByCatalog.set(
+          String(row.catalog_external_id),
+          Math.max(0, Number(row.n || 0)),
+        );
+      }
+    }
+    const progressByCatalog = new Map(progressRows.map((row) => [
+      String(row.catalog_external_id), {
+        expectedTotal: row.expected_total == null ? null : Number(row.expected_total),
+        pageCapacity: row.page_capacity == null ? null : Number(row.page_capacity),
+        expectedPages: row.expected_pages == null ? null : Number(row.expected_pages),
+        lastCompletedPage: Number(row.last_completed_page || 0),
+        // This is maintained from sync_run_catalog_pages and is deliberately
+        // not a DISTINCT question count.
+        listSeenCount: pageOccurrencesByCatalog.has(String(row.catalog_external_id))
+          ? pageOccurrencesByCatalog.get(String(row.catalog_external_id))
+          : Number(row.list_seen_count || 0),
+        status: String(row.status || 'running'),
+        observedAt: row.observed_at || null,
+      },
+    ]));
+
+    // The textbook summary uses the unique question snapshot rows saved for
+    // this run/textbook.  This is deliberately a different metric from the
+    // per-catalog occurrence count above: a question listed in two catalogs
+    // contributes to each catalog's `listSeenCount`, but only one
+    // `sync_run_question_items` row contributes to the textbook summary.
+    const questionItemColumns = tables.has('sync_run_question_items')
+      ? tableColumns(db, 'sync_run_question_items') : new Set();
+    const questionItemsAvailable = Boolean(textbookExternalId)
+      && ['run_id', 'provider', 'textbook_external_id', 'question_external_id']
+        .every((column) => questionItemColumns.has(column));
+    let uniqueQuestionCount = null;
+    if (questionItemsAvailable) {
+      const row = db.prepare(`
+        SELECT COUNT(*) AS n FROM sync_run_question_items AS question
+        WHERE question.run_id = ?
+          AND question.provider = ?
+          AND question.textbook_external_id = ?
+      `).get(run.id, PROVIDER, textbookExternalId);
+      uniqueQuestionCount = Math.max(0, Number(row?.n || 0));
+    }
+
+    const rawRows = db.prepare(`
+      SELECT item.textbook_external_id, item.catalog_external_id,
+             ${optionalSelect(itemColumns, 'item', 'parent_external_id')},
+             ${optionalSelect(itemColumns, 'item', 'node_level')},
+             ${optionalSelect(itemColumns, 'item', 'node_type')},
+             item.name,
+             ${optionalSelect(itemColumns, 'item', 'source_path')},
+             ${optionalSelect(itemColumns, 'item', 'catalog_path')},
+             ${optionalSelect(itemColumns, 'item', 'sort_order')},
+             ${optionalSelect(itemColumns, 'item', 'captured_at')}
+      FROM sync_run_catalog_items AS item
+      WHERE ${where}
+      ORDER BY COALESCE(item.sort_order, 2147483647) ASC,
+               COALESCE(item.node_level, 2147483647) ASC,
+               item.catalog_external_id ASC
+      LIMIT ?
+    `).all(...parameters, maxNodes + 1);
+    const truncated = rawRows.length > maxNodes;
+    const rows = rawRows.slice(0, maxNodes);
+    const nodes = rows.map((row) => {
+      const externalId = String(row.catalog_external_id);
+      const progress = progressByCatalog.get(externalId) || null;
+      const collectedCount = progress
+        ? Math.max(0, Number(progress.listSeenCount || 0))
+        // New runs have a progress row only for queried nodes.  Do not use
+        // ancestor membership rows as a descendant roll-up for an unqueried
+        // node; that would violate the node's own occurrence count.
+        : 0;
+      const expectedTotal = progress?.expectedTotal == null
+        ? null : Math.max(0, Number(progress.expectedTotal));
+      const level = row.node_level == null ? null : Number(row.node_level);
+      return {
+        nodeKey: `${textbookExternalId || row.textbook_external_id || ''}:${externalId}`,
+        externalId,
+        externalCatalogId: externalId,
+        textbookExternalId: String(row.textbook_external_id),
+        parentExternalId: row.parent_external_id == null ? null : String(row.parent_external_id),
+        level,
+        nodeLevel: level,
+        type: row.node_type || null,
+        nodeType: row.node_type || null,
+        name: boundedString(row.name, 1000) || externalId,
+        label: boundedString(row.name, 1000) || externalId,
+        sourcePath: boundedString(row.source_path, 4000),
+        path: boundedString(row.catalog_path || row.name, 8000),
+        sortOrder: row.sort_order == null ? null : Number(row.sort_order),
+        expectedTotal,
+        expected: expectedTotal,
+        total: expectedTotal,
+        collectedCount,
+        collected: collectedCount,
+        listSeenCount: collectedCount,
+        questionCount: collectedCount,
+        expectedPages: progress?.expectedPages == null ? null : progress.expectedPages,
+        lastCompletedPage: progress?.lastCompletedPage || 0,
+        status: progress?.status || 'pending',
+        queried: Boolean(progress),
+        hasProgress: Boolean(progress),
+        observedAt: progress?.observedAt || row.captured_at || null,
+        children: [],
+      };
+    });
+
+    const runScope = run.scope && typeof run.scope === 'object' ? run.scope : {};
+    // parent_external_id is produced by the static nested provider tree.  It
+    // is the only relationship used here; raw provider parentId is never
+    // consulted.  Keep malformed/cyclic trees renderable by promoting the
+    // problematic node to the root.
+    const nodeById = new Map(nodes.map((node) => [node.externalId, node]));
+    const roots = [];
+    const createsCycle = (child, parent) => {
+      const seen = new Set([child.externalId]);
+      let current = parent;
+      while (current) {
+        if (seen.has(current.externalId)) return true;
+        seen.add(current.externalId);
+        current = current.parentExternalId ? nodeById.get(current.parentExternalId) : null;
+      }
+      return false;
+    };
+    for (const node of nodes) {
+      const parent = node.parentExternalId ? nodeById.get(node.parentExternalId) : null;
+      if (parent && parent !== node && !createsCycle(node, parent)) parent.children.push(node);
+      else roots.push(node);
+    }
+
+    // `textbookExpectedTotal` comes only from the root probe and is not
+    // inferred by summing child catalog totals.  A missing probe therefore
+    // keeps the denominator/progress explicitly unknown.
+    const expectedTotalRaw = runScope.textbookExpectedTotal;
+    const expectedTotalNumber = expectedTotalRaw == null || expectedTotalRaw === ''
+      ? NaN : Number(expectedTotalRaw);
+    const textbookExpectedTotal = Number.isSafeInteger(expectedTotalNumber)
+      && expectedTotalNumber >= 0 ? expectedTotalNumber : null;
+    const totalsKnown = textbookExpectedTotal != null;
+    const statisticsPending = !totalsKnown || !questionItemsAvailable;
+    const totalQuestionCount = textbookExpectedTotal;
+    const collectedQuestionCount = uniqueQuestionCount;
+    const terminalComplete = ['success', 'completed'].includes(String(run.status || '').toLowerCase())
+      && run.snapshotComplete === true;
+    const rawProgress = totalsKnown && questionItemsAvailable && totalQuestionCount > 0
+      ? Math.min(100, (collectedQuestionCount / totalQuestionCount) * 100)
+      : (totalsKnown && questionItemsAvailable && totalQuestionCount === 0 ? 100 : null);
+    const progressPercent = rawProgress == null
+      ? null
+      : (terminalComplete ? rawProgress : Math.min(99, rawProgress));
+    const counts = (level) => Number(levelCounts.get(level) || 0);
+    return {
+      available: true,
+      live: true,
+      message: 'collector 实时目录进度可用',
+      runId: run.id,
+      collectorRunId: run.id,
+      textbookExternalId,
+      status: run.status,
+      startedAt: run.startedAt,
+      finishedAt: run.finishedAt,
+      summaryStrategy: String(runScope.summaryStrategy || 'textbook_root_probe'),
+      textbookExpectedTotal,
+      firstRoundComplete: totalsKnown,
+      totalsKnown,
+      statisticsPending,
+      totalQuestionCount,
+      expectedQuestionCount: totalQuestionCount,
+      collectedQuestionCount,
+      // This alias is retained for old clients, but its value is the global
+      // unique-question snapshot count, not the per-catalog occurrence sum.
+      uniqueQuestionCount: collectedQuestionCount,
+      listSeenCount: collectedQuestionCount,
+      progressPercent,
+      progress: progressPercent,
+      chapterCount: counts(1),
+      knowledgePointCount: counts(2),
+      secondaryKnowledgePointCount: counts(3),
+      catalogCount,
+      catalogLevelCounts: Object.fromEntries([...levelCounts.entries()].map(([level, count]) => [String(level), count])),
+      summaryCatalogIds: [],
+      summaryCatalogLevel: null,
+      summaryNodeCount: 0,
+      questionItemsAvailable,
+      tree: roots,
+      catalogs: roots,
+      catalogTree: roots,
+      treeNodeCount: nodes.length,
+      treeTruncated: truncated || catalogCount > nodes.length,
+    };
+  } catch (error) {
+    return unavailable('collector 实时进度读取失败', error);
+  } finally {
+    try { db?.close(); } catch {}
   }
 }
 
@@ -2564,6 +2883,7 @@ module.exports = {
   metadataWatermark,
   readCandidates,
   readCatalogProgress,
+  readLiveRunProgress,
   readRunCatalogs,
   readRunAsset,
   readRunQuestion,

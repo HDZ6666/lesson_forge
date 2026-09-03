@@ -780,6 +780,11 @@ class SyncTaskModel(BankModel):
         description='任务中可安全续采的上一次不完整 collector run ID',
     )
     resume_available: bool = Field(default=False, alias='resumeAvailable')
+    live_progress: dict[str, object] | None = Field(default=None, alias='liveProgress')
+    live_progress_by_scope: dict[str, dict[str, object]] = Field(
+        default_factory=dict,
+        alias='liveProgressByScope',
+    )
 
 
 class TextbookApplyRequestModel(BankModel):

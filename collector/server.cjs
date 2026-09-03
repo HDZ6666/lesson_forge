@@ -16,6 +16,7 @@ const {
   metadataWatermark,
   readCandidates,
   readCatalogProgress,
+  readLiveRunProgress,
   readMetadataSnapshot,
   readRunAsset,
   readRunCatalogs,
@@ -32,12 +33,14 @@ const { ensureMetadataSnapshotSchema } = require('./zujuan_metadata_sync.cjs');
 const {
   isResumablePartialRun,
   isTransientResumeError,
-  validateResumeSourceRun,
 } = require('./zujuan_sync.cjs');
+const {
+  validateQuestionListResumeSourceRun,
+} = require('./zujuan_question_sync.cjs');
 
 const COLLECTOR_ROOT = __dirname;
 const METADATA_SCRIPT = path.join(COLLECTOR_ROOT, 'zujuan_metadata_sync.cjs');
-const QUESTION_SCRIPT = path.join(COLLECTOR_ROOT, 'zujuan_sync.cjs');
+const QUESTION_SCRIPT = path.join(COLLECTOR_ROOT, 'zujuan_question_sync.cjs');
 const PROVIDER = 'zujuan';
 const ACTIVE_STATUSES = new Set(['queued', 'running', 'cancelling']);
 const MAX_BODY_BYTES = 64 * 1024;
@@ -47,6 +50,8 @@ const MAX_STORED_JOBS = 100;
 const SITE_PAGE_LIMIT = 1000;
 const MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
 const MAX_SCOPE_NAME_LENGTH = 200;
+const MAX_LIVE_PROJECTION_SCOPES = 200;
+const MAX_LIVE_PROJECTION_TREE_NODES = 3000;
 const TERMINAL_STATUSES = new Set(['completed', 'failed', 'blocked', 'interrupted', 'cancelled']);
 
 function deploymentBoolean(value, fallback = false) {
@@ -135,7 +140,7 @@ function validateIndependentResumeScopes(dbPath, scopes, maxPages) {
     if (scope.resumeFromCollectorRunId == null) continue;
     const expected = serverContentScope(scope, maxPages);
     try {
-      validateResumeSourceRun(dbPath, scope.resumeFromCollectorRunId, expected);
+      validateQuestionListResumeSourceRun(dbPath, scope.resumeFromCollectorRunId, expected);
     } catch (error) {
       const wrapped = new Error(
         `教材 ${scope.externalTextbookId} 的续采来源无效：${String(error.message || error)}`,
@@ -324,8 +329,96 @@ function sealOrphanMetadataRun(dbPath, runId, status, message = null) {
   }
 }
 
-function publicJob(job) {
-  const scopes = (job.scopeItems || []).map((scope) => ({
+function finiteNonnegative(value) {
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 0 ? number : null;
+}
+
+function clampPercent(value) {
+  const number = finiteNonnegative(value);
+  return number == null ? null : Math.min(100, number);
+}
+
+/**
+ * Aggregate per-textbook live progress into one task-level scalar.
+ *
+ * A textbook total is the strongest denominator, so entries with a known
+ * total are weighted by that total.  Older/partially initialized runs may
+ * expose only a percentage; those entries contribute one stable unit weight.
+ * Completed scopes without a readable live row still contribute 100% once at
+ * least one live projection exists.  If no scope can contribute, callers keep
+ * their existing phase progress unchanged.
+ */
+function aggregateLiveProgress(scopeRecords, liveScopeValues, fallback = null) {
+  const scopes = Array.isArray(scopeRecords) ? scopeRecords : [];
+  const values = liveScopeValues instanceof Map ? liveScopeValues : new Map();
+  const entries = scopes.map((scope) => {
+    const key = String(scope?.externalTextbookId || scope?.collectorRunId || '');
+    const projection = key ? values.get(key) : null;
+    return { scope, projection: projection && projection.available !== false ? projection : null };
+  });
+  const hasLiveProjection = entries.some((entry) => entry.projection);
+  let weightedProgress = 0;
+  let totalWeight = 0;
+  let liveEntries = 0;
+  const add = (progress, weight = 1) => {
+    const normalizedProgress = clampPercent(progress);
+    const normalizedWeight = finiteNonnegative(weight);
+    if (normalizedProgress == null || normalizedWeight == null || normalizedWeight <= 0) return false;
+    weightedProgress += normalizedProgress * normalizedWeight;
+    totalWeight += normalizedWeight;
+    return true;
+  };
+  for (const { scope, projection } of entries) {
+    if (projection) {
+      const total = finiteNonnegative(
+        projection.totalQuestionCount
+          ?? projection.expectedQuestionCount
+          ?? projection.textbookExpectedTotal,
+      );
+      const collected = finiteNonnegative(
+        projection.collectedQuestionCount
+          ?? projection.uniqueQuestionCount
+          ?? projection.listSeenCount,
+      );
+      if (total != null) {
+        // A zero-question textbook is complete, but still needs a unit weight
+        // so an all-empty multi-textbook task resolves to 100% rather than an
+        // unknown denominator.
+        add(total > 0 ? (collected == null ? 0 : (collected / total) * 100) : 100, total > 0 ? total : 1);
+        liveEntries += 1;
+        continue;
+      }
+      const progress = clampPercent(projection.progressPercent ?? projection.progress);
+      if (add(progress, 1)) liveEntries += 1;
+      continue;
+    }
+    // Once there is at least one live scope, terminal scope state is useful
+    // evidence for scopes whose projection has not been opened yet.
+    if (hasLiveProjection) {
+      const status = String(scope?.status || '').toLowerCase();
+      if (status === 'completed') {
+        const completedWeight = finiteNonnegative(scope?.questionCount);
+        add(100, completedWeight > 0 ? completedWeight : 1);
+      } else if (['queued', 'running', 'cancelling', 'starting'].includes(status)) {
+        // An active scope without a readable projection is still unfinished.
+        // Include it as zero progress instead of letting a completed sibling
+        // make the whole multi-textbook task appear complete.
+        add(0, 1);
+      }
+    }
+  }
+  if (totalWeight <= 0 || liveEntries <= 0) {
+    return { available: false, progressPercent: fallback };
+  }
+  return {
+    available: true,
+    progressPercent: Math.round((weightedProgress / totalWeight) * 10) / 10,
+  };
+}
+
+function publicJob(job, options = {}) {
+  const scopeRecords = (job.scopeItems || []).map((scope) => ({
     sourceProvider: scope.sourceProvider || null,
     externalVersionId: scope.externalVersionId || null,
     externalTextbookId: scope.externalTextbookId,
@@ -358,6 +451,62 @@ function publicJob(job) {
     startedAt: scope.startedAt || null,
     finishedAt: scope.finishedAt || null,
   }));
+  const primaryScope = scopeRecords.find((scope) => (
+    job.currentTextbookId != null
+      && String(scope.externalTextbookId) === String(job.currentTextbookId)
+  )) || scopeRecords.find((scope) => ['running', 'cancelling'].includes(scope.status))
+    || scopeRecords.find((scope) => scope.collectorRunId != null)
+    || scopeRecords[0]
+    || null;
+  const liveByScope = {};
+  const liveScopeValues = new Map();
+  if (options.dbPath) {
+    // Keep the aggregate multi-textbook response bounded while allowing the
+    // UI to switch to any selected scope. Typical one-to-four-textbook tasks
+    // therefore receive the full ~220-node tree per scope; unusually large
+    // selections receive a clearly marked, smaller projection.
+    const maxNodesPerScope = Math.max(
+      1,
+      Math.min(
+        1000,
+        Math.floor(MAX_LIVE_PROJECTION_TREE_NODES / Math.max(1, Math.min(
+          MAX_LIVE_PROJECTION_SCOPES,
+          scopeRecords.length,
+        ))),
+      ),
+    );
+    for (const scope of scopeRecords.slice(0, MAX_LIVE_PROJECTION_SCOPES)) {
+      const collectorRunId = Number(scope.collectorRunId || 0);
+      if (!Number.isSafeInteger(collectorRunId) || collectorRunId < 1) continue;
+      let projection = null;
+      try {
+        projection = readLiveRunProgress(options.dbPath, collectorRunId, {
+          textbookExternalId: scope.externalTextbookId,
+          maxNodes: maxNodesPerScope,
+        });
+      } catch {
+        // Live progress is best effort.  A locked/corrupt snapshot must not
+        // turn a normal job status request into a failed collector task.
+        projection = null;
+      }
+      if (!projection?.available) continue;
+      projection.treeAvailable = projection.treeTruncated !== true;
+      const scopeKey = String(scope.externalTextbookId || scope.collectorRunId);
+      liveByScope[scopeKey] = projection;
+      liveScopeValues.set(scopeKey, projection);
+    }
+  }
+  // Keep the canonical scope rows compact. Live trees are exposed through
+  // the top-level projection and liveProgressByScope map, avoiding one large
+  // tree copy inside every scope item.
+  const scopes = scopeRecords;
+  const primaryLive = primaryScope
+    ? liveScopeValues.get(String(primaryScope.externalTextbookId || primaryScope.collectorRunId)) || null
+    : null;
+  const liveAggregate = aggregateLiveProgress(scopeRecords, liveScopeValues, job.progressPercent);
+  const progressPercent = liveAggregate.available
+    ? liveAggregate.progressPercent
+    : job.progressPercent;
   const collectorRunId = job.collectorRunId != null
     ? Number(job.collectorRunId)
     : (scopes.length === 1 && scopes[0].collectorRunId != null
@@ -383,7 +532,9 @@ function publicJob(job) {
     snapshotComplete: job.snapshotComplete === true,
     currentTextbookId: job.currentTextbookId,
     currentTextbookName: job.currentTextbookName,
-    progressPercent: job.progressPercent,
+    progressPercent,
+    liveProgress: primaryLive,
+    liveProgressByScope: liveByScope,
     logTail: job.lines.join('\n').slice(-MAX_LOG_CHARS),
     errorMessage: job.errorMessage,
     startedAt: job.startedAt,
@@ -670,7 +821,17 @@ class CollectorJobManager {
     const questionMatch = line.match(/questionsSeen:\s*(\d+)/);
     if (questionMatch) job._scriptQuestionCount = Math.max(job._scriptQuestionCount || 0, Number(questionMatch[1]));
     const runMatch = line.match(/(?:^|\s)run=(\d+)(?:\s|$)/);
-    if (runMatch) job._childRunId = Number(runMatch[1]);
+    if (runMatch) {
+      job._childRunId = Number(runMatch[1]);
+      // The question script emits run=N immediately after creating its
+      // SQLite run.  Expose it on the active scope at once so the next GET
+      // can read the live tree while the child is still paging.
+      const activeScope = this.scopeFor(job, job.currentTextbookId);
+      if (activeScope) {
+        activeScope.collectorRunId = job._childRunId;
+        if (job.scopeItems.length === 1) job.collectorRunId = job._childRunId;
+      }
+    }
   }
 
   async runChild(job, script, args, scope = null) {
@@ -1173,7 +1334,7 @@ function createCollectorServer(options = {}) {
           sendJson(response, 404, { error: { code: 'job_not_found', message: '采集任务不存在' } });
           return;
         }
-        sendJson(response, 200, publicJob(job));
+        sendJson(response, 200, publicJob(job, { dbPath: manager.dbPath }));
         return;
       }
       const runCatalogMatch = url.pathname.match(/^\/v1\/runs\/([^/]+)\/catalogs\/?$/i);
@@ -1345,6 +1506,7 @@ async function main() {
 
 module.exports = {
   CollectorJobManager,
+  aggregateLiveProgress,
   createCollectorServer,
   deploymentBoolean,
   publicJob,

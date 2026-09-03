@@ -4,7 +4,7 @@
       <div class="heading-copy">
         <el-button link type="primary" :icon="ArrowLeft" @click="goBack">返回任务列表</el-button>
         <h2>同步题库任务详情</h2>
-        <p>目录和题目对比只读取本任务各教材绑定的 collectorRunId 不可变快照。</p>
+        <p>采集中实时展示目录进度；任务完成后，目录和题目对比仍只读取各教材绑定的不可变快照。</p>
       </div>
       <div class="heading-actions">
         <el-button :icon="Refresh" :loading="loading" @click="refreshTask">刷新状态</el-button>
@@ -53,43 +53,82 @@
       当前任务暂不可应用：{{ task.eligibilityMessage }}
     </el-alert>
 
-    <!-- Keep the review workspace above task metadata/logs so the immutable
-         snapshot is the first content an operator sees. -->
-    <section v-if="task?.scopeItems.length" class="scope-grid scope-status-panel" aria-label="每本教材采集范围状态">
-      <article
-        v-for="scope in task.scopeItems"
-        :key="scopeKey(scope)"
-        class="scope-card"
-        :class="{ 'is-selected': scopeKey(scope) === selectedScopeKey }"
-        tabindex="0"
-        @click="selectScope(scope)"
-        @keydown.enter.prevent="selectScope(scope)"
-        @keydown.space.prevent="selectScope(scope)"
-      >
-        <div class="scope-card-heading">
-          <strong>{{ scope.textbookName || '未命名教材' }}</strong>
-          <el-tag size="small" :type="syncTaskStatusMeta(scope.status).type">{{ syncTaskStatusMeta(scope.status).label }}</el-tag>
+    <section v-if="task" class="live-catalog-panel panel" aria-label="动态目录树">
+      <div class="workspace-heading live-workspace-heading">
+        <div>
+          <h3>{{ liveScopeTitle }}</h3>
+          <p>动态目录树 · 每个目录显示自身已采集题目数，不合并父子目录。</p>
         </div>
-        <div class="scope-card-meta">
-          <span v-if="scope.collectorRunId">collectorRunId：{{ scope.collectorRunId }}</span>
-          <span v-else>collectorRunId：待绑定</span>
-          <span v-if="scope.resumeFromCollectorRunId">续采来源 run：{{ scope.resumeFromCollectorRunId }}</span>
-          <span>目录 {{ scope.catalogCount }}</span>
-          <span>题目 {{ scope.questionCount }}</span>
-          <span v-if="scope.currentTaskId">正式任务 {{ scope.currentTaskId }}</span>
-          <span v-else>正式任务 未应用</span>
-        </div>
-        <p v-if="scope.errorMessage" class="scope-card-error">{{ scope.errorMessage }}</p>
-      </article>
+        <el-select
+          v-if="task.scopeItems.length > 1"
+          v-model="selectedScopeKey"
+          placeholder="选择任务教材"
+          filterable
+          class="scope-select"
+          @change="handleScopeChange"
+        >
+          <el-option v-for="scope in task.scopeItems" :key="scopeKey(scope)" :label="scope.textbookName" :value="scopeKey(scope)" />
+        </el-select>
+      </div>
+      <div class="live-tree-toolbar">
+        <span v-if="liveProjection?.treeTruncated">目录较多，当前仅展示前 {{ liveProjection.treeNodeCount || liveCatalogTree.length }} 个节点</span>
+        <span v-else>{{ liveCatalogTree.length ? `共 ${liveProjection?.catalogCount || liveCatalogTree.length} 个目录节点` : '目录树准备中' }}</span>
+        <span v-if="liveProjection?.statisticsPending" class="live-stat-pending">统计总数中</span>
+      </div>
+      <div class="live-tree-scroll" v-loading="loading">
+        <el-tree
+          v-if="liveCatalogTree.length"
+          :data="liveCatalogTree"
+          node-key="nodeKey"
+          :props="treeProps"
+          default-expand-all
+          :expand-on-click-node="false"
+        >
+          <template #default="{ data }">
+            <span class="live-catalog-node">
+              <span class="node-label">{{ data.label }}</span>
+              <span class="live-node-count">{{ liveNodeCountText(data) }}</span>
+            </span>
+          </template>
+        </el-tree>
+        <el-empty
+          v-else
+          :image-size="64"
+          :description="liveTreeEmptyText"
+        />
+      </div>
+    </section>
+
+    <section v-if="task" class="task-summary panel" v-loading="loading">
+      <div class="status-line">
+        <div><span class="task-number">{{ liveScopeTitle }}</span><el-tag :type="syncTaskStatusMeta(task.status).type">{{ syncTaskStatusMeta(task.status).label }}</el-tag></div>
+        <span class="progress-copy">{{ summaryProgressLabel }}</span>
+      </div>
+      <el-progress :percentage="summaryProgressBar" :status="progressStatus" :stroke-width="10" :format="summaryProgressFormat" />
+      <div class="summary-stat-grid">
+        <div class="summary-stat"><span>章节</span><strong>{{ liveStats.chapterCount }}</strong></div>
+        <div class="summary-stat"><span>知识点</span><strong>{{ liveStats.knowledgePointCount }}</strong></div>
+        <div class="summary-stat"><span>二级知识点</span><strong>{{ liveStats.secondaryKnowledgePointCount }}</strong></div>
+        <div class="summary-stat summary-stat-wide"><span>总题目</span><strong>{{ summaryTotalQuestionText }}</strong></div>
+        <div class="summary-stat summary-stat-wide"><span>已采集</span><strong>{{ summaryCollectedQuestionText }}</strong></div>
+      </div>
+      <div class="summary-time-line">
+        <span>开始时间：{{ formatTaskTime(summaryStartedAt) }}</span>
+        <span>结束时间：{{ summaryFinishedAt }}</span>
+      </div>
+      <el-alert v-if="task.errorMessage" class="inner-alert" type="error" :closable="false" show-icon>{{ task.errorMessage }}</el-alert>
+      <section class="log-panel">
+        <div class="section-heading"><h3>运行日志</h3><span>自动刷新最后 100 条</span></div>
+        <pre v-if="task.logs.length">{{ task.logs.join('\n') }}</pre>
+        <el-empty v-else :image-size="54" description="暂无运行日志" />
+      </section>
     </section>
 
     <section v-if="task && task.status === 'completed'" class="comparison-workspace panel">
       <div class="workspace-heading">
         <div><h3>任务快照对比</h3><p>先选择本任务中的一本教材，再查看该教材的目录或题目。</p></div>
         <el-select v-model="selectedScopeKey" placeholder="选择任务教材" filterable class="scope-select" @change="handleScopeChange">
-          <el-option v-for="scope in task.scopeItems" :key="scopeKey(scope)" :label="scope.textbookName" :value="scopeKey(scope)">
-            <div class="scope-option"><span>{{ scope.textbookName }}</span><small v-if="scope.collectorRunId">run {{ scope.collectorRunId }}</small></div>
-          </el-option>
+          <el-option v-for="scope in task.scopeItems" :key="scopeKey(scope)" :label="scope.textbookName" :value="scopeKey(scope)" />
         </el-select>
       </div>
       <el-alert v-if="!task.scopeItems.length" type="warning" :closable="false" show-icon>任务详情未返回教材范围，暂时无法请求单本教材快照。</el-alert>
@@ -167,47 +206,6 @@
       </el-tabs>
     </section>
 
-    <section v-else-if="task" class="waiting-panel panel"><el-empty :image-size="76" :description="comparisonWaitingText" /></section>
-
-    <section v-if="task" class="task-summary panel" v-loading="loading">
-      <div class="status-line">
-        <div><span class="task-number">任务 {{ task.taskNo || task.taskId }}</span><el-tag :type="syncTaskStatusMeta(task.status).type">{{ syncTaskStatusMeta(task.status).label }}</el-tag></div>
-        <span class="progress-copy">{{ Math.round(task.progress) }}%</span>
-      </div>
-      <el-progress :percentage="task.progress" :status="progressStatus" :stroke-width="10" />
-      <el-descriptions :column="4" border size="small" class="task-descriptions">
-        <el-descriptions-item label="Service taskId">{{ task.taskId }}</el-descriptions-item>
-        <el-descriptions-item label="当前阶段">{{ task.phase || '—' }}</el-descriptions-item>
-        <el-descriptions-item label="Collector job">{{ task.collectorJobId || '—' }}</el-descriptions-item>
-        <el-descriptions-item label="选择版本">{{ task.versionName || task.versionId || '—' }}</el-descriptions-item>
-        <el-descriptions-item label="教材数量">{{ task.textbookCount || task.scopeItems.length }}</el-descriptions-item>
-        <el-descriptions-item label="当前采集">{{ task.currentTextbookName || '—' }}</el-descriptions-item>
-        <el-descriptions-item label="目录数">{{ task.catalogCount }}</el-descriptions-item>
-        <el-descriptions-item label="新增目录">{{ task.newCatalogCount }}</el-descriptions-item>
-        <el-descriptions-item label="变化目录">{{ task.changedCatalogCount }}</el-descriptions-item>
-        <el-descriptions-item label="题目数">{{ task.questionCount }}</el-descriptions-item>
-        <el-descriptions-item label="新增题目">{{ task.newQuestionCount }}</el-descriptions-item>
-        <el-descriptions-item label="变化题目">{{ task.changedQuestionCount }}</el-descriptions-item>
-        <el-descriptions-item label="关系数">{{ task.relationCount }}</el-descriptions-item>
-        <el-descriptions-item label="标签数">{{ task.tagCount }}</el-descriptions-item>
-        <el-descriptions-item label="素材数">{{ task.assetCount }}</el-descriptions-item>
-        <el-descriptions-item label="创建人">{{ task.createdBy || '—' }}</el-descriptions-item>
-        <el-descriptions-item label="创建时间">{{ formatTaskTime(task.createTime) }}</el-descriptions-item>
-        <el-descriptions-item label="开始时间">{{ formatTaskTime(task.startedAt) }}</el-descriptions-item>
-        <el-descriptions-item label="完成时间">{{ formatTaskTime(task.completedAt) }}</el-descriptions-item>
-        <el-descriptions-item label="任务含义">{{ questionTaskMeaning(task) }}</el-descriptions-item>
-        <el-descriptions-item label="正式题库">{{ currentFormalSummary }}</el-descriptions-item>
-        <el-descriptions-item label="最近应用时间">{{ formatTaskTime(task.appliedAt) }}</el-descriptions-item>
-      </el-descriptions>
-      <div v-if="task.textbookNames.length" class="selected-books"><strong>任务教材：</strong>{{ task.textbookNames.join('、') }}</div>
-      <el-alert v-if="task.errorMessage" class="inner-alert" type="error" :closable="false" show-icon>{{ task.errorMessage }}</el-alert>
-      <section class="log-panel">
-        <div class="section-heading"><h3>运行日志</h3><span>自动刷新最后 100 条</span></div>
-        <pre v-if="task.logs.length">{{ task.logs.join('\n') }}</pre>
-        <el-empty v-else :image-size="54" description="暂无运行日志" />
-      </section>
-    </section>
-
 
     <el-drawer v-model="questionDetailVisible" title="题目快照对比" direction="rtl" size="min(1100px, 96vw)" append-to-body>
       <el-skeleton v-if="questionDetailLoading" :rows="10" animated />
@@ -269,7 +267,6 @@ import {
   questionApplyStateToken,
   questionApplyVerb,
   questionApplyWillReplace,
-  questionTaskMeaning,
   syncTaskErrorMessage,
   syncTaskStatusMeta,
   unwrapSyncTask,
@@ -332,18 +329,91 @@ let loadedScopeKey = ''
 
 const taskId = computed(() => String(route.params.taskId || route.query.taskId || ''))
 const selectedScope = computed(() => task.value?.scopeItems.find((item) => scopeKey(item) === selectedScopeKey.value) || null)
+const liveProjection = computed(() => {
+  const scope = selectedScope.value
+  const byScope = task.value?.liveProgressByScope || {}
+  const keys = [scope?.externalTextbookId, scope?.textbookId, scope ? scopeKey(scope) : '']
+    .filter((value, index, values) => value !== undefined && value !== null && String(value) !== '' && values.indexOf(value) === index)
+  for (const key of keys) {
+    const candidate = byScope[String(key)]
+    if (candidate && candidate.available !== false) return candidate
+  }
+  const scoped = scope?.liveProgress
+  if (scoped && scoped.available !== false) return scoped
+  const taskLive = task.value?.liveProgress
+  if (!taskLive || taskLive.available === false) return null
+  const taskLiveTextbookId = taskLive.textbookExternalId
+  const scopeTextbookId = scope?.externalTextbookId
+  if (
+    task.value?.scopeItems?.length > 1
+    && taskLiveTextbookId != null
+    && scopeTextbookId != null
+    && String(taskLiveTextbookId) !== String(scopeTextbookId)
+  ) return null
+  return taskLive
+})
+const liveScopeTitle = computed(() => {
+  const scope = selectedScope.value || task.value?.scopeItems?.[0] || {}
+  const version = String(scope.versionName || task.value?.versionName || '').trim()
+  const textbook = String(scope.textbookName || task.value?.currentTextbookName || task.value?.textbookNames?.[0] || '').trim()
+  if (version && textbook && version !== textbook) return `${version} · ${textbook}`
+  return textbook || version || '任务教材'
+})
+const liveCatalogTree = computed(() => {
+  if (liveProjection.value?.tree?.length) return liveProjection.value.tree
+  if (task.value?.status === 'completed' && catalogComparison.fetchedTree.length) {
+    return comparisonTreeAsLive(catalogComparison.fetchedTree)
+  }
+  return []
+})
+const liveStats = computed(() => {
+  const counts = countLiveTreeLevels(liveCatalogTree.value)
+  const live = liveProjection.value
+  return {
+    chapterCount: Number(live?.chapterCount || counts.chapter),
+    knowledgePointCount: Number(live?.knowledgePointCount || counts.knowledgePoint),
+    secondaryKnowledgePointCount: Number(live?.secondaryKnowledgePointCount || counts.secondaryKnowledgePoint),
+  }
+})
+const summaryProgressValue = computed(() => {
+  const value = liveProjection.value?.progressPercent
+    ?? liveProjection.value?.progress
+    ?? task.value?.progressPercent
+    ?? task.value?.progress
+  if (value === null || value === undefined || value === '') return null
+  const numeric = Number(value)
+  return Number.isFinite(numeric) ? Math.min(100, Math.max(0, numeric)) : null
+})
+const summaryProgressBar = computed(() => summaryProgressValue.value ?? 0)
+const summaryProgressLabel = computed(() => summaryProgressValue.value == null ? '统计总数中' : `${Math.round(summaryProgressValue.value)}%`)
+const summaryTotalQuestionText = computed(() => {
+  const value = liveProjection.value?.totalQuestionCount
+  if (value != null) return formatLiveCount(value)
+  if (task.value?.status !== 'completed') return '统计总数中'
+  return formatLiveCount(selectedScope.value?.questionCount ?? task.value?.questionCount)
+})
+const summaryCollectedQuestionText = computed(() => {
+  const value = liveProjection.value?.collectedQuestionCount
+  if (value != null) return formatLiveCount(value)
+  if (task.value?.status !== 'completed') return '统计中'
+  return formatLiveCount(selectedScope.value?.questionCount ?? task.value?.questionCount)
+})
+const summaryStartedAt = computed(() => liveProjection.value?.startedAt || task.value?.startedAt || '')
+const summaryFinishedAt = computed(() => {
+  if (isActiveSyncTask(task.value?.status)) return '采集中'
+  return formatTaskTime(liveProjection.value?.finishedAt || task.value?.completedAt || task.value?.finishedAt) || '—'
+})
+const liveTreeEmptyText = computed(() => {
+  if (['failed', 'blocked'].includes(task.value?.status)) return '暂未读取到本次运行目录'
+  if (task.value?.status === 'cancelled' || task.value?.status === 'interrupted') return '该任务暂无可展示的目录进度'
+  return '目录树准备中，正在获取节点统计'
+})
 const progressStatus = computed(() => {
   if (['failed', 'blocked'].includes(task.value?.status)) return 'exception'
   if (task.value?.status === 'cancelled') return 'warning'
   if (task.value?.status === 'interrupted') return 'warning'
   if (task.value?.status === 'completed') return 'success'
   return undefined
-})
-const comparisonWaitingText = computed(() => {
-  if (['failed', 'blocked'].includes(task.value?.status)) return '任务采集失败，不能进入发布批次'
-  if (task.value?.status === 'cancelled') return '任务已停止，未生成完整的目录和题目快照'
-  if (task.value?.status === 'interrupted') return '已有快照和断点保留，可断点续采；也可重试从头创建新任务'
-  return '采集进行中，完成后将自动显示目录和题目对比'
 })
 const catalogOptions = computed(() => flattenCatalogTree(catalogComparison.fetchedTree))
 const questionTypeOptions = computed(() => {
@@ -363,6 +433,67 @@ const completedStateMessage = computed(() => {
   if (task.value?.eligible) return `采集已完成。请先核对下方快照差异，再确认${questionApplyVerb(task.value)}正式题库快照。`
   return '采集已完成，但当前快照暂不可应用。'
 })
+
+function formatLiveCount(value) {
+  const number = Number(value)
+  return Number.isFinite(number) && number >= 0 ? Math.round(number).toLocaleString('zh-CN') : '—'
+}
+
+function countLiveTreeLevels(tree) {
+  const counts = { chapter: 0, knowledgePoint: 0, secondaryKnowledgePoint: 0 }
+  const visit = (nodes) => {
+    if (!Array.isArray(nodes)) return
+    nodes.forEach((node) => {
+      const level = Number(node?.level ?? node?.nodeLevel)
+      if (level === 1) counts.chapter += 1
+      if (level === 2) counts.knowledgePoint += 1
+      if (level === 3) counts.secondaryKnowledgePoint += 1
+      visit(node?.children)
+    })
+  }
+  visit(tree)
+  return counts
+}
+
+function comparisonTreeAsLive(nodes, depth = 0) {
+  if (!Array.isArray(nodes)) return []
+  return nodes.map((node, index) => {
+    const externalId = String(node?.externalId || node?.externalCatalogId || node?.catalogExternalId || node?.value || `catalog-${depth}-${index}`)
+    const label = String(node?.label || node?.name || node?.title || externalId)
+    const level = Number(node?.level ?? node?.nodeLevel ?? depth + 1)
+    const collectedCount = Number(node?.collectedCount ?? node?.questionCount ?? 0)
+    // A completed snapshot comparison carries the final per-catalog
+    // occurrence count even when the mutable live projection is unavailable.
+    // Use it as the completed node total so the fallback tree still shows
+    // the same final numbers instead of marking every node as unqueried.
+    const expectedTotal = node?.expectedTotal ?? node?.expected
+      ?? (node?.questionCount == null ? null : node.questionCount)
+    return {
+      ...node,
+      nodeKey: String(node?.nodeKey || externalId),
+      externalId,
+      label,
+      name: label,
+      level: Number.isFinite(level) ? level : depth + 1,
+      nodeLevel: Number.isFinite(level) ? level : depth + 1,
+      expectedTotal: expectedTotal == null ? null : Number(expectedTotal),
+      collectedCount: Number.isFinite(collectedCount) ? Math.max(0, collectedCount) : 0,
+      queried: expectedTotal != null,
+      hasProgress: expectedTotal != null,
+      children: comparisonTreeAsLive(node?.children, depth + 1),
+    }
+  })
+}
+
+function liveNodeCountText(node) {
+  const collected = formatLiveCount(node?.collectedCount ?? node?.collected ?? node?.listSeenCount ?? node?.questionCount ?? 0)
+  const expected = node?.expectedTotal ?? node?.expected ?? node?.total
+  const queried = node?.queried ?? node?.hasProgress ?? expected != null
+  if (!queried || (expected == null && String(node?.status || 'pending') === 'pending')) return '暂未获取'
+  return expected == null ? `${collected} / 统计中` : `${collected} / ${formatLiveCount(expected)}`
+}
+
+function summaryProgressFormat() { return summaryProgressLabel.value }
 
 function scopeKey(scope) {
   return String(scope?.scopeId || scope?.textbookId || scope?.externalTextbookId || scope?.collectorRunId || scope?.textbookName || '')
@@ -389,15 +520,15 @@ function schedulePoll() {
 function selectDefaultScope() {
   const scopes = task.value?.scopeItems || []
   if (!scopes.length) { selectedScopeKey.value = ''; return }
-  if (!scopes.some((item) => scopeKey(item) === selectedScopeKey.value)) selectedScopeKey.value = scopeKey(scopes[0])
-}
-
-function selectScope(scope) {
-  if (task.value?.status !== 'completed') return
-  const nextKey = scopeKey(scope)
-  if (!nextKey || nextKey === selectedScopeKey.value) return
-  selectedScopeKey.value = nextKey
-  handleScopeChange()
+  if (!scopes.some((item) => scopeKey(item) === selectedScopeKey.value)) {
+    const preferred = scopes.find((item) => (
+      task.value?.currentTextbookId != null
+      && String(item.externalTextbookId || item.textbookId) === String(task.value.currentTextbookId)
+    )) || scopes.find((item) => item.liveProgress?.tree?.length)
+      || scopes.find((item) => ['running', 'starting'].includes(item.status))
+      || scopes[0]
+    selectedScopeKey.value = scopeKey(preferred)
+  }
 }
 
 async function ensureComparisonLoaded() {
@@ -417,6 +548,7 @@ async function loadTask(silent = false) {
     const result = unwrapSyncTask(await getQuestionSyncTask(taskId.value), 'question')
     if (!result) throw new Error('未找到同步题库任务')
     task.value = result
+    selectDefaultScope()
     await ensureComparisonLoaded()
   } catch (error) {
     requestError.value = syncTaskErrorMessage(error, '同步题库任务详情加载失败')
@@ -429,8 +561,12 @@ async function loadTask(silent = false) {
 async function refreshTask() { loadedScopeKey = ''; await loadTask() }
 
 async function handleScopeChange() {
-  loadedScopeKey = selectedScopeKey.value
+  // Keep the completed-snapshot loader armed while a scope is being viewed
+  // during collection.  Otherwise the first completed poll would see the
+  // same key and incorrectly skip loading the comparison workspace.
+  loadedScopeKey = task.value?.status === 'completed' ? selectedScopeKey.value : ''
   resetComparisonState()
+  if (task.value?.status !== 'completed') return
   if (activeTab.value === 'catalog') await loadCatalogComparison()
   else await loadQuestions()
 }
@@ -643,13 +779,17 @@ onBeforeUnmount(() => { mounted = false; clearPoll() })
 .heading-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
 .state-alert { margin-bottom: 14px; }
 .panel { min-width: 0; padding: 16px; border: 1px solid var(--el-border-color-light); border-radius: 8px; background: var(--el-bg-color); }
+.live-catalog-panel { margin-bottom: 16px; }
 .task-summary { margin-bottom: 16px; }
 .status-line { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
 .status-line > div { display: flex; align-items: center; gap: 10px; }
 .task-number { font-size: 16px; font-weight: 600; }
 .progress-copy { color: var(--el-text-color-secondary); font-size: 13px; }
-.task-descriptions { margin-top: 16px; }
-.selected-books { margin-top: 12px; color: var(--el-text-color-regular); font-size: 13px; line-height: 1.7; }
+.summary-stat-grid { display: grid; grid-template-columns: repeat(5, minmax(100px, 1fr)); gap: 10px; margin-top: 16px; }
+.summary-stat { min-width: 0; padding: 11px 13px; border: 1px solid var(--el-border-color-lighter); border-radius: 6px; background: var(--el-fill-color-extra-light); }
+.summary-stat span { display: block; color: var(--el-text-color-secondary); font-size: 12px; }
+.summary-stat strong { display: block; margin-top: 5px; color: var(--el-text-color-primary); font-size: 18px; font-weight: 600; }
+.summary-time-line { display: flex; flex-wrap: wrap; gap: 8px 28px; margin-top: 14px; color: var(--el-text-color-secondary); font-size: 12px; }
 .inner-alert { margin-top: 14px; }
 .log-panel { margin-top: 16px; }
 .section-heading, .workspace-heading, .tree-toolbar, .pane-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
@@ -660,17 +800,11 @@ onBeforeUnmount(() => { mounted = false; clearPoll() })
 .workspace-heading { align-items: flex-start; padding-bottom: 12px; border-bottom: 1px solid var(--el-border-color-lighter); }
 .workspace-heading p { margin: 5px 0 0; color: var(--el-text-color-secondary); font-size: 12px; }
 .scope-select { width: min(380px, 48%); }
-.scope-option { display: flex; justify-content: space-between; gap: 16px; }
-.scope-option small { color: var(--el-text-color-secondary); }
-.scope-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; margin-top: 14px; }
-.scope-status-panel { margin-bottom: 16px; }
-.scope-card { min-width: 0; padding: 11px 13px; border: 1px solid var(--el-border-color-light); border-radius: 6px; background: var(--el-fill-color-extra-light); cursor: pointer; outline: none; transition: border-color .2s, box-shadow .2s, background .2s; }
-.scope-card:hover, .scope-card:focus-visible { border-color: var(--el-color-primary-light-3); box-shadow: 0 0 0 2px var(--el-color-primary-light-9); }
-.scope-card.is-selected { border-color: var(--el-color-primary); background: var(--el-color-primary-light-9); }
-.scope-card-heading { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 8px; }
-.scope-card-heading strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.scope-card-meta { display: flex; flex-wrap: wrap; gap: 7px 12px; margin-top: 7px; color: var(--el-text-color-secondary); font-size: 11px; line-height: 1.5; }
-.scope-card-error { margin: 7px 0 0; color: var(--el-color-danger); font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
+.live-tree-toolbar { display: flex; justify-content: space-between; gap: 12px; margin: 12px 0 8px; color: var(--el-text-color-secondary); font-size: 12px; }
+.live-stat-pending { color: var(--el-color-warning); }
+.live-tree-scroll { min-height: 220px; max-height: min(560px, calc(100vh - 370px)); overflow: auto; padding: 8px 4px; }
+.live-catalog-node { display: flex; min-width: 0; flex: 1; align-items: center; justify-content: space-between; gap: 12px; padding: 3px 5px; border-radius: 4px; }
+.live-node-count { flex: 0 0 auto; color: var(--el-text-color-secondary); font-size: 12px; font-variant-numeric: tabular-nums; }
 .comparison-tabs { margin-top: 8px; }
 .comparison-workspace { margin-bottom: 16px; }
 .tab-alert { margin-bottom: 10px; }
@@ -694,7 +828,6 @@ onBeforeUnmount(() => { mounted = false; clearPoll() })
 .question-table :deep(.el-table__row) { cursor: pointer; }
 .table-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-top: 12px; color: var(--el-text-color-secondary); font-size: 12px; }
 .table-footer :deep(.el-pagination) { flex-wrap: wrap; justify-content: flex-end; }
-.waiting-panel { min-height: 220px; }
 .question-detail-meta, .diff-fields { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 12px; color: var(--el-text-color-secondary); font-size: 12px; }
 .question-compare-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
 :deep(.question-snapshot) { min-width: 0; padding: 14px; border: 1px solid var(--el-border-color-light); border-radius: 7px; }
@@ -705,6 +838,8 @@ onBeforeUnmount(() => { mounted = false; clearPoll() })
 :deep(.safe-html) { min-height: 42px; overflow-x: auto; padding: 10px; border-radius: 5px; background: var(--el-fill-color-extra-light); font-size: 13px; line-height: 1.7; overflow-wrap: anywhere; }
 :deep(.safe-html img) { max-width: 100%; height: auto; }
 :deep(.snapshot-empty), :deep(.snapshot-missing) { padding: 16px; border-radius: 5px; background: var(--el-fill-color-extra-light); color: var(--el-text-color-secondary); font-size: 12px; }
+@media (max-width: 1000px) { .summary-stat-grid { grid-template-columns: repeat(3, minmax(100px, 1fr)); } }
 @media (max-width: 900px) { .catalog-grid, .question-compare-grid { grid-template-columns: 1fr; height: auto; } .tree-pane { min-height: 420px; } .workspace-heading { flex-direction: column; } .scope-select { width: 100%; } }
 @media (max-width: 720px) { .page-heading, .status-line { align-items: flex-start; flex-direction: column; } .heading-actions { justify-content: flex-start; } .table-footer { align-items: flex-start; flex-direction: column; } }
+@media (max-width: 560px) { .summary-stat-grid { grid-template-columns: repeat(2, minmax(100px, 1fr)); } .summary-stat-wide { grid-column: span 2; } }
 </style>

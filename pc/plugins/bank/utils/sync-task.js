@@ -332,6 +332,82 @@ const normalizeLogs = (value) => {
   return String(value).split(/\r?\n/).map((line) => line.trimEnd()).filter(Boolean).slice(-100)
 }
 
+const numberOrNull = (value) => {
+  if (value === undefined || value === null || value === '') return null
+  const number = Number(value)
+  return Number.isFinite(number) && number >= 0 ? number : null
+}
+
+const normalizeLiveTreeNode = (item, index = 0, depth = 0) => {
+  if (!item || typeof item !== 'object' || depth > 100) return null
+  const externalId = String(firstTaskField(item, ['externalId', 'externalCatalogId', 'catalogExternalId', 'catalog_external_id', 'id'], '') || '')
+  const name = String(firstTaskField(item, ['label', 'name', 'title'], externalId || `目录 ${index + 1}`) || externalId || `目录 ${index + 1}`)
+  const rawChildren = firstTaskField(item, ['children', 'nodes', 'items'], [])
+  const children = Array.isArray(rawChildren)
+    ? rawChildren.map((child, childIndex) => normalizeLiveTreeNode(child, childIndex, depth + 1)).filter(Boolean)
+    : []
+  const expectedTotal = numberOrNull(firstTaskField(item, ['expectedTotal', 'expected', 'total', 'expected_total'], null))
+  const collectedCount = numberOrZero(firstTaskField(item, ['collectedCount', 'collected', 'listSeenCount', 'list_seen_count', 'questionCount', 'question_count'], 0))
+  return {
+    ...item,
+    nodeKey: String(firstTaskField(item, ['nodeKey', 'node_key'], externalId || `live-node-${index}`) || externalId || `live-node-${index}`),
+    externalId,
+    externalCatalogId: externalId,
+    parentExternalId: firstTaskField(item, ['parentExternalId', 'parent_external_id'], null),
+    level: numberOrNull(firstTaskField(item, ['level', 'nodeLevel', 'node_level'], null)),
+    nodeLevel: numberOrNull(firstTaskField(item, ['nodeLevel', 'node_level', 'level'], null)),
+    name,
+    label: name,
+    expectedTotal,
+    expected: expectedTotal,
+    total: expectedTotal,
+    collectedCount,
+    collected: collectedCount,
+    listSeenCount: collectedCount,
+    questionCount: collectedCount,
+    expectedPages: numberOrNull(firstTaskField(item, ['expectedPages', 'expected_pages'], null)),
+    lastCompletedPage: numberOrZero(firstTaskField(item, ['lastCompletedPage', 'last_completed_page'], 0)),
+    status: String(firstTaskField(item, ['status', 'state'], 'pending') || 'pending'),
+    queried: booleanValue(firstTaskField(item, ['queried', 'hasProgress', 'has_progress'], expectedTotal !== null), expectedTotal !== null),
+    hasProgress: booleanValue(firstTaskField(item, ['hasProgress', 'has_progress', 'queried'], expectedTotal !== null), expectedTotal !== null),
+    children,
+  }
+}
+
+const normalizeLiveProjection = (value) => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const rawTree = firstTaskField(value, ['tree', 'catalogs', 'catalogTree', 'catalog_tree'], [])
+  const tree = Array.isArray(rawTree)
+    ? rawTree.map((item, index) => normalizeLiveTreeNode(item, index)).filter(Boolean).slice(0, 1000)
+    : []
+  const totalQuestionCount = numberOrNull(firstTaskField(value, ['totalQuestionCount', 'expectedQuestionCount', 'total_question_count', 'expected_question_count'], null))
+  const collectedQuestionCount = numberOrNull(firstTaskField(value, ['collectedQuestionCount', 'uniqueQuestionCount', 'listSeenCount', 'collected_question_count', 'unique_question_count', 'list_seen_count'], null))
+  const progressPercent = numberOrNull(firstTaskField(value, ['progressPercent', 'progress_percent', 'progress'], null))
+  const normalizedValue = Object.fromEntries(Object.entries(value).filter(([key]) => (
+    !['tree', 'catalogs', 'catalogTree', 'catalog_tree'].includes(key)
+  )))
+  return {
+    ...normalizedValue,
+    available: booleanValue(firstTaskField(value, ['available'], true), true),
+    live: booleanValue(firstTaskField(value, ['live'], true), true),
+    totalQuestionCount,
+    expectedQuestionCount: totalQuestionCount,
+    collectedQuestionCount,
+    uniqueQuestionCount: collectedQuestionCount,
+    listSeenCount: collectedQuestionCount,
+    progressPercent,
+    progress: progressPercent,
+    firstRoundComplete: booleanValue(firstTaskField(value, ['firstRoundComplete', 'first_round_complete'], totalQuestionCount !== null), totalQuestionCount !== null),
+    totalsKnown: booleanValue(firstTaskField(value, ['totalsKnown', 'totals_known'], totalQuestionCount !== null), totalQuestionCount !== null),
+    statisticsPending: booleanValue(firstTaskField(value, ['statisticsPending', 'statistics_pending'], totalQuestionCount === null), totalQuestionCount === null),
+    chapterCount: numberOrZero(firstTaskField(value, ['chapterCount', 'chapter_count'], 0)),
+    knowledgePointCount: numberOrZero(firstTaskField(value, ['knowledgePointCount', 'knowledge_point_count'], 0)),
+    secondaryKnowledgePointCount: numberOrZero(firstTaskField(value, ['secondaryKnowledgePointCount', 'secondary_knowledge_point_count'], 0)),
+    catalogCount: numberOrZero(firstTaskField(value, ['catalogCount', 'catalog_count'], tree.length)),
+    tree,
+  }
+}
+
 const unwrapNestedTask = (response) => {
   let value = unwrapResponse(response)
   for (let index = 0; index < 4; index += 1) {
@@ -377,6 +453,7 @@ const normalizeScopeItem = (item = {}, index = 0) => {
     errorMessage: String(firstTaskField(value, ['errorMessage', 'error_message', 'error', 'reason'], '') || ''),
     startedAt: firstTaskField(value, ['startedAt', 'started_at'], ''),
     completedAt: firstTaskField(value, ['completedAt', 'completed_at', 'finishedAt', 'finished_at'], ''),
+    liveProgress: normalizeLiveProjection(firstTaskField(value, ['liveProgress', 'live_progress'], null)),
   }
 }
 
@@ -426,6 +503,11 @@ export function normalizeSyncTask(response, kind = '') {
   const progress = Number(firstTaskField(value, ['progressPercent', 'progress_percent', 'progress', 'percent', 'percentage'], 0))
   const status = normalizeSyncTaskStatus(firstTaskField(value, ['status', 'taskStatus', 'task_status', 'state'], ''), hasValue(taskId) ? 'queued' : '')
   const versionName = firstTaskField(value, ['versionName', 'version_name', 'versionNameSnapshot', 'version_name_snapshot'], scopeItems.find((item) => item.versionName)?.versionName || '')
+  const liveProgress = normalizeLiveProjection(firstTaskField(value, ['liveProgress', 'live_progress'], null))
+  const rawLiveByScope = firstTaskField(value, ['liveProgressByScope', 'live_progress_by_scope'], {})
+  const liveProgressByScope = rawLiveByScope && typeof rawLiveByScope === 'object' && !Array.isArray(rawLiveByScope)
+    ? Object.fromEntries(Object.entries(rawLiveByScope).slice(0, 200).map(([key, item]) => [key, normalizeLiveProjection(item)]).filter(([, item]) => item))
+    : {}
   return {
     ...value,
     taskId: taskId === undefined || taskId === null ? '' : String(taskId),
@@ -482,6 +564,8 @@ export function normalizeSyncTask(response, kind = '') {
     suggestedAction: String(applyField(['suggestedAction', 'suggested_action', 'action'], '') || ''),
     eligibilityMessage: String(applyField(['eligibilityMessage', 'eligibility_message', 'reason'], '') || ''),
     currentStateToken: questionApplyStateToken({ ...value, applyStatus }),
+    liveProgress,
+    liveProgressByScope,
   }
 }
 

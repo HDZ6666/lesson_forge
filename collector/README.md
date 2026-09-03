@@ -7,6 +7,7 @@
 ```
 collector/
   zujuan_sync.cjs              题目采集
+  zujuan_question_sync.cjs     题库基础全量同步（列表 API 先行验证）
   zujuan_metadata_sync.cjs     版本 / 教材发现
   server.cjs                   受控 HTTP API 和任务编排
   lib/api_store.cjs            候选快照的只读查询边界
@@ -30,10 +31,16 @@ cd collector
 npm ci
 npm test
 npm start
+node zujuan_question_sync.cjs --textbook-id 260617 --max-catalogs 1 --max-pages 1
+# 若已有带登录态的 Chrome 在 9222 运行，可复用该浏览器而不关闭它
+node zujuan_question_sync.cjs --cdp-url http://127.0.0.1:9222 \
+  --textbook-id 260617 --max-catalogs 1 --max-pages 1
 node zujuan_sync.cjs --catalog-progress --acknowledge-source-policy
 node zujuan_sync.cjs --acknowledge-source-policy --headful \
   --version-name 北师大版 --textbook-name 九年级上册
 ```
+
+`zujuan_question_sync.cjs` 是题库内容任务的正式 Collector 入口，由 `server.cjs` 在网页提交内容同步后启动；它不会修改正式表或 service。它先在同一持久 Chrome 档案打开教材入口，再读取静态目录 JSON，并在该页面会话中串行 POST `/zujuan-api/question/list`。默认使用已有的 `.cache/zujuan-sync-profile` 有头 Chrome 会话；只有显式传 `--headless` 才无头。它与旧 `zujuan_sync.cjs`/服务共用 `${db}.lock`，不能并行占用同一 SQLite 或 profile。已有 Chrome 调试端口运行时可传 `--cdp-url http://127.0.0.1:9222`（或 `--connect-over-cdp`），脚本通过该已有 context 共享 cookies/session，但始终新建专用采集 tab；连接模式结束只关闭自己新建的 tab，不关闭用户 browser/context。默认遍历章/小节/知识点和全部分页，验收时可用 `--max-catalogs`、`--catalog-id`、`--max-pages` 缩小范围。题目答案/解析固定写入 `answerStatus=not_collected`，列表题干标记 `contentSource=list_api` 与 `contentComplete`，原始接口页保存为 gzip 快照；`--no-download-assets` 可只记录素材 URL。遇到 401/403、JSON 变 HTML 或验证码/滑块时会把窗口置前，等待人工处理并以间隔 probe 同一页，不自动绕过验证。
 
 `npm start` 默认在 `127.0.0.1:9110` 启动 API。对外绑定时必须配置令牌：
 

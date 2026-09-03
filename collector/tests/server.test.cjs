@@ -9,7 +9,7 @@ const { EventEmitter } = require('node:events');
 const { PassThrough } = require('node:stream');
 const { DatabaseSync } = require('node:sqlite');
 
-const { CollectorJobManager, createCollectorServer } = require('../server.cjs');
+const { aggregateLiveProgress, CollectorJobManager, createCollectorServer } = require('../server.cjs');
 const { SyncStore } = require('../zujuan_sync.cjs');
 
 function fixtureDb(directory) {
@@ -146,6 +146,32 @@ test('collector API exposes authenticated bounded snapshots and scoped candidate
   }
 });
 
+test('多教材实时进度按已知总题数加权，完成教材以最终题数计入', () => {
+  const scopes = [
+    { externalTextbookId: 'tb1', status: 'running' },
+    { externalTextbookId: 'tb2', status: 'completed', questionCount: 20 },
+  ];
+  const live = new Map([
+    ['tb1', { available: true, totalQuestionCount: 100, collectedQuestionCount: 25 }],
+  ]);
+  assert.deepEqual(aggregateLiveProgress(scopes, live, 7), {
+    available: true,
+    progressPercent: 37.5,
+  });
+});
+
+test('单教材实时百分比和无实时投影时的旧阶段进度保持稳定', () => {
+  const scope = [{ externalTextbookId: 'tb1', status: 'running' }];
+  assert.deepEqual(
+    aggregateLiveProgress(scope, new Map([['tb1', { available: true, progressPercent: 37.25 }]]), 5),
+    { available: true, progressPercent: 37.3 },
+  );
+  assert.deepEqual(aggregateLiveProgress(scope, new Map(), 12), {
+    available: false,
+    progressPercent: 12,
+  });
+});
+
 test('a queued collector job cancelled before execution never starts a child process', async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'collector-api-cancel-'));
   let spawnCount = 0;
@@ -219,6 +245,7 @@ test('独立 textbookScopes 创建题库任务不依赖 metadataRunId 或元数�
       manager.get(started.id)?.status,
     ));
     assert.ok(childArgs, '独立 scope 应启动题库脚本');
+    assert.match(childArgs[0], /zujuan_question_sync\.cjs$/);
     assert.equal(childArgs[childArgs.indexOf('--textbook-id') + 1], '260617');
     assert.equal(childArgs[childArgs.indexOf('--chapter-id') + 1], '260617');
     assert.equal(childArgs.includes('--refresh-details'), false);
