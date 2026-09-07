@@ -4,7 +4,7 @@
 # inside the project so a scheduled run uses the same checkpoint as a manual run.
 set -eu
 
-COLLECTOR_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+COLLECTOR_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 if [ -z "${NODE_BIN:-}" ]; then
   NODE_BIN=$(command -v node || true)
 fi
@@ -21,7 +21,7 @@ if [ -z "${PLAYWRIGHT_CORE_PATH:-}" ]; then
 fi
 
 cd "$COLLECTOR_DIR"
-exec "$NODE_BIN" "$COLLECTOR_DIR/zujuan_sync.cjs" \
+exec "$NODE_BIN" "$COLLECTOR_DIR/legacy/zujuan_sync.cjs" \
   --acknowledge-source-policy \
   --headful \
   "$@"

@@ -42,9 +42,15 @@ for (const status of ['queued', 'starting', 'running', 'cancelling']) assert.equ
 
 const textbookComparison = textbookDetail.indexOf('class="comparison-panel"')
 const textbookSummary = textbookDetail.indexOf('class="task-summary panel"')
-const questionComparison = questionDetail.indexOf('class="comparison-workspace panel"')
 const questionSummary = questionDetail.indexOf('class="task-summary panel"')
+const questionWindows = questionDetail.indexOf('class="log-panel fetch-window-log"')
+const questionLogs = questionDetail.indexOf('运行日志')
+const questionTree = questionDetail.indexOf('class="live-catalog-panel panel"')
+const questionComparison = questionDetail.indexOf('class="comparison-workspace panel"')
 assert.ok(textbookComparison >= 0 && textbookComparison < textbookSummary, '教材对比应位于任务摘要上方')
-assert.ok(questionComparison >= 0 && questionComparison < questionSummary, '题库对比应位于任务摘要上方')
+assert.ok(questionSummary >= 0 && questionWindows > questionSummary, '8 路窗口应在任务摘要内')
+assert.ok(questionLogs > questionWindows, '8 路窗口应位于运行日志上方')
+assert.ok(questionTree > questionLogs, '采集中先看窗口和日志，目录树放在后面')
+assert.ok(questionComparison > questionTree, '完成后的快照对比仍在目录树下方')
 
 console.log('sync batch delete and detail layout assertions passed')

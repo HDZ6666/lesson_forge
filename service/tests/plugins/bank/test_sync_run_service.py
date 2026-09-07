@@ -1228,3 +1228,37 @@ async def test_existing_textbook_scope_updates_are_committed_from_http_snapshot(
     assert db.commit_count == 1
     assert updates and updates[0]['metadata_run_id'] == 10
     assert updates[0]['status'] == 'completed'
+
+
+def test_bound_live_projection_keeps_fetch_windows() -> None:
+    bounded = module._bound_live_projection(
+        {
+            'available': True,
+            'runId': 11,
+            'fetchWindows': [
+                {
+                    'catalogExternalId': '261285',
+                    'catalogName': '1.2 探索规律',
+                    'latestSourceTotal': 10028,
+                    'slots': [
+                        {
+                            'slot': 1,
+                            'pageNumber': 47,
+                            'status': 'fetching',
+                            'questionCount': 10,
+                            'sourceTotal': 10028,
+                            'line': 'catalog=261285 page=47 questions=10 total=10028',
+                        },
+                    ],
+                },
+            ],
+            'currentCatalogIds': ['261285'],
+            'tree': [{'externalId': '261285', 'label': '1.2 探索规律', 'children': []}],
+        }
+    )
+
+    assert bounded is not None
+    assert bounded['fetchWindows'][0]['catalogExternalId'] == '261285'
+    assert bounded['fetchWindows'][0]['slots'][0]['pageNumber'] == 47
+    assert bounded['fetchWindows'][0]['slots'][0]['line'].startswith('catalog=261285 page=47')
+    assert bounded['currentCatalogIds'] == ['261285']

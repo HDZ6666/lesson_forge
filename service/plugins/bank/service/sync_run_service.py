@@ -420,6 +420,13 @@ def _status_from_row(
             'snapshotComplete': _status_flag(
                 read(scope, 'snapshot_complete', 'snapshotComplete', 'complete', default=False)
             ),
+            'scanComplete': _status_flag(
+                read(scope, 'scan_complete', 'scanComplete', default=False)
+            ),
+            'dataComplete': _status_flag(
+                read(scope, 'data_complete', 'dataComplete', default=False)
+            ),
+            'completionQuality': read(scope, 'completion_quality', 'completionQuality'),
             'snapshotLockedAt': read(scope, 'snapshot_locked_at', 'snapshotLockedAt', 'lockedAt'),
             'newCatalogCount': read(scope, 'new_catalog_count', 'newCatalogCount', default=0) or 0,
             'changedCatalogCount': read(scope, 'changed_catalog_count', 'changedCatalogCount', default=0) or 0,
@@ -716,6 +723,12 @@ def _bound_live_node(value: Any, budget: list[int]) -> dict[str, Any] | None:
         'expectedTotal', 'expected', 'total', 'collectedCount', 'collected',
         'listSeenCount', 'questionCount', 'expectedPages', 'lastCompletedPage',
         'status', 'queried', 'hasProgress', 'observedAt',
+        'latestSourceTotal', 'sourceReportedTotal', 'uniqueQuestionCount',
+        'occurrenceCount', 'targetPages', 'attemptedPages',
+        'lastContiguousSuccessfulPage', 'highestAttemptedPage',
+        'failedPageCount', 'duplicatePageCount', 'emptyPageCount',
+        'parseErrorCount', 'assetErrorCount', 'scanComplete', 'dataComplete',
+        'completionQuality', 'current',
     ):
         if key in value and value[key] is not None:
             output[key] = _jsonable(value[key])
@@ -730,6 +743,54 @@ def _bound_live_node(value: Any, budget: list[int]) -> dict[str, Any] | None:
     else:
         output['children'] = []
     return output
+
+
+def _bound_fetch_windows(value: Any) -> list[dict[str, Any]]:
+    """Keep the live 8-way fetch window compact enough for task JSON."""
+
+    if not isinstance(value, list):
+        return []
+    windows: list[dict[str, Any]] = []
+    for item in value[:4]:
+        if not isinstance(item, Mapping):
+            continue
+        slots: list[dict[str, Any]] = []
+        raw_slots = item.get('slots')
+        if isinstance(raw_slots, list):
+            for slot in raw_slots[:16]:
+                if not isinstance(slot, Mapping):
+                    continue
+                page_number = slot.get('pageNumber', slot.get('page_number'))
+                question_count = slot.get('questionCount', slot.get('question_count'))
+                source_total = slot.get('sourceTotal', slot.get('source_total'))
+                try:
+                    slot_index = int(slot.get('slot') or slot.get('workerId') or 0)
+                except (TypeError, ValueError, OverflowError):
+                    slot_index = 0
+                slots.append({
+                    'slot': max(0, slot_index),
+                    'pageNumber': page_number if isinstance(page_number, int) else (
+                        int(page_number) if str(page_number).isdigit() else None
+                    ),
+                    'status': str(slot.get('status') or slot.get('slot_status') or 'fetching')[:32],
+                    'questionCount': question_count if isinstance(question_count, int) else None,
+                    'resultType': None if slot.get('resultType') in (None, '') else str(
+                        slot.get('resultType') or slot.get('result_type')
+                    )[:64],
+                    'sourceTotal': source_total if isinstance(source_total, int) else None,
+                    'line': str(slot.get('line') or slot.get('message') or '')[:240],
+                    'updatedAt': slot.get('updatedAt') or slot.get('updated_at'),
+                })
+        windows.append({
+            'catalogExternalId': str(item.get('catalogExternalId') or item.get('catalog_external_id') or '')[:128],
+            'catalogName': str(item.get('catalogName') or item.get('catalog_name') or '')[:200],
+            'catalogPath': str(item.get('catalogPath') or item.get('catalog_path') or '')[:400],
+            'targetPages': item.get('targetPages', item.get('target_pages')),
+            'latestSourceTotal': item.get('latestSourceTotal', item.get('sourceReportedTotal')),
+            'updatedAt': item.get('updatedAt') or item.get('updated_at'),
+            'slots': slots,
+        })
+    return windows
 
 
 def _bound_live_projection(value: Any, *, include_tree: bool = True, max_nodes: int = MAX_LIVE_PROJECTION_NODES) -> dict[str, Any] | None:
@@ -748,6 +809,8 @@ def _bound_live_projection(value: Any, *, include_tree: bool = True, max_nodes: 
         'progressPercent', 'progress', 'chapterCount',
         'knowledgePointCount', 'secondaryKnowledgePointCount', 'catalogCount',
         'summaryCatalogLevel', 'summaryNodeCount', 'treeNodeCount', 'treeTruncated', 'treeAvailable',
+        'scanComplete', 'dataComplete', 'completionQuality', 'snapshotComplete',
+        'latestSourceTotal', 'sourceReportedTotal',
     )
     for key in scalar_keys:
         if key in value:
@@ -764,6 +827,12 @@ def _bound_live_projection(value: Any, *, include_tree: bool = True, max_nodes: 
     summary_ids = value.get('summaryCatalogIds')
     if isinstance(summary_ids, (list, tuple)):
         output['summaryCatalogIds'] = [str(item)[:128] for item in summary_ids[:MAX_LIVE_PROJECTION_NODES]]
+    current_ids = value.get('currentCatalogIds')
+    if isinstance(current_ids, (list, tuple)):
+        output['currentCatalogIds'] = [str(item)[:128] for item in current_ids[:32]]
+    fetch_windows = _bound_fetch_windows(value.get('fetchWindows') or value.get('fetch_windows'))
+    if fetch_windows:
+        output['fetchWindows'] = fetch_windows
     raw_tree = value.get('tree') or value.get('catalogs') or value.get('catalogTree')
     budget = [max(0, min(MAX_LIVE_PROJECTION_NODES, int(max_nodes or 0)))]
     tree: list[dict[str, Any]] = []

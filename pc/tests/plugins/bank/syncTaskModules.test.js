@@ -24,6 +24,8 @@ import {
   textbookApplyActionLabel,
   textbookTaskMeaning,
   unwrapSyncTaskPage,
+  parseFetchWindowsFromLogs,
+  resolveVisibleFetchWindows,
 } from '../../../plugins/bank/utils/sync-task.js'
 import {
   normalizeCatalogComparison,
@@ -62,14 +64,13 @@ assert.match(questionList, /versionId: createForm\.versionId/)
 assert.match(questionList, /textbookIds: \[\.\.\.new Set\(createForm\.textbookIds\)\]/)
 assert.match(questionList, /缺少采集来源标识/)
 assert.match(questionDetail, /服务端按本任务完整快照计算/)
+assert.match(questionDetail, /当前 \{\{ fetchWindowSlotCount \}\} 路窗口/)
+assert.match(questionDetail, /fetchWindowLogText/)
+assert.match(questionDetail, /class="log-panel fetch-window-log"/)
 assert.match(questionDetail, /sanitizeHtml/)
 assert.doesNotMatch(questionDetail, /v-html/)
 assert.match(questionDetail, /来源答案\/解析（未分类）/)
 assert.match(questionDetail, /maxlength="120"/)
-assert.match(questionDetail, /每本教材采集范围状态/)
-assert.match(questionDetail, /collectorRunId：待绑定/)
-assert.match(questionDetail, /scope.catalogCount/)
-assert.match(questionDetail, /scope.questionCount/)
 assert.match(questionDetail, /questionApplyStateToken\(task\.value\)/)
 assert.match(questionDetail, /currentFormalSummary/)
 
@@ -119,7 +120,7 @@ assert.match(questionList, /await resumeQuestionSyncTask\(task\.taskId\)/)
 assert.match(questionList, /await loadTasks\(true\)/)
 assert.match(questionDetail, /canResumeSyncTask\(task\.value\)/)
 assert.match(questionDetail, /bank:sync:question:resume/)
-assert.match(questionDetail, /resumeFromCollectorRunId/)
+assert.match(questionDetail, /resumeQuestionSyncTask\(task\.value\.taskId\)/)
 assert.match(questionDetail, /已有快照和断点保留，可断点续采；也可重试从头创建新任务/)
 assert.match(questionList, /继续同一个任务、?[^\n]*Collector 新 run 会继承旧快照并从断点继续，不会直接应用正式库/)
 assert.match(questionDetail, /继续同一个任务、?[^\n]*Collector 新 run 会继承旧快照并从断点继续，不会直接应用正式库/)
@@ -305,6 +306,46 @@ assert.equal(unavailableOptions.versions[0].textbooks[0].disabled, true)
 const page = unwrapSyncTaskPage({ data: { rows: [{ runId: 1, status: 'queued' }], total: 1 } }, 'textbook')
 assert.equal(page.rows[0].taskId, '1')
 assert.equal(page.total, 1)
+
+const parsedWindows = parseFetchWindowsFromLogs([
+  '[列表] catalog=261285 page=1 questions=10 total=10028',
+  '[列表] catalog=261285 page=2 questions=10 total=10028',
+  '[列表] catalog=261285 page=3 empty=1 total=10028',
+])
+assert.equal(parsedWindows.length, 1)
+assert.equal(parsedWindows[0].catalogExternalId, '261285')
+assert.equal(parsedWindows[0].slots.length, 3)
+assert.equal(parsedWindows[0].slots[0].pageNumber, 1)
+assert.equal(parsedWindows[0].slots[2].status, 'empty')
+
+const liveWindowTask = normalizeSyncTask({
+  taskId: 11,
+  status: 'running',
+  liveProgressByScope: {
+    260617: {
+      available: true,
+      fetchWindows: [{
+        catalogExternalId: '261285',
+        catalogName: '1.2 探索规律',
+        latestSourceTotal: 10028,
+        slots: [
+          { slot: 1, pageNumber: 47, status: 'saved', questionCount: 10, sourceTotal: 10028, line: 'catalog=261285 page=47 questions=10 total=10028' },
+        ],
+      }],
+      tree: [],
+    },
+  },
+  logs: ['[列表] catalog=261285 page=1 questions=10 total=10028'],
+}, 'question')
+assert.equal(liveWindowTask.liveProgressByScope['260617'].fetchWindows[0].slots[0].pageNumber, 47)
+assert.equal(
+  resolveVisibleFetchWindows(liveWindowTask.liveProgressByScope['260617'], liveWindowTask.logs)[0].slots[0].pageNumber,
+  47,
+)
+assert.equal(
+  resolveVisibleFetchWindows({ fetchWindows: [] }, liveWindowTask.logs)[0].slots[0].pageNumber,
+  1,
+)
 
 const singleScope = normalizeSyncTask({ taskId: 4, scope: { textbookId: 8, collectorRunId: 12 } }, 'question')
 assert.equal(singleScope.scopeItems.length, 1)

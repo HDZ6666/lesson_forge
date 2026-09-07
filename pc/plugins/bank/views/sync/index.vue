@@ -862,13 +862,16 @@ async function loadCatalogProgress() {
 }
 
 function catalogNodeCountText(node) {
-  const crawled = Number(node?.crawledUnique || 0)
-  const total = node?.expectedTotal
-  const pages = node?.expectedPages
-  const donePages = Number(node?.lastCompletedPage || 0)
+  const crawled = Number(node?.uniqueQuestionCount ?? node?.crawledUnique ?? node?.collectedCount ?? 0)
+  const total = node?.latestSourceTotal ?? node?.sourceReportedTotal ?? node?.expectedTotal
+  const pages = node?.targetPages ?? node?.expectedPages
+  const donePages = Number(node?.attemptedPages ?? node?.lastCompletedPage ?? 0)
   const countPart = total == null || total === '' ? `${crawled} / —` : `${crawled} / ${Number(total)}`
-  if (pages == null || pages === '') return countPart
-  return `${countPart} · ${donePages}/${Number(pages)} 页`
+  const pagePart = pages == null || pages === '' ? '' : ` · ${donePages}/${Number(pages)} 页`
+  const integrity = node?.dataComplete === false || node?.completionQuality === 'completed_with_issues'
+    ? ' · 数据不完整'
+    : ''
+  return `${countPart}${pagePart}${integrity}`
 }
 
 function countText(completed, total, fallback) {

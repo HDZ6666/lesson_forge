@@ -14,7 +14,7 @@ const {
   readRunAsset,
   readRunSnapshotPage,
 } = require('../lib/api_store.cjs');
-const { SyncStore } = require('../zujuan_sync.cjs');
+const { SyncStore } = require('../legacy/zujuan_sync.cjs');
 
 function temporary(prefix = 'collector-page-') {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), prefix));

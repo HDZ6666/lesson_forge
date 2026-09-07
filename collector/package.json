@@ -5,15 +5,16 @@
   "description": "组卷网采集工程：限速抓取公开题库页面，结果写入本目录 SQLite 与素材，不写 MySQL",
   "scripts": {
     "start": "node server.cjs",
-    "sync:zujuan": "node zujuan_sync.cjs",
+    "legacy:sync": "node legacy/zujuan_sync.cjs",
     "sync:zujuan:questions": "node zujuan_question_sync.cjs",
-    "sync:zujuan:book": "node zujuan_sync.cjs --acknowledge-source-policy --headful",
+    "legacy:sync:book": "node legacy/zujuan_sync.cjs --acknowledge-source-policy --headful",
     "sync:zujuan:metadata": "node zujuan_metadata_sync.cjs",
-    "sync:zujuan:chapter5": "sh zujuan_sync.sh --all-catalogs --catalog-level 3 --within-chapter 261314 --max-pages ${ZUJUAN_MAX_PAGES:-3}",
-    "sync:zujuan:daily": "sh zujuan_sync_daily.sh",
+    "legacy:sync:chapter5": "sh legacy/zujuan_sync.sh --all-catalogs --catalog-level 3 --within-chapter 261314 --max-pages ${ZUJUAN_MAX_PAGES:-3}",
+    "legacy:sync:daily": "sh legacy/zujuan_sync_daily.sh",
     "qbpkg:build": "node qbpkg.cjs build",
     "qbpkg:verify": "node qbpkg.cjs verify",
-    "test": "node --test tests/*.test.cjs"
+    "test": "node --test tests/*.test.cjs",
+    "check:undeclared": "node tests/tools/scan_undeclared.cjs"
   },
   "engines": {
     "node": ">=22.5.0"

@@ -244,6 +244,9 @@ def _scope_payload(scope: object) -> dict[str, Any]:
             _pick(scope, 'question_asset_count', 'questionAssetCount', 'asset_count', 'assetCount', default=0) or 0
         ),
         'snapshotComplete': _as_flag(_pick(scope, 'snapshot_complete', 'snapshotComplete', 'complete', default=False)),
+        'scanComplete': _as_flag(_pick(scope, 'scan_complete', 'scanComplete', default=False)),
+        'dataComplete': _as_flag(_pick(scope, 'data_complete', 'dataComplete', default=False)),
+        'completionQuality': _pick(scope, 'completion_quality', 'completionQuality'),
         'snapshotLockedAt': _pick(scope, 'snapshot_locked_at', 'snapshotLockedAt', 'lockedAt'),
         'newCatalogCount': int(_pick(scope, 'new_catalog_count', 'newCatalogCount', default=0) or 0),
         'changedCatalogCount': int(_pick(scope, 'changed_catalog_count', 'changedCatalogCount', default=0) or 0),

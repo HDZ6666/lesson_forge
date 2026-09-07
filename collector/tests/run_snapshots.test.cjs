@@ -24,7 +24,7 @@ const {
 } = require('../lib/api_store.cjs');
 const { CollectorJobManager, createCollectorServer } = require('../server.cjs');
 const { MetadataStore } = require('../zujuan_metadata_sync.cjs');
-const { SyncStore } = require('../zujuan_sync.cjs');
+const { SyncStore } = require('../legacy/zujuan_sync.cjs');
 
 function temporaryDb(prefix = 'collector-snapshot-') {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), prefix));

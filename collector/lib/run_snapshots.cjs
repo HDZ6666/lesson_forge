@@ -56,6 +56,9 @@ const RUN_COLUMN_MIGRATIONS = Object.freeze({
   // A sealed run may still be partial.  Keep an explicit readiness bit so
   // downstream apply code never has to infer completeness from status alone.
   snapshot_complete: 'INTEGER NOT NULL DEFAULT 0',
+  scan_complete: 'INTEGER NOT NULL DEFAULT 0',
+  data_complete: 'INTEGER NOT NULL DEFAULT 0',
+  completion_quality: 'TEXT',
   catalog_item_count: 'INTEGER NOT NULL DEFAULT 0',
   question_item_count: 'INTEGER NOT NULL DEFAULT 0',
   question_catalog_count: 'INTEGER NOT NULL DEFAULT 0',
@@ -665,15 +668,18 @@ function migrateRunSnapshotSchema(db) {
       SELECT RAISE(ABORT, 'terminal sync runs are immutable');
     END;
 
-    -- A successful/completed row is an applyable snapshot only when the
-    -- application-level completeness check explicitly sealed it as complete.
-    -- Failed terminal rows remain sealable for diagnostics with a zero bit.
+    -- A successful/completed row must be locked.  snapshot_complete=1 is the
+    -- applyable seal; scan_complete=1 with snapshot_complete=0 is a finished
+    -- scan that still has page/asset issues and must not be applied.
     CREATE TRIGGER trg_snapshot_runs_require_complete
     BEFORE UPDATE ON sync_runs
     WHEN COALESCE(NEW.status, '') IN ('success', 'completed')
       AND (
-        COALESCE(NEW.snapshot_complete, 0) <> 1
-        OR NEW.snapshot_locked_at IS NULL
+        NEW.snapshot_locked_at IS NULL
+        OR (
+          COALESCE(NEW.snapshot_complete, 0) <> 1
+          AND COALESCE(NEW.scan_complete, 0) <> 1
+        )
       )
     BEGIN
       SELECT RAISE(ABORT, 'successful sync runs require a complete locked snapshot; terminal sync runs are immutable');

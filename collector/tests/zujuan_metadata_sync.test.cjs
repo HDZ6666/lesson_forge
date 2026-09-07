@@ -43,7 +43,7 @@ const {
   buildListUrl,
   parseArgs: parseSyncArgs,
   resolveSyncScope,
-} = require('../zujuan_sync.cjs');
+} = require('../legacy/zujuan_sync.cjs');
 
 const VERSION_HTML = `
 <div id="chapter_textbook_version" class="menu-item__navs">

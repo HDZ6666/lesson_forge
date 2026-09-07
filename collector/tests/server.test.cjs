@@ -10,7 +10,7 @@ const { PassThrough } = require('node:stream');
 const { DatabaseSync } = require('node:sqlite');
 
 const { aggregateLiveProgress, CollectorJobManager, createCollectorServer } = require('../server.cjs');
-const { SyncStore } = require('../zujuan_sync.cjs');
+const { SyncStore } = require('../legacy/zujuan_sync.cjs');
 
 function fixtureDb(directory) {
   const dbPath = path.join(directory, 'collector.sqlite3');
@@ -157,6 +157,24 @@ test('多教材实时进度按已知总题数加权，完成教材以最终题�
   assert.deepEqual(aggregateLiveProgress(scopes, live, 7), {
     available: true,
     progressPercent: 37.5,
+  });
+});
+
+test('完成后按实际唯一题数展示 100%，不使用上游 total', () => {
+  const scopes = [
+    { externalTextbookId: 'tb1', status: 'completed', questionCount: 10012 },
+  ];
+  const live = new Map([
+    ['tb1', {
+      available: true,
+      totalQuestionCount: 10012,
+      collectedQuestionCount: 10012,
+      progressPercent: 100,
+    }],
+  ]);
+  assert.deepEqual(aggregateLiveProgress(scopes, live, 99), {
+    available: true,
+    progressPercent: 100,
   });
 });
 

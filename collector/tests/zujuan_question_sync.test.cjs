@@ -21,6 +21,7 @@ const {
   normalizeAssetType,
   normalizeCatalogTree,
   parseQuestionListPayload,
+  parseQuestionListTotalPayload,
   parseDifficulty,
   parseArgs,
   postQuestionList,
@@ -29,7 +30,19 @@ const {
   selectCatalogs,
   serializeFormBody,
   validatePageResult,
+  listWindow,
+  catalogLastPage,
+  catalogSafetyPageLimit,
+  growTargetPages,
+  isCookieSwitchError,
+  isPageLevelError,
+  DEFAULT_LIST_CONCURRENCY,
+  DEFAULT_PAGINATION_SAFETY_LIMIT,
+  PAGE_RESULT,
+  SITE_PAGE_LIMIT,
+  VerificationRequiredError,
 } = require('../zujuan_question_sync.cjs');
+const { readLiveRunProgress } = require('../lib/api_store.cjs');
 
 const LIST_HTML = `
 <div class="tk-quest-item quesroot new" questionid="35020603" bankid="2">
@@ -48,6 +61,78 @@ function tempDb() {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'zujuan-question-sync-'));
   return { directory, dbPath: path.join(directory, 'collector.sqlite3') };
 }
+
+function listHtml(questionId) {
+  return LIST_HTML.replaceAll('35020603', String(questionId));
+}
+
+function listApiText(total, questionIds) {
+  const html = (Array.isArray(questionIds) ? questionIds : []).map((id) => listHtml(id)).join('');
+  return JSON.stringify({ code: '0', data: { total, html } });
+}
+
+function mockSyncPage(handler) {
+  return {
+    goto: async () => ({ status: 200 }),
+    url: () => 'https://zujuan.xkw.com/czsx/zj261285/',
+    isClosed: () => false,
+    evaluate: async (_fn, args) => {
+      if (!args || typeof args !== 'object' || !args.body) {
+        return { challenge: false, text: '', title: '' };
+      }
+      const params = new URLSearchParams(args.body);
+      return handler({
+        curPage: Number(params.get('curPage')),
+        categoryId: String(params.get('categoryId') || ''),
+        params,
+      });
+    },
+    close: async () => {},
+  };
+}
+
+function baseSyncOptions(directory, dbPath, extra = {}) {
+  return {
+    baseUrl: 'https://zujuan.xkw.com',
+    treeBaseUrl: 'https://static.zxxk.com',
+    apiPath: '/zujuan-api/question/list',
+    bankId: 2,
+    bankPath: 'czsx',
+    textbookId: '260617',
+    catalogIds: [],
+    catalogLevels: [],
+    maxCatalogs: 0,
+    startPage: 1,
+    maxPages: 1000,
+    maxPagesProvided: false,
+    limit: 0,
+    headless: false,
+    cdpUrl: null,
+    delayMin: 0,
+    delayMax: 0,
+    timeout: 1000,
+    verificationTimeout: 1000,
+    verificationPoll: 0,
+    verificationProbeInterval: 1,
+    downloadAssets: false,
+    saveRaw: false,
+    resume: false,
+    concurrency: 8,
+    fallbackProfileDirs: [],
+    dbPath,
+    dataDir: directory,
+    profileDir: directory,
+    sleepFn: async () => {},
+    randomFn: () => 0,
+    ...extra,
+  };
+}
+
+const SAMPLE_TREE = {
+  id: '260617',
+  title: '九年级上册',
+  children: [{ id: '261285', title: '第一章', children: [] }],
+};
 
 test('目录归一化使用嵌套 display parent，并正确生成知识点接口参数', () => {
   const tree = normalizeCatalogTree({
@@ -153,20 +238,28 @@ test('知识点、能力点、provider tags 和素材使用独立维度及规范
   assert.equal(normalizeAssetType('https://x/thing.bin'), 'other');
 });
 
-test('分页校验拒绝重复页、提前空页和单页重复题号', () => {
+test('分页校验允许空页和跨页部分重复，但拒绝完全相同的非空页', () => {
   const page = {
-    total: 21,
+    total: 10012,
     questions: Array.from({ length: 10 }, (_, index) => ({ externalId: String(index + 1) })),
     questionIds: Array.from({ length: 10 }, (_, index) => String(index + 1)),
   };
-  const signature = validatePageResult(page, 1, 3, new Set());
+  const signature = validatePageResult(page, 1, 1002, new Set());
   assert.equal(typeof signature, 'string');
-  assert.throws(() => validatePageResult(page, 2, 3, new Set([signature])), /重复/);
-  assert.throws(() => validatePageResult({ total: 21, questions: [], questionIds: [] }, 2, 3, new Set()), /空页/);
+  assert.equal(validatePageResult({ total: 10013, questions: [], questionIds: [] }, 2, 1002, new Set()), null);
+  const overlapping = {
+    total: 10013,
+    questions: [{ externalId: '9' }, { externalId: '11' }],
+    questionIds: ['9', '11'],
+  };
+  assert.equal(typeof validatePageResult(overlapping, 2, 1002, new Set([signature]), new Set(page.questionIds), 10012), 'string');
+  assert.throws(() => validatePageResult(page, 2, 1002, new Set([signature])), /重复/);
   assert.throws(() => validatePageResult({ total: 1, questions: [{ externalId: '1' }, { externalId: '1' }], questionIds: ['1', '1'] }, 1, 1, new Set()), /重复/);
 });
 
 test('HTTP 重试/验证分类及退避策略', () => {
+  assert.equal(isPageLevelError({ code: 'http_500' }), true);
+  assert.equal(isPageLevelError({ code: 'waiting_verification' }), false);
   assert.equal(classifyQuestionResponse({ status: 503, text: 'busy' }).kind, 'retry');
   assert.equal(classifyQuestionResponse({ status: 429, text: 'slow' }).throttled, true);
   assert.equal(classifyQuestionResponse({ status: 403, text: 'forbidden' }).kind, 'verification');
@@ -237,15 +330,16 @@ test('全新 SQLite 自包含错误与原始列表快照表，且均可实际写
       externalId: '261285', name: '第一章', level: 1, type: 'chapter',
       ancestorIds: ['261285'], categoryId: '261285', catelogTokpointId: '0',
     }];
+    const question = parseQuestionListPayload({ code: '0', data: { total: 1, html: LIST_HTML } }).questions[0];
     store.savePage({
       runId,
       textbookExternalId: '260617',
       catalog: { ...nodes[0], chapterExternalId: '261285' },
       nodes,
       pageNumber: 1,
-      expectedTotal: 0,
-      expectedPages: 0,
-      questions: [],
+      expectedTotal: 1,
+      expectedPages: 1,
+      questions: [question],
       queryFingerprint: 'fresh-db-raw',
       rawSnapshot: {
         sourceUrl: 'https://zujuan.xkw.com/zujuan-api/question/list',
@@ -311,8 +405,26 @@ test('默认有头、固定 profile，完整抓取才允许 success', () => {
   assert.equal(script.parseArgs(['--cdp-url', 'http://127.0.0.1:9222']).cdpUrl, 'http://127.0.0.1:9222');
   assert.equal(options.delayMin, 2500);
   assert.equal(options.delayMax, 4000);
+  assert.equal(options.concurrency, 8);
+  assert.equal(DEFAULT_LIST_CONCURRENCY, 8);
+  assert.deepEqual(listWindow(1, Infinity, 8), [1, 2, 3, 4, 5, 6, 7, 8]);
+  assert.deepEqual(listWindow(1002, 1005, 8), [1002, 1003, 1004, 1005]);
+  assert.equal(catalogLastPage({ maxPagesProvided: false, maxPages: 1000 }), DEFAULT_PAGINATION_SAFETY_LIMIT);
+  assert.equal(catalogLastPage({ maxPagesProvided: false }), DEFAULT_PAGINATION_SAFETY_LIMIT);
+  assert.equal(catalogLastPage({ maxPagesProvided: true, maxPages: 3 }), 3);
+  assert.equal(catalogLastPage({ maxPages: 5000 }), DEFAULT_PAGINATION_SAFETY_LIMIT);
+  assert.equal(catalogLastPage({ maxPagesProvided: true, maxPages: 5000 }), 5000);
+  assert.equal(catalogSafetyPageLimit({}), DEFAULT_PAGINATION_SAFETY_LIMIT);
+  assert.equal(growTargetPages(0, 10020, 10), 1002);
+  assert.equal(growTargetPages(1002, 10000, 10), 1002);
+  assert.equal(SITE_PAGE_LIMIT, 1000);
+  assert.equal(script.parseArgs(['--concurrency', '8']).concurrency, 8);
   assert.equal(script.parseDifficulty('较易 (0.85)').label, '较易');
-  assert.throws(() => script.parseQuestionListPayload({ code: '0', data: { total: 1, html: '' } }), QuestionSyncError);
+  const emptyPage = script.parseQuestionListPayload({ code: '0', data: { total: 1, html: '' } });
+  assert.deepEqual(emptyPage.questionIds, []);
+  assert.equal(emptyPage.total, 1);
+  assert.throws(() => script.parseQuestionListPayload({ code: '1', data: { total: 1, html: '' } }), QuestionSyncError);
+  assert.throws(() => script.parseQuestionListPayload('not-json'), QuestionSyncError);
 });
 
 test('HTTP Collector 兼容参数映射为固定教材范围，并支持指定 run 续采', () => {
@@ -344,9 +456,19 @@ test('CDP 连接共享 context 但新建专用 tab，结束不关闭用户 brows
   let ownPageClosed = false;
   const page = {
     goto: async () => ({ status: 200 }),
-    evaluate: async () => ({ status: 200, headers: {}, text: JSON.stringify({
-      code: '0', data: { total: 1, html: LIST_HTML },
-    }) }),
+    evaluate: async (_fn, args) => {
+      if (!args || typeof args !== 'object' || !args.body) {
+        return { challenge: false, text: '', title: '' };
+      }
+      const curPage = Number(new URLSearchParams(args.body).get('curPage'));
+      const categoryId = String(new URLSearchParams(args.body).get('categoryId') || '');
+      if (categoryId === '261285' && curPage > 1) {
+        return { status: 200, headers: {}, text: listApiText(1, []) };
+      }
+      return { status: 200, headers: {}, text: JSON.stringify({
+        code: '0', data: { total: 1, html: LIST_HTML },
+      }) };
+    },
     close: async () => { ownPageClosed = true; },
   };
   let contextClosed = false;
@@ -364,8 +486,8 @@ test('CDP 连接共享 context 但新建专用 tab，结束不关闭用户 brows
     const result = await runSync({
       baseUrl: 'https://zujuan.xkw.com', treeBaseUrl: 'https://static.zxxk.com',
       apiPath: '/zujuan-api/question/list', bankId: 2, bankPath: 'czsx', textbookId: '260617',
-      catalogIds: [], catalogLevels: [], maxCatalogs: 0, startPage: 1, maxPages: 1,
-      maxPagesProvided: true, limit: 0, headless: false, cdpUrl: 'http://127.0.0.1:9222',
+      catalogIds: [], catalogLevels: [], maxCatalogs: 0, startPage: 1, maxPages: 1000,
+      maxPagesProvided: false, limit: 0, headless: false, cdpUrl: 'http://127.0.0.1:9222',
       delayMin: 0, delayMax: 0, timeout: 1000, verificationTimeout: 1000,
       verificationPoll: 0, verificationProbeInterval: 1, downloadAssets: false,
       saveRaw: false, resume: false, dbPath, dataDir: directory, profileDir: directory,
@@ -492,3 +614,724 @@ test('request gate 串行安排页面请求间隔', async () => {
     Date.now = originalNow;
   }
 });
+
+test('total 从 10012 变为 10013 后继续抓取，空页结束目录', async () => {
+  const { directory, dbPath } = tempDb();
+  const catalogPages = [];
+  const totals = [];
+  const page = mockSyncPage(({ curPage, categoryId }) => {
+    if (categoryId !== '261285') {
+      return { status: 200, headers: {}, text: listApiText(10012, ['35020603']) };
+    }
+    catalogPages.push(curPage);
+    if (curPage === 1) {
+      totals.push(10012);
+      return { status: 200, headers: {}, text: listApiText(10012, ['80000001']) };
+    }
+    if (curPage === 2) {
+      totals.push(10013);
+      return { status: 200, headers: {}, text: listApiText(10013, ['80000002']) };
+    }
+    return { status: 200, headers: {}, text: listApiText(10013, []) };
+  });
+  try {
+    const result = await runSync(baseSyncOptions(directory, dbPath), {
+      context: {},
+      page,
+      catalogTree: SAMPLE_TREE,
+    });
+    assert.equal(result.status, 'success');
+    assert.deepEqual([...new Set(catalogPages)].sort((a, b) => a - b), [1, 2, 3, 4, 5, 6, 7, 8]);
+    assert.deepEqual([...totals].sort((a, b) => a - b), [10012, 10013]);
+    assert.equal(result.completeness.scanComplete, true);
+    assert.equal(result.completeness.complete, true);
+    assert.equal(result.completeness.counts.questionCount, 2);
+    const replay = new QuestionSyncStore(dbPath, { dataDir: directory });
+    try {
+      const progress = replay.getRunCatalogProgress(result.runId, '260617', '261285');
+      assert.equal(progress.status, 'completed');
+      assert.equal(progress.expectedTotal, 10013);
+      assert.equal(progress.lastCompletedPage, 2);
+      assert.equal(replay.db.prepare(
+        "SELECT COUNT(*) AS n FROM sync_run_catalog_pages WHERE COALESCE(result_type, 'success') = 'success'",
+      ).get().n, 2);
+    } finally {
+      replay.close();
+    }
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('到达 expectedPages 后仍有题目时继续抓取', async () => {
+  const { directory, dbPath } = tempDb();
+  const catalogPages = [];
+  const page = mockSyncPage(({ curPage, categoryId }) => {
+    if (categoryId !== '261285') {
+      return { status: 200, headers: {}, text: listApiText(10, ['35020603']) };
+    }
+    catalogPages.push(curPage);
+    if (curPage === 1) return { status: 200, headers: {}, text: listApiText(10, ['80000011']) };
+    if (curPage === 2) return { status: 200, headers: {}, text: listApiText(10, ['80000012']) };
+    return { status: 200, headers: {}, text: listApiText(10, []) };
+  });
+  try {
+    const result = await runSync(baseSyncOptions(directory, dbPath), {
+      context: {},
+      page,
+      catalogTree: SAMPLE_TREE,
+    });
+    assert.equal(result.status, 'success');
+    assert.deepEqual([...new Set(catalogPages)].sort((a, b) => a - b), [1, 2, 3, 4, 5, 6, 7, 8]);
+    assert.equal(result.completeness.counts.questionCount, 2);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('跨页部分题号重复时按唯一题号统计且不失败', async () => {
+  const { directory, dbPath } = tempDb();
+  const page = mockSyncPage(({ curPage, categoryId }) => {
+    if (categoryId !== '261285') {
+      return { status: 200, headers: {}, text: listApiText(100, ['35020603']) };
+    }
+    if (curPage === 1) return { status: 200, headers: {}, text: listApiText(100, ['90000001', '90000002']) };
+    if (curPage === 2) return { status: 200, headers: {}, text: listApiText(100, ['90000002', '90000003']) };
+    return { status: 200, headers: {}, text: listApiText(100, []) };
+  });
+  try {
+    const result = await runSync(baseSyncOptions(directory, dbPath), {
+      context: {},
+      page,
+      catalogTree: SAMPLE_TREE,
+    });
+    assert.equal(result.status, 'success');
+    assert.equal(result.counters.questionsSeen, 4);
+    assert.equal(result.completeness.counts.questionCount, 3);
+    const live = readLiveRunProgress(dbPath, result.runId, { textbookExternalId: '260617' });
+    assert.equal(live.available, true);
+    assert.equal(live.collectedQuestionCount, 3);
+    assert.equal(live.uniqueQuestionCount, 3);
+    assert.equal(live.scanComplete, true);
+    assert.equal(live.progressPercent, 100);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('完全相同的非空页重复时记录异常并结束扫描，不中断整本任务', async () => {
+  const { directory, dbPath } = tempDb();
+  const page = mockSyncPage(({ curPage, categoryId }) => {
+    if (categoryId !== '261285') {
+      return { status: 200, headers: {}, text: listApiText(20, ['35020603']) };
+    }
+    return { status: 200, headers: {}, text: listApiText(20, ['91000001']) };
+  });
+  try {
+    const result = await runSync(baseSyncOptions(directory, dbPath), {
+      context: {},
+      page,
+      catalogTree: SAMPLE_TREE,
+    });
+    assert.equal(result.status, 'success');
+    assert.equal(result.completeness.scanComplete, true);
+    assert.equal(result.completeness.dataComplete, false);
+    assert.equal(result.completeness.snapshotComplete, false);
+    assert.equal(result.completeness.completionQuality, 'completed_with_issues');
+    const replay = new QuestionSyncStore(dbPath, { dataDir: directory });
+    try {
+      const progress = replay.getRunCatalogProgress(result.runId, '260617', '261285');
+      assert.equal(progress.scanComplete, true);
+      assert.equal(progress.dataComplete, false);
+      assert.ok(progress.duplicatePageCount > 0);
+    } finally {
+      replay.close();
+    }
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('未遇到空页就达到 --max-pages 或 --limit 时任务仍不完整', async () => {
+  const { directory, dbPath } = tempDb();
+  const maxPage = mockSyncPage(({ categoryId }) => ({
+    status: 200,
+    headers: {},
+    text: categoryId === '261285'
+      ? listApiText(10012, ['92000001'])
+      : listApiText(10012, ['35020603']),
+  }));
+  try {
+    const maxPagesResult = await runSync(baseSyncOptions(directory, dbPath, {
+      maxPages: 1,
+      maxPagesProvided: true,
+    }), {
+      context: {},
+      page: maxPage,
+      catalogTree: SAMPLE_TREE,
+    });
+    assert.equal(maxPagesResult.status, 'interrupted');
+    assert.equal(maxPagesResult.completeness.complete, false);
+    assert.equal(maxPagesResult.completeness.scanComplete, false);
+    assert.ok(maxPagesResult.completeness.reasons.some((reason) => /扫描完成|limit/.test(reason)));
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+
+  const { directory: limitDir, dbPath: limitDb } = tempDb();
+  const limitPage = mockSyncPage(({ categoryId }) => ({
+    status: 200,
+    headers: {},
+    text: categoryId === '261285'
+      ? listApiText(11, ['93000001', '93000002'])
+      : listApiText(11, ['35020603']),
+  }));
+  try {
+    const limitResult = await runSync(baseSyncOptions(limitDir, limitDb, { limit: 1 }), {
+      context: {},
+      page: limitPage,
+      catalogTree: SAMPLE_TREE,
+    });
+    assert.equal(limitResult.status, 'interrupted');
+    assert.equal(limitResult.completeness.complete, false);
+    assert.ok(limitResult.completeness.reasons.some((reason) => /limit/.test(reason)));
+  } finally {
+    fs.rmSync(limitDir, { recursive: true, force: true });
+  }
+});
+
+test('旧断点从最后成功保存的非空页继续，且不信任旧 completed', async () => {
+  const { directory, dbPath } = tempDb();
+  const firstPage = mockSyncPage(({ categoryId }) => ({
+    status: 200,
+    headers: {},
+    text: categoryId === '261285'
+      ? listApiText(10012, ['94000001'])
+      : listApiText(10012, ['35020603']),
+  }));
+  try {
+    const first = await runSync(baseSyncOptions(directory, dbPath, {
+      maxPages: 1,
+      maxPagesProvided: true,
+    }), {
+      context: {},
+      page: firstPage,
+      catalogTree: SAMPLE_TREE,
+    });
+    assert.equal(first.status, 'interrupted');
+    const seed = new QuestionSyncStore(dbPath, { dataDir: directory });
+    try {
+      seed.db.prepare(`
+        UPDATE sync_run_catalog_progress
+        SET status = 'completed', expected_pages = 1, expected_total = 10012
+        WHERE run_id = ?
+      `).run(first.runId);
+      assert.equal(seed.getRunCheckpoint(first.runId, seed.db.prepare(
+        'SELECT scope_key FROM sync_run_checkpoints WHERE run_id = ?',
+      ).get(first.runId).scope_key), 1);
+    } finally {
+      seed.close();
+    }
+
+    const catalogPages = [];
+    const resumePage = mockSyncPage(({ curPage, categoryId }) => {
+      if (categoryId !== '261285') {
+        return { status: 200, headers: {}, text: listApiText(10013, ['35020603']) };
+      }
+      catalogPages.push(curPage);
+      if (curPage === 2) return { status: 200, headers: {}, text: listApiText(10013, ['94000002']) };
+      if (curPage >= 3) return { status: 200, headers: {}, text: listApiText(10013, []) };
+      return { status: 200, headers: {}, text: listApiText(10013, ['94000001']) };
+    });
+    const second = await runSync(baseSyncOptions(directory, dbPath, { resume: true }), {
+      context: {},
+      page: resumePage,
+      catalogTree: SAMPLE_TREE,
+    });
+    assert.equal(second.status, 'success');
+    assert.equal(Math.min(...catalogPages), 2);
+    assert.ok(!catalogPages.includes(1));
+    assert.equal(second.completeness.counts.questionCount, 2);
+    const replay = new QuestionSyncStore(dbPath, { dataDir: directory });
+    try {
+      const progress = replay.getRunCatalogProgress(second.runId, '260617', '261285');
+      assert.equal(progress.status, 'completed');
+      assert.equal(progress.lastCompletedPage, 2);
+      assert.equal(progress.expectedTotal, 10013);
+    } finally {
+      replay.close();
+    }
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('运行中目录 expectedTotal 跟随上游 total，完成后使用唯一题数', async () => {
+  const { directory, dbPath } = tempDb();
+  const store = new QuestionSyncStore(dbPath, { dataDir: directory });
+  try {
+    const runId = store.beginRun({ textbookId: '260617', bankId: 2, bankPath: 'czsx' });
+    store.updateRunScope(runId, {
+      textbookId: '260617',
+      textbookExpectedTotal: 10012,
+      summaryStrategy: 'textbook_root_probe',
+    });
+    const nodes = [{
+      externalId: '261285', name: '第一章', level: 1, type: 'chapter',
+      ancestorIds: ['261285'], categoryId: '261285', catelogTokpointId: '0',
+    }];
+    const first = parseQuestionListPayload({ code: '0', data: { total: 1, html: listHtml('95000001') } }).questions[0];
+    const second = parseQuestionListPayload({ code: '0', data: { total: 1, html: listHtml('95000002') } }).questions[0];
+    store.saveCatalogTree(runId, '260617', nodes);
+    const catalog = { ...nodes[0], chapterExternalId: '261285' };
+    store.savePage({
+      runId, textbookExternalId: '260617', catalog, nodes, pageNumber: 1,
+      expectedTotal: 10012, expectedPages: 1002, questions: [first], queryFingerprint: 'live-total',
+    });
+    store.savePage({
+      runId, textbookExternalId: '260617', catalog, nodes, pageNumber: 2,
+      expectedTotal: 10013, expectedPages: 1002, questions: [second], queryFingerprint: 'live-total',
+    });
+    store.close();
+    const running = readLiveRunProgress(dbPath, runId, { textbookExternalId: '260617' });
+    assert.equal(running.available, true);
+    assert.equal(running.tree[0].expectedTotal, 10013);
+    assert.equal(running.tree[0].collectedCount, 2);
+    assert.equal(running.collectedQuestionCount, 2);
+    assert.equal(running.totalQuestionCount, 10012);
+    assert.ok(running.progressPercent == null || running.progressPercent < 100);
+
+    const finisher = new QuestionSyncStore(dbPath, { dataDir: directory });
+    try {
+      finisher.completeCatalog({
+        runId,
+        textbookExternalId: '260617',
+        catalog,
+        expectedTotal: 10013,
+        expectedPages: 1002,
+        queryFingerprint: 'live-total',
+      });
+      const completeness = finisher.validateRunCompleteness(runId, {
+        textbookId: '260617',
+      }, nodes, {});
+      assert.equal(completeness.complete, true);
+      finisher.finishRun(runId, 'success', {}, null, { ...completeness, scope: { textbookId: '260617' } });
+    } finally {
+      finisher.close();
+    }
+    const done = readLiveRunProgress(dbPath, runId, { textbookExternalId: '260617' });
+    assert.equal(done.collectedQuestionCount, 2);
+    assert.equal(done.uniqueQuestionCount, 2);
+    assert.equal(done.progressPercent, 100);
+    assert.equal(done.scanComplete, true);
+    assert.equal(done.tree[0].latestSourceTotal, 10013);
+    assert.equal(done.tree[0].uniqueQuestionCount, 2);
+    assert.equal(done.tree[0].collectedCount, 2);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('total 缺失、非法或与题目矛盾时只忽略展示值，不失败', () => {
+  const missing = parseQuestionListPayload({ code: '0', data: { html: LIST_HTML } });
+  assert.equal(missing.questions[0].externalId, '35020603');
+  assert.equal(missing.total, null);
+
+  const invalid = parseQuestionListPayload({ code: '0', data: { total: 'abc', html: LIST_HTML } });
+  assert.equal(invalid.questions.length, 1);
+  assert.equal(invalid.total, null);
+
+  const contradictory = parseQuestionListPayload({ code: '0', data: { total: 0, html: LIST_HTML } });
+  assert.equal(contradictory.questions.length, 1);
+  assert.equal(contradictory.total, null);
+
+  const emptyKnown = parseQuestionListPayload({ code: '0', data: { total: 0, html: '' } });
+  assert.deepEqual(emptyKnown.questionIds, []);
+  assert.equal(emptyKnown.total, 0);
+
+  assert.equal(parseQuestionListTotalPayload({ code: '0', data: {} }).total, null);
+  const signature = validatePageResult({
+    total: null,
+    questions: [{ externalId: '1' }],
+    questionIds: ['1'],
+  }, 1, null, new Set());
+  assert.equal(typeof signature, 'string');
+});
+
+test('教材根目录 total 探针失败时降级为警告并继续采集', async () => {
+  const { directory, dbPath } = tempDb();
+  const catalogPages = [];
+  const page = mockSyncPage(({ curPage, categoryId }) => {
+    if (categoryId !== '261285') {
+      return { status: 400, headers: {}, text: 'probe failed' };
+    }
+    catalogPages.push(curPage);
+    if (curPage === 1) return { status: 200, headers: {}, text: JSON.stringify({ code: '0', data: { html: listHtml('96000001') } }) };
+    return { status: 200, headers: {}, text: JSON.stringify({ code: '0', data: { html: '' } }) };
+  });
+  try {
+    const result = await runSync(baseSyncOptions(directory, dbPath), {
+      context: {},
+      page,
+      catalogTree: SAMPLE_TREE,
+    });
+    assert.equal(result.status, 'success');
+    assert.ok(catalogPages.includes(1) && catalogPages.includes(2));
+    assert.equal(result.completeness.counts.questionCount, 1);
+    const replay = new QuestionSyncStore(dbPath, { dataDir: directory });
+    try {
+      const scope = JSON.parse(replay.getRun(result.runId).scope_json);
+      assert.equal(scope.textbookExpectedTotal, null);
+      assert.equal(scope.summaryStrategy, 'textbook_root_probe_unavailable');
+    } finally {
+      replay.close();
+    }
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('分页 total=0 但页面有题时继续抓取，空页仍结束目录', async () => {
+  const { directory, dbPath } = tempDb();
+  const catalogPages = [];
+  const page = mockSyncPage(({ curPage, categoryId }) => {
+    if (categoryId !== '261285') {
+      return { status: 200, headers: {}, text: listApiText(0, []) };
+    }
+    catalogPages.push(curPage);
+    if (curPage === 1) return { status: 200, headers: {}, text: listApiText(0, ['97000001']) };
+    return { status: 200, headers: {}, text: listApiText(0, []) };
+  });
+  try {
+    const result = await runSync(baseSyncOptions(directory, dbPath), {
+      context: {},
+      page,
+      catalogTree: SAMPLE_TREE,
+    });
+    assert.equal(result.status, 'success');
+    assert.ok(catalogPages.includes(1) && catalogPages.includes(2));
+    assert.equal(result.completeness.counts.questionCount, 1);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('列表默认 8 路并发请求，空页仍结束目录', async () => {
+  const { directory, dbPath } = tempDb();
+  const catalogPages = [];
+  const page = mockSyncPage(({ curPage, categoryId }) => {
+    if (categoryId !== '261285') {
+      return { status: 200, headers: {}, text: listApiText(40, ['35020603']) };
+    }
+    catalogPages.push(curPage);
+    if (curPage <= 2) {
+      return { status: 200, headers: {}, text: listApiText(40, [`9800000${curPage}`]) };
+    }
+    return { status: 200, headers: {}, text: listApiText(40, []) };
+  });
+  try {
+    const result = await runSync(baseSyncOptions(directory, dbPath), {
+      context: {},
+      page,
+      catalogTree: SAMPLE_TREE,
+    });
+    assert.equal(result.status, 'success');
+    assert.deepEqual([...new Set(catalogPages)].sort((a, b) => a - b), [1, 2, 3, 4, 5, 6, 7, 8]);
+    assert.equal(result.completeness.counts.questionCount, 2);
+    const replay = new QuestionSyncStore(dbPath, { dataDir: directory });
+    try {
+      assert.equal(replay.getRunCatalogProgress(result.runId, '260617', '261285').lastCompletedPage, 2);
+    } finally {
+      replay.close();
+    }
+    const live = readLiveRunProgress(dbPath, result.runId, { textbookExternalId: '260617' });
+    assert.equal(live.fetchWindows.length, 1);
+    assert.equal(live.fetchWindows[0].catalogExternalId, '261285');
+    assert.equal(live.fetchWindows[0].slots.length, 8);
+    assert.equal(live.fetchWindows[0].slots[0].pageNumber, 1);
+    assert.equal(live.fetchWindows[0].slots[0].status, 'saved');
+    assert.match(String(live.fetchWindows[0].slots[0].line), /catalog=261285 page=1 questions=1 total=40/);
+    assert.equal(live.fetchWindows[0].slots[2].status, 'empty');
+    assert.equal(live.tree[0].current, true);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('风控页会保存此前成功页，并打开全新无痕会话继续剩余页', async () => {
+  const { directory, dbPath } = tempDb();
+  let persistentLaunches = 0;
+  let freshLaunches = 0;
+  const makePage = (blocked) => mockSyncPage(({ curPage, categoryId }) => {
+    if (categoryId !== '261285') {
+      return { status: 200, headers: {}, text: listApiText(20, ['35020603']) };
+    }
+    if (blocked && curPage >= 2) {
+      return { status: 403, headers: {}, text: '<html>验证码</html>' };
+    }
+    if (curPage === 1) return { status: 200, headers: {}, text: listApiText(20, ['99000001']) };
+    if (curPage === 2) return { status: 200, headers: {}, text: listApiText(20, ['99000002']) };
+    return { status: 200, headers: {}, text: listApiText(20, []) };
+  });
+  const firstPage = makePage(true);
+  const secondPage = makePage(false);
+  const makeContext = (current) => ({
+    pages: () => [current],
+    newPage: async () => current,
+    setDefaultTimeout() {},
+    setDefaultNavigationTimeout() {},
+    close: async () => {},
+  });
+  const playwright = {
+    chromium: {
+      launchPersistentContext: async () => {
+        persistentLaunches += 1;
+        return makeContext(firstPage);
+      },
+      launch: async () => {
+        freshLaunches += 1;
+        return {
+          newContext: async () => makeContext(secondPage),
+          close: async () => {},
+        };
+      },
+    },
+  };
+  try {
+    const result = await runSync(baseSyncOptions(directory, dbPath, {
+      profileDir: path.join(directory, 'main-profile'),
+    }), {
+      playwright,
+      catalogTree: SAMPLE_TREE,
+    });
+    assert.equal(result.status, 'success');
+    assert.equal(persistentLaunches, 1);
+    assert.equal(freshLaunches, 1);
+    assert.equal(result.completeness.counts.questionCount, 2);
+    assert.equal(isCookieSwitchError(new VerificationRequiredError('x')), true);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('安全页数上限只标记知识点异常并继续，不作为正常完成', async () => {
+  const { directory, dbPath } = tempDb();
+  const catalogPages = [];
+  const page = mockSyncPage(({ curPage, categoryId }) => {
+    if (categoryId !== '261285') {
+      return { status: 200, headers: {}, text: listApiText(40, ['35020603']) };
+    }
+    catalogPages.push(curPage);
+    return { status: 200, headers: {}, text: listApiText(40, [String(96000000 + curPage)]) };
+  });
+  try {
+    const result = await runSync(baseSyncOptions(directory, dbPath, {
+      maxPages: 1000,
+      maxPagesProvided: false,
+      safetyPageLimit: 3,
+      concurrency: 8,
+    }), {
+      context: {},
+      page,
+      catalogTree: SAMPLE_TREE,
+    });
+    assert.equal(result.status, 'success');
+    assert.equal(Math.max(...catalogPages), 3);
+    assert.ok(!catalogPages.includes(4));
+    assert.equal(result.completeness.scanComplete, true);
+    assert.equal(result.completeness.dataComplete, false);
+    assert.equal(result.completeness.snapshotComplete, false);
+    const replay = new QuestionSyncStore(dbPath, { dataDir: directory });
+    try {
+      const progress = replay.getRunCatalogProgress(result.runId, '260617', '261285');
+      assert.equal(progress.status, 'stalled');
+      assert.equal(progress.stallReason, 'pagination_safety_limit');
+      assert.equal(progress.scanComplete, true);
+      assert.equal(progress.dataComplete, false);
+    } finally {
+      replay.close();
+    }
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('并发窗口中间页失败时仍保存后续成功页', async () => {
+  const { directory, dbPath } = tempDb();
+  const catalogPages = [];
+  const page = mockSyncPage(({ curPage, categoryId }) => {
+    if (categoryId !== '261285') {
+      return { status: 200, headers: {}, text: listApiText(30, ['35020603']) };
+    }
+    catalogPages.push(curPage);
+    if (curPage === 2) return { status: 500, headers: {}, text: 'busy' };
+    if (curPage === 1) return { status: 200, headers: {}, text: listApiText(30, ['98100001']) };
+    if (curPage === 3) return { status: 200, headers: {}, text: listApiText(30, ['98100003']) };
+    return { status: 200, headers: {}, text: listApiText(30, []) };
+  });
+  try {
+    const result = await runSync(baseSyncOptions(directory, dbPath, { concurrency: 8 }), {
+      context: {},
+      page,
+      catalogTree: SAMPLE_TREE,
+    });
+    assert.equal(result.status, 'success');
+    assert.equal(result.completeness.scanComplete, true);
+    assert.equal(result.completeness.dataComplete, false);
+    assert.equal(result.completeness.snapshotComplete, false);
+    assert.ok(catalogPages.includes(1) && catalogPages.includes(3));
+    const replay = new QuestionSyncStore(dbPath, { dataDir: directory });
+    try {
+      const ids = replay.db.prepare(
+        'SELECT question_external_id AS id FROM sync_run_question_items ORDER BY question_external_id',
+      ).all().map((row) => row.id);
+      assert.deepEqual(ids, ['98100001', '98100003']);
+      const pages = replay.db.prepare(
+        'SELECT page_number, result_type FROM sync_run_catalog_pages ORDER BY page_number',
+      ).all();
+      assert.equal(pages.find((row) => Number(row.page_number) === 2).result_type, PAGE_RESULT.REQUEST_FAILED);
+      assert.equal(pages.find((row) => Number(row.page_number) === 3).result_type, PAGE_RESULT.SUCCESS);
+      const progress = replay.getRunCatalogProgress(result.runId, '260617', '261285');
+      assert.equal(progress.lastCompletedPage, 1);
+      assert.ok(progress.highestAttemptedPage >= 3);
+    } finally {
+      replay.close();
+    }
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('目标范围内空页且后续仍有题时继续采集并记为数据异常', async () => {
+  const { directory, dbPath } = tempDb();
+  const page = mockSyncPage(({ curPage, categoryId }) => {
+    if (categoryId !== '261285') {
+      return { status: 200, headers: {}, text: listApiText(40, ['35020603']) };
+    }
+    if (curPage === 1) return { status: 200, headers: {}, text: listApiText(40, ['98200001']) };
+    if (curPage === 2) return { status: 200, headers: {}, text: listApiText(40, []) };
+    if (curPage === 3) return { status: 200, headers: {}, text: listApiText(40, ['98200003']) };
+    return { status: 200, headers: {}, text: listApiText(40, []) };
+  });
+  try {
+    const result = await runSync(baseSyncOptions(directory, dbPath), {
+      context: {},
+      page,
+      catalogTree: SAMPLE_TREE,
+    });
+    assert.equal(result.status, 'success');
+    assert.equal(result.completeness.scanComplete, true);
+    assert.equal(result.completeness.dataComplete, false);
+    const replay = new QuestionSyncStore(dbPath, { dataDir: directory });
+    try {
+      const ids = replay.db.prepare(
+        'SELECT question_external_id AS id FROM sync_run_question_items ORDER BY question_external_id',
+      ).all().map((row) => row.id);
+      assert.deepEqual(ids, ['98200001', '98200003']);
+      const empty = replay.db.prepare(
+        "SELECT page_number FROM sync_run_catalog_pages WHERE result_type = 'empty_page'",
+      ).all();
+      assert.ok(empty.some((row) => Number(row.page_number) === 2));
+    } finally {
+      replay.close();
+    }
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('一个知识点卡死后继续采集下一个知识点', async () => {
+  const { directory, dbPath } = tempDb();
+  const requested = [];
+  const tree = {
+    id: '260617',
+    title: '九年级上册',
+    children: [
+      { id: '261285', title: '第一章', children: [] },
+      { id: '261286', title: '第二章', children: [] },
+    ],
+  };
+  const page = mockSyncPage(({ curPage, categoryId }) => {
+    requested.push(`${categoryId}:${curPage}`);
+    if (categoryId === '261285') {
+      return { status: 200, headers: {}, text: listApiText(30, [`${97000000 + curPage}`]) };
+    }
+    if (categoryId === '261286') {
+      if (curPage === 1) return { status: 200, headers: {}, text: listApiText(10, ['98300001']) };
+      return { status: 200, headers: {}, text: listApiText(10, []) };
+    }
+    return { status: 200, headers: {}, text: listApiText(10, ['35020603']) };
+  });
+  try {
+    const result = await runSync(baseSyncOptions(directory, dbPath, {
+      safetyPageLimit: 3,
+      concurrency: 1,
+    }), {
+      context: {},
+      page,
+      catalogTree: tree,
+    });
+    assert.equal(result.status, 'success');
+    assert.ok(requested.some((item) => item.startsWith('261286:')));
+    const replay = new QuestionSyncStore(dbPath, { dataDir: directory });
+    try {
+      const first = replay.getRunCatalogProgress(result.runId, '260617', '261285');
+      const second = replay.getRunCatalogProgress(result.runId, '260617', '261286');
+      assert.equal(first.status, 'stalled');
+      assert.equal(second.status, 'completed');
+      assert.equal(second.scanComplete, true);
+      assert.equal(replay.db.prepare(
+        "SELECT COUNT(*) AS n FROM sync_run_question_items WHERE question_external_id = '98300001'",
+      ).get().n, 1);
+    } finally {
+      replay.close();
+    }
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('图片下载失败时仍保存题目，并标记数据不完整', async () => {
+  const { directory, dbPath } = tempDb();
+  const page = mockSyncPage(({ curPage, categoryId }) => {
+    if (categoryId !== '261285') {
+      return { status: 200, headers: {}, text: listApiText(10, ['35020603']) };
+    }
+    if (curPage === 1) return { status: 200, headers: {}, text: listApiText(10, ['98400001']) };
+    return { status: 200, headers: {}, text: listApiText(10, []) };
+  });
+  const context = {
+    pages: () => [page],
+    newPage: async () => page,
+    request: {
+      get: async () => {
+        throw Object.assign(new Error('素材 503'), { code: 'asset_http_503' });
+      },
+    },
+  };
+  try {
+    const result = await runSync(baseSyncOptions(directory, dbPath, { downloadAssets: true }), {
+      context,
+      page,
+      catalogTree: SAMPLE_TREE,
+    });
+    assert.equal(result.status, 'success');
+    assert.equal(result.completeness.scanComplete, true);
+    assert.equal(result.completeness.dataComplete, false);
+    assert.equal(result.completeness.snapshotComplete, false);
+    const replay = new QuestionSyncStore(dbPath, { dataDir: directory });
+    try {
+      assert.equal(replay.db.prepare('SELECT COUNT(*) AS n FROM sync_run_question_items').get().n, 1);
+      const asset = replay.db.prepare('SELECT source_url, content_sha256 FROM sync_run_question_assets').get();
+      assert.ok(asset?.source_url);
+      assert.equal(asset.content_sha256, null);
+      const progress = replay.getRunCatalogProgress(result.runId, '260617', '261285');
+      assert.ok(progress.assetErrorCount > 0);
+    } finally {
+      replay.close();
+    }
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+

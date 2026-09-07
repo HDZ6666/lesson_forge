@@ -44,7 +44,7 @@ const {
   listQuestionIdsMatch,
   StopCrawlError,
   SyncStore,
-} = require('../zujuan_sync.cjs');
+} = require('../legacy/zujuan_sync.cjs');
 
 test('题目详情页在第一次真正需要时才创建，后续复用', async () => {
   let created = 0;
@@ -407,7 +407,7 @@ test('列表等待同时接受题目和明确的空目录状态', () => {
 
 test('每日批处理脚本按 shell 参数安全传递筛选条件', () => {
   const script = require('node:fs').readFileSync(
-    require('node:path').join(__dirname, '..', 'zujuan_sync_daily.sh'),
+    require('node:path').join(__dirname, '..', 'legacy', 'zujuan_sync_daily.sh'),
     'utf8',
   );
   assert.match(script, /run_sync --scene 作业/);

@@ -205,6 +205,43 @@ def test_task_payload_reads_camel_case_acknowledgement_without_defaulting_to_tru
     assert payload['acknowledgeSourcePolicy'] is False
 
 
+def test_task_payload_keeps_fetch_windows_in_live_progress() -> None:
+    payload = task_service.task_payload(
+        {
+            'runId': TASK_ID,
+            'taskModule': 'question',
+            'runType': 'content',
+            'status': 'running',
+            'optionsJson': {
+                'liveProgressByScope': {
+                    '260617': {
+                        'available': True,
+                        'fetchWindows': [
+                            {
+                                'catalogExternalId': '261285',
+                                'catalogName': '1.2 探索规律',
+                                'slots': [
+                                    {
+                                        'slot': 1,
+                                        'pageNumber': 47,
+                                        'status': 'saved',
+                                        'line': 'catalog=261285 page=47 questions=10 total=10028',
+                                    },
+                                ],
+                            },
+                        ],
+                        'tree': [],
+                    },
+                },
+            },
+        }
+    )
+
+    windows = payload['liveProgressByScope']['260617']['fetchWindows']
+    assert windows[0]['catalogExternalId'] == '261285'
+    assert windows[0]['slots'][0]['pageNumber'] == 47
+
+
 def test_blocked_question_task_projects_safe_resume_and_scope_counts() -> None:
     row = SimpleNamespace(
         run_id=12,

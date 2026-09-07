@@ -4,7 +4,7 @@
 # checkpoint store; never run these five crawls concurrently.
 set -eu
 
-COLLECTOR_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+COLLECTOR_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 if [ -z "${NODE_BIN:-}" ]; then
   NODE_BIN=$(command -v node || true)
 fi
@@ -20,7 +20,7 @@ MAX_PAGES=${ZUJUAN_MAX_PAGES:-3}
 
 cd "$COLLECTOR_DIR"
 run_sync() {
-  "$NODE_BIN" "$COLLECTOR_DIR/zujuan_sync.cjs" \
+  "$NODE_BIN" "$COLLECTOR_DIR/legacy/zujuan_sync.cjs" \
     --acknowledge-source-policy \
     --chapter-id 261314 \
     --max-pages "$MAX_PAGES" \

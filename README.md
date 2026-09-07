@@ -21,6 +21,8 @@
 
 | 内容 | 路径 |
 | --- | --- |
+| 最新三端进度 | [项目进度总览](docs/sync-task-progress.md) |
+| 真实采集问题 | [采集端实际问题](docs/采集端实际问题.md) |
 | Word 题库规范 | [`docs/word/规范.md`](docs/word/规范.md) |
 | 题库与抽题设计 | [`docs/简化版题库数据库与教案抽题设计方案.md`](docs/简化版题库数据库与教案抽题设计方案.md) |
 | 组卷网同步脚本 | [`docs/题库同步脚本说明.md`](docs/题库同步脚本说明.md) |
@@ -41,7 +43,7 @@ BANK_COLLECTOR_URL=http://127.0.0.1:9110
 
 生产部署必须配置 `BANK_COLLECTOR_URL` 和 `BANK_COLLECTOR_TOKEN`；collector 对外绑定非本机地址时也必须配置 `COLLECTOR_API_TOKEN`。
 
-题库插件的“同步中心”分两阶段：先刷新版本与教材，再由用户选择教材后提交内容同步。采集结果只进入 `collector/data/zujuan.sqlite3` 候选库，须审核；发布时 service 通过 HTTP 分页读取不可变快照，并经 SHA-256 校验下载素材到自身存储后，才会进入正式题库。
+题库插件保留“同步中心”两阶段流程，并提供独立的“同步教材”“同步题库”任务。来源为无需登录的公开页面和接口。采集结果先进入 Collector 候选快照，不自动覆盖正式题库。正式写入有任务应用与离线 qbpkg/Publisher 两条路径；任务应用通过 HTTP 读取完整快照并校验、下载素材后，再事务性写入正式表。
 
 管理端链路：
 
@@ -49,10 +51,10 @@ BANK_COLLECTOR_URL=http://127.0.0.1:9110
 pc -> service /bank/sync/*
    -> collector HTTP API /v1/jobs
       -> zujuan_metadata_sync.cjs（版本/教材）
-      -> zujuan_sync.cjs --all-catalogs（目录/题目）
+      -> zujuan_question_sync.cjs（当前目录/题目入口）
       -> collector/data/zujuan.sqlite3
    <- collector HTTP API 候选快照/进度
-   -> MySQL 对比/审核/发布批次
+   -> 对比、任务应用 / 离线包发布 -> MySQL 正式题库
 ```
 
 直接调试采集器仍可使用：
@@ -61,7 +63,7 @@ pc -> service /bank/sync/*
 cd collector
 npm install
 npm test
-npm run sync:zujuan -- --acknowledge-source-policy --chapter-id 261314 --max-pages 1 --limit 1 --headful
+npm run sync:zujuan:questions -- --help
 ```
 
 详细参数见同步脚本说明。默认结果写入 `collector/data/zujuan.sqlite3`。

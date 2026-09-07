@@ -332,6 +332,82 @@ const normalizeLogs = (value) => {
   return String(value).split(/\r?\n/).map((line) => line.trimEnd()).filter(Boolean).slice(-100)
 }
 
+const flattenLogLines = (logs) => {
+  const lines = []
+  const source = Array.isArray(logs) ? logs : [logs]
+  source.forEach((item) => {
+    String(item || '').split(/\r?\n/).forEach((line) => {
+      const text = String(line || '').trim()
+      if (text) lines.push(text)
+    })
+  })
+  return lines
+}
+
+export function parseFetchWindowsFromLogs(logs, slotLimit = 8) {
+  const limit = Math.max(1, Number(slotLimit) || 8)
+  const rows = []
+  flattenLogLines(logs).forEach((text) => {
+    const catalogMatch = text.match(/catalog=([^\s]+)/)
+    const pageMatch = text.match(/\bpage=(\d+)/)
+    if (!catalogMatch || !pageMatch) return
+    const questionsMatch = text.match(/\bquestions=(\d+)/)
+    const totalMatch = text.match(/\btotal=(\d+|null)/)
+    let status = 'saved'
+    if (/empty=/.test(text) || /\bempty\b/.test(text)) status = 'empty'
+    else if (/duplicate/.test(text)) status = 'duplicate'
+    else if (/fail|request_failed|parse_failed/.test(text)) status = 'failed'
+    else if (/抓取中/.test(text)) status = 'fetching'
+    const catalogExternalId = catalogMatch[1]
+    const pageNumber = Number(pageMatch[1])
+    const questionCount = questionsMatch ? Number(questionsMatch[1]) : null
+    const sourceTotal = !totalMatch || totalMatch[1] === 'null' ? null : Number(totalMatch[1])
+    rows.push({
+      catalogExternalId,
+      pageNumber,
+      questionCount,
+      sourceTotal,
+      status,
+      line: `catalog=${catalogExternalId} page=${pageNumber}`
+        + (questionCount == null ? '' : ` questions=${questionCount}`)
+        + (sourceTotal == null ? '' : ` total=${sourceTotal}`),
+    })
+  })
+  if (!rows.length) return []
+  const catalogId = rows[rows.length - 1].catalogExternalId
+  const recent = []
+  for (let index = rows.length - 1; index >= 0; index -= 1) {
+    if (rows[index].catalogExternalId !== catalogId) break
+    recent.push(rows[index])
+    if (recent.length >= limit) break
+  }
+  recent.reverse()
+  const byPage = new Map()
+  recent.forEach((row) => { byPage.set(row.pageNumber, row) })
+  const unique = [...byPage.values()].sort((left, right) => left.pageNumber - right.pageNumber)
+  return [{
+    catalogExternalId: catalogId,
+    catalogName: catalogId,
+    latestSourceTotal: unique[unique.length - 1]?.sourceTotal ?? null,
+    slots: unique.map((row, index) => ({
+      slot: index + 1,
+      pageNumber: row.pageNumber,
+      status: row.status,
+      questionCount: row.questionCount,
+      sourceTotal: row.sourceTotal,
+      line: row.line,
+    })),
+  }]
+}
+
+export function resolveVisibleFetchWindows(liveProjection, logs, slotLimit = 8) {
+  const liveWindows = Array.isArray(liveProjection?.fetchWindows)
+    ? liveProjection.fetchWindows.filter((window) => Array.isArray(window?.slots) && window.slots.length)
+    : []
+  if (liveWindows.length) return liveWindows
+  return parseFetchWindowsFromLogs(logs, slotLimit)
+}
+
 const numberOrNull = (value) => {
   if (value === undefined || value === null || value === '') return null
   const number = Number(value)
@@ -346,8 +422,9 @@ const normalizeLiveTreeNode = (item, index = 0, depth = 0) => {
   const children = Array.isArray(rawChildren)
     ? rawChildren.map((child, childIndex) => normalizeLiveTreeNode(child, childIndex, depth + 1)).filter(Boolean)
     : []
-  const expectedTotal = numberOrNull(firstTaskField(item, ['expectedTotal', 'expected', 'total', 'expected_total'], null))
-  const collectedCount = numberOrZero(firstTaskField(item, ['collectedCount', 'collected', 'listSeenCount', 'list_seen_count', 'questionCount', 'question_count'], 0))
+  const expectedTotal = numberOrNull(firstTaskField(item, ['latestSourceTotal', 'sourceReportedTotal', 'expectedTotal', 'expected', 'total', 'expected_total'], null))
+  const uniqueQuestionCount = numberOrZero(firstTaskField(item, ['uniqueQuestionCount', 'collectedCount', 'collected', 'questionCount', 'question_count'], 0))
+  const occurrenceCount = numberOrZero(firstTaskField(item, ['occurrenceCount', 'listSeenCount', 'list_seen_count'], uniqueQuestionCount))
   return {
     ...item,
     nodeKey: String(firstTaskField(item, ['nodeKey', 'node_key'], externalId || `live-node-${index}`) || externalId || `live-node-${index}`),
@@ -361,12 +438,27 @@ const normalizeLiveTreeNode = (item, index = 0, depth = 0) => {
     expectedTotal,
     expected: expectedTotal,
     total: expectedTotal,
-    collectedCount,
-    collected: collectedCount,
-    listSeenCount: collectedCount,
-    questionCount: collectedCount,
-    expectedPages: numberOrNull(firstTaskField(item, ['expectedPages', 'expected_pages'], null)),
+    latestSourceTotal: expectedTotal,
+    sourceReportedTotal: expectedTotal,
+    collectedCount: uniqueQuestionCount,
+    collected: uniqueQuestionCount,
+    uniqueQuestionCount,
+    occurrenceCount,
+    listSeenCount: occurrenceCount,
+    questionCount: uniqueQuestionCount,
+    expectedPages: numberOrNull(firstTaskField(item, ['targetPages', 'expectedPages', 'expected_pages', 'target_pages'], null)),
+    targetPages: numberOrNull(firstTaskField(item, ['targetPages', 'target_pages', 'expectedPages', 'expected_pages'], null)),
+    attemptedPages: numberOrZero(firstTaskField(item, ['attemptedPages', 'attempted_pages'], 0)),
     lastCompletedPage: numberOrZero(firstTaskField(item, ['lastCompletedPage', 'last_completed_page'], 0)),
+    highestAttemptedPage: numberOrZero(firstTaskField(item, ['highestAttemptedPage', 'highest_attempted_page'], 0)),
+    failedPageCount: numberOrZero(firstTaskField(item, ['failedPageCount', 'failed_page_count'], 0)),
+    duplicatePageCount: numberOrZero(firstTaskField(item, ['duplicatePageCount', 'duplicate_page_count'], 0)),
+    emptyPageCount: numberOrZero(firstTaskField(item, ['emptyPageCount', 'empty_page_count'], 0)),
+    parseErrorCount: numberOrZero(firstTaskField(item, ['parseErrorCount', 'parse_error_count'], 0)),
+    assetErrorCount: numberOrZero(firstTaskField(item, ['assetErrorCount', 'asset_error_count'], 0)),
+    scanComplete: booleanValue(firstTaskField(item, ['scanComplete', 'scan_complete'], false), false),
+    dataComplete: booleanValue(firstTaskField(item, ['dataComplete', 'data_complete'], true), true),
+    completionQuality: firstTaskField(item, ['completionQuality', 'completion_quality'], null),
     status: String(firstTaskField(item, ['status', 'state'], 'pending') || 'pending'),
     queried: booleanValue(firstTaskField(item, ['queried', 'hasProgress', 'has_progress'], expectedTotal !== null), expectedTotal !== null),
     hasProgress: booleanValue(firstTaskField(item, ['hasProgress', 'has_progress', 'queried'], expectedTotal !== null), expectedTotal !== null),
@@ -383,6 +475,31 @@ const normalizeLiveProjection = (value) => {
   const totalQuestionCount = numberOrNull(firstTaskField(value, ['totalQuestionCount', 'expectedQuestionCount', 'total_question_count', 'expected_question_count'], null))
   const collectedQuestionCount = numberOrNull(firstTaskField(value, ['collectedQuestionCount', 'uniqueQuestionCount', 'listSeenCount', 'collected_question_count', 'unique_question_count', 'list_seen_count'], null))
   const progressPercent = numberOrNull(firstTaskField(value, ['progressPercent', 'progress_percent', 'progress'], null))
+  const rawWindows = firstTaskField(value, ['fetchWindows', 'fetch_windows'], [])
+  const fetchWindows = Array.isArray(rawWindows)
+    ? rawWindows.map((window, index) => {
+      const catalogExternalId = String(firstTaskField(window, ['catalogExternalId', 'catalog_external_id'], '') || '')
+      const slots = Array.isArray(window?.slots) ? window.slots.map((slot, slotIndex) => ({
+        slot: numberOrZero(firstTaskField(slot, ['slot', 'workerId', 'worker_id'], slotIndex + 1)),
+        pageNumber: numberOrNull(firstTaskField(slot, ['pageNumber', 'page_number', 'currentPage'], null)),
+        status: String(firstTaskField(slot, ['status', 'slot_status'], 'fetching') || 'fetching'),
+        questionCount: numberOrNull(firstTaskField(slot, ['questionCount', 'question_count'], null)),
+        resultType: firstTaskField(slot, ['resultType', 'result_type'], null),
+        sourceTotal: numberOrNull(firstTaskField(slot, ['sourceTotal', 'source_total', 'latestSourceTotal'], null)),
+        line: String(firstTaskField(slot, ['line', 'message'], '') || ''),
+        updatedAt: firstTaskField(slot, ['updatedAt', 'updated_at'], null),
+      })) : []
+      return {
+        catalogExternalId,
+        catalogName: String(firstTaskField(window, ['catalogName', 'catalog_name', 'name'], catalogExternalId || `窗口 ${index + 1}`) || ''),
+        catalogPath: firstTaskField(window, ['catalogPath', 'catalog_path'], null),
+        targetPages: numberOrNull(firstTaskField(window, ['targetPages', 'target_pages'], null)),
+        latestSourceTotal: numberOrNull(firstTaskField(window, ['latestSourceTotal', 'sourceReportedTotal', 'expectedTotal'], null)),
+        updatedAt: firstTaskField(window, ['updatedAt', 'updated_at'], null),
+        slots,
+      }
+    }).filter((window) => window.slots.length)
+    : []
   const normalizedValue = Object.fromEntries(Object.entries(value).filter(([key]) => (
     !['tree', 'catalogs', 'catalogTree', 'catalog_tree'].includes(key)
   )))
@@ -397,6 +514,10 @@ const normalizeLiveProjection = (value) => {
     listSeenCount: collectedQuestionCount,
     progressPercent,
     progress: progressPercent,
+    scanComplete: booleanValue(firstTaskField(value, ['scanComplete', 'scan_complete'], false), false),
+    dataComplete: booleanValue(firstTaskField(value, ['dataComplete', 'data_complete'], true), true),
+    completionQuality: firstTaskField(value, ['completionQuality', 'completion_quality'], null),
+    snapshotComplete: booleanValue(firstTaskField(value, ['snapshotComplete', 'snapshot_complete'], false), false),
     firstRoundComplete: booleanValue(firstTaskField(value, ['firstRoundComplete', 'first_round_complete'], totalQuestionCount !== null), totalQuestionCount !== null),
     totalsKnown: booleanValue(firstTaskField(value, ['totalsKnown', 'totals_known'], totalQuestionCount !== null), totalQuestionCount !== null),
     statisticsPending: booleanValue(firstTaskField(value, ['statisticsPending', 'statistics_pending'], totalQuestionCount === null), totalQuestionCount === null),
@@ -405,6 +526,7 @@ const normalizeLiveProjection = (value) => {
     secondaryKnowledgePointCount: numberOrZero(firstTaskField(value, ['secondaryKnowledgePointCount', 'secondary_knowledge_point_count'], 0)),
     catalogCount: numberOrZero(firstTaskField(value, ['catalogCount', 'catalog_count'], tree.length)),
     tree,
+    fetchWindows,
   }
 }
 

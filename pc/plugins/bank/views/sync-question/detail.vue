@@ -53,6 +53,38 @@
       当前任务暂不可应用：{{ task.eligibilityMessage }}
     </el-alert>
 
+    <section v-if="task" class="task-summary panel" v-loading="loading">
+      <div class="status-line">
+        <div><span class="task-number">{{ liveScopeTitle }}</span><el-tag :type="syncTaskStatusMeta(task.status).type">{{ syncTaskStatusMeta(task.status).label }}</el-tag></div>
+        <span class="progress-copy">{{ summaryProgressLabel }}</span>
+      </div>
+      <el-progress :percentage="summaryProgressBar" :status="progressStatus" :stroke-width="10" :format="summaryProgressFormat" />
+      <div class="summary-stat-grid">
+        <div class="summary-stat"><span>章节</span><strong>{{ liveStats.chapterCount }}</strong></div>
+        <div class="summary-stat"><span>知识点</span><strong>{{ liveStats.knowledgePointCount }}</strong></div>
+        <div class="summary-stat"><span>二级知识点</span><strong>{{ liveStats.secondaryKnowledgePointCount }}</strong></div>
+        <div class="summary-stat summary-stat-wide"><span>总题目</span><strong>{{ summaryTotalQuestionText }}</strong></div>
+        <div class="summary-stat summary-stat-wide"><span>已采集</span><strong>{{ summaryCollectedQuestionText }}</strong></div>
+      </div>
+      <div class="summary-time-line">
+        <span>开始时间：{{ formatTaskTime(summaryStartedAt) }}</span>
+        <span>结束时间：{{ summaryFinishedAt }}</span>
+      </div>
+      <el-alert v-if="task.errorMessage" class="inner-alert" type="error" :closable="false" show-icon>{{ task.errorMessage }}</el-alert>
+      <section class="log-panel fetch-window-log" aria-label="当前抓取窗口">
+        <div class="section-heading">
+          <h3>当前 {{ fetchWindowSlotCount }} 路窗口</h3>
+          <span>{{ fetchWindowTitle || '与运行日志同步刷新' }}</span>
+        </div>
+        <pre>{{ fetchWindowLogText }}</pre>
+      </section>
+      <section class="log-panel">
+        <div class="section-heading"><h3>运行日志</h3><span>自动刷新最后 100 条</span></div>
+        <pre v-if="task.logs.length">{{ task.logs.join('\n') }}</pre>
+        <el-empty v-else :image-size="54" description="暂无运行日志" />
+      </section>
+    </section>
+
     <section v-if="task" class="live-catalog-panel panel" aria-label="动态目录树">
       <div class="workspace-heading live-workspace-heading">
         <div>
@@ -85,7 +117,7 @@
           :expand-on-click-node="false"
         >
           <template #default="{ data }">
-            <span class="live-catalog-node">
+            <span class="live-catalog-node" :class="{ 'is-current': Boolean(data.current) }">
               <span class="node-label">{{ data.label }}</span>
               <span class="live-node-count">{{ liveNodeCountText(data) }}</span>
             </span>
@@ -97,31 +129,6 @@
           :description="liveTreeEmptyText"
         />
       </div>
-    </section>
-
-    <section v-if="task" class="task-summary panel" v-loading="loading">
-      <div class="status-line">
-        <div><span class="task-number">{{ liveScopeTitle }}</span><el-tag :type="syncTaskStatusMeta(task.status).type">{{ syncTaskStatusMeta(task.status).label }}</el-tag></div>
-        <span class="progress-copy">{{ summaryProgressLabel }}</span>
-      </div>
-      <el-progress :percentage="summaryProgressBar" :status="progressStatus" :stroke-width="10" :format="summaryProgressFormat" />
-      <div class="summary-stat-grid">
-        <div class="summary-stat"><span>章节</span><strong>{{ liveStats.chapterCount }}</strong></div>
-        <div class="summary-stat"><span>知识点</span><strong>{{ liveStats.knowledgePointCount }}</strong></div>
-        <div class="summary-stat"><span>二级知识点</span><strong>{{ liveStats.secondaryKnowledgePointCount }}</strong></div>
-        <div class="summary-stat summary-stat-wide"><span>总题目</span><strong>{{ summaryTotalQuestionText }}</strong></div>
-        <div class="summary-stat summary-stat-wide"><span>已采集</span><strong>{{ summaryCollectedQuestionText }}</strong></div>
-      </div>
-      <div class="summary-time-line">
-        <span>开始时间：{{ formatTaskTime(summaryStartedAt) }}</span>
-        <span>结束时间：{{ summaryFinishedAt }}</span>
-      </div>
-      <el-alert v-if="task.errorMessage" class="inner-alert" type="error" :closable="false" show-icon>{{ task.errorMessage }}</el-alert>
-      <section class="log-panel">
-        <div class="section-heading"><h3>运行日志</h3><span>自动刷新最后 100 条</span></div>
-        <pre v-if="task.logs.length">{{ task.logs.join('\n') }}</pre>
-        <el-empty v-else :image-size="54" description="暂无运行日志" />
-      </section>
     </section>
 
     <section v-if="task && task.status === 'completed'" class="comparison-workspace panel">
@@ -267,6 +274,7 @@ import {
   questionApplyStateToken,
   questionApplyVerb,
   questionApplyWillReplace,
+  resolveVisibleFetchWindows,
   syncTaskErrorMessage,
   syncTaskStatusMeta,
   unwrapSyncTask,
@@ -430,6 +438,13 @@ const affectedTextbookLabel = computed(() => {
 const currentFormalSummary = computed(() => questionApplyCurrentTaskSummary(task.value || {}))
 const completedStateMessage = computed(() => {
   if (task.value?.isCurrent) return '采集已完成，且本任务快照已应用为当前正式题库。'
+  const live = liveProjection.value
+  const dataIncomplete = live?.dataComplete === false
+    || live?.completionQuality === 'completed_with_issues'
+    || task.value?.snapshotComplete === false
+  if (dataIncomplete && task.value?.status === 'completed') {
+    return '页面扫描已完成，但存在失败页、重复页或素材异常，当前快照不能直接覆盖正式题库。'
+  }
   if (task.value?.eligible) return `采集已完成。请先核对下方快照差异，再确认${questionApplyVerb(task.value)}正式题库快照。`
   return '采集已完成，但当前快照暂不可应用。'
 })
@@ -485,12 +500,83 @@ function comparisonTreeAsLive(nodes, depth = 0) {
   })
 }
 
+const visibleFetchWindows = computed(() => (
+  resolveVisibleFetchWindows(liveProjection.value, task.value?.logs, 8)
+))
+const fetchWindowSlotCount = computed(() => {
+  const counts = visibleFetchWindows.value.map((window) => (window.slots || []).length)
+  if (counts.length) return Math.max(8, ...counts)
+  return isActiveSyncTask(task.value?.status) ? 8 : 0
+})
+const fetchWindowTitle = computed(() => {
+  const window = visibleFetchWindows.value[0]
+  if (!window) return isActiveSyncTask(task.value?.status) ? '等待列表窗口' : ''
+  const name = window.catalogName || window.catalogExternalId || ''
+  const id = window.catalogExternalId && window.catalogExternalId !== name ? ` · catalog=${window.catalogExternalId}` : ''
+  const total = window.latestSourceTotal == null ? '' : ` · total=${window.latestSourceTotal}`
+  return `${name}${id}${total}`
+})
+const fetchWindowLogText = computed(() => {
+  const windows = visibleFetchWindows.value
+  const active = isActiveSyncTask(task.value?.status)
+  if (!windows.length) {
+    if (!active) return '当前没有进行中的抓取窗口'
+    return Array.from({ length: 8 }, (_, index) => `[${index + 1}] 等待抓取`).join('\n')
+  }
+  const lines = []
+  windows.forEach((window) => {
+    const slots = [...(window.slots || [])]
+    while (active && slots.length < 8) {
+      slots.push({ slot: slots.length + 1, status: 'idle', line: '等待抓取' })
+    }
+    slots.forEach((slot) => {
+      lines.push(`[${slot.slot}] ${fetchSlotLine(window, slot)}  ${fetchSlotStatusLabel(slot.status)}`)
+    })
+  })
+  return lines.join('\n')
+})
+
+function fetchSlotStatusLabel(status) {
+  if (status === 'saved') return '已保存'
+  if (status === 'empty') return '空页'
+  if (status === 'duplicate') return '重复页'
+  if (status === 'failed') return '失败'
+  if (status === 'idle') return '空闲'
+  return '抓取中'
+}
+
+function fetchSlotLine(window, slot) {
+  if (slot?.line) return slot.line
+  const catalog = window?.catalogExternalId || window?.catalogName || ''
+  const page = slot?.pageNumber == null ? '—' : slot.pageNumber
+  const questions = slot?.questionCount == null ? '' : ` questions=${slot.questionCount}`
+  const total = slot?.sourceTotal == null && window?.latestSourceTotal == null
+    ? ''
+    : ` total=${slot?.sourceTotal ?? window.latestSourceTotal}`
+  return `catalog=${catalog} page=${page}${questions}${total}`
+}
+
 function liveNodeCountText(node) {
-  const collected = formatLiveCount(node?.collectedCount ?? node?.collected ?? node?.listSeenCount ?? node?.questionCount ?? 0)
-  const expected = node?.expectedTotal ?? node?.expected ?? node?.total
+  const unique = formatLiveCount(node?.uniqueQuestionCount ?? node?.collectedCount ?? node?.collected ?? node?.questionCount ?? 0)
+  const expected = node?.latestSourceTotal ?? node?.sourceReportedTotal ?? node?.expectedTotal ?? node?.expected ?? node?.total
   const queried = node?.queried ?? node?.hasProgress ?? expected != null
   if (!queried || (expected == null && String(node?.status || 'pending') === 'pending')) return '暂未获取'
-  return expected == null ? `${collected} / 统计中` : `${collected} / ${formatLiveCount(expected)}`
+  const attempted = Number(node?.attemptedPages ?? node?.highestAttemptedPage ?? 0)
+  const target = node?.targetPages ?? node?.expectedPages
+  const pagePart = target == null || target === '' ? '' : ` · ${attempted}/${Number(target)} 页`
+  const issues = [
+    Number(node?.failedPageCount || 0) > 0 ? `失败${Number(node.failedPageCount)}` : '',
+    Number(node?.duplicatePageCount || 0) > 0 ? `重复${Number(node.duplicatePageCount)}` : '',
+    Number(node?.emptyPageCount || 0) > 0 ? `空页${Number(node.emptyPageCount)}` : '',
+    Number(node?.parseErrorCount || 0) > 0 ? `解析${Number(node.parseErrorCount)}` : '',
+    Number(node?.assetErrorCount || 0) > 0 ? `素材${Number(node.assetErrorCount)}` : '',
+  ].filter(Boolean)
+  const issuePart = issues.length ? ` · ${issues.join(' ')}` : ''
+  const integrity = node?.scanComplete
+    ? (node?.dataComplete === false || node?.completionQuality === 'completed_with_issues' ? ' · 数据不完整' : '')
+    : ''
+  const countPart = expected == null ? `${unique} / 统计中` : `${unique} / ${formatLiveCount(expected)}`
+  return `${countPart}${pagePart}${issuePart}${integrity}`
 }
 
 function summaryProgressFormat() { return summaryProgressLabel.value }
@@ -797,6 +883,7 @@ onBeforeUnmount(() => { mounted = false; clearPoll() })
 .section-heading h3, .workspace-heading h3 { margin: 0; font-size: 15px; }
 .section-heading span, .tree-toolbar, .pane-heading span { color: var(--el-text-color-secondary); font-size: 12px; }
 .log-panel pre { max-height: 260px; margin: 0; overflow: auto; padding: 12px; border-radius: 6px; background: var(--el-fill-color-extra-light); white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.65 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.log-panel.fetch-window-log pre { max-height: none; border: 1px solid var(--el-color-primary-light-5); background: var(--el-color-primary-light-9); }
 .workspace-heading { align-items: flex-start; padding-bottom: 12px; border-bottom: 1px solid var(--el-border-color-lighter); }
 .workspace-heading p { margin: 5px 0 0; color: var(--el-text-color-secondary); font-size: 12px; }
 .scope-select { width: min(380px, 48%); }
@@ -804,6 +891,7 @@ onBeforeUnmount(() => { mounted = false; clearPoll() })
 .live-stat-pending { color: var(--el-color-warning); }
 .live-tree-scroll { min-height: 220px; max-height: min(560px, calc(100vh - 370px)); overflow: auto; padding: 8px 4px; }
 .live-catalog-node { display: flex; min-width: 0; flex: 1; align-items: center; justify-content: space-between; gap: 12px; padding: 3px 5px; border-radius: 4px; }
+.live-catalog-node.is-current { background: var(--el-color-primary-light-9); }
 .live-node-count { flex: 0 0 auto; color: var(--el-text-color-secondary); font-size: 12px; font-variant-numeric: tabular-nums; }
 .comparison-tabs { margin-top: 8px; }
 .comparison-workspace { margin-bottom: 16px; }
