@@ -232,6 +232,8 @@ function publicJob(job, options = {}) {
     errorCode: job.errorCode || null,
     waitingReason: job.waitingReason || null,
     waitingSince: job.waitingSince || null,
+    childRssMb: job.childRssMb == null ? null : Number(job.childRssMb),
+    childRssPeakMb: job.childRssPeakMb == null ? null : Number(job.childRssPeakMb),
     startedAt: job.startedAt,
     finishedAt: job.finishedAt,
     createdAt: job.createdAt,

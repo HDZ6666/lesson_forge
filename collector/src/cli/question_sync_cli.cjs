@@ -11,6 +11,7 @@ const process = require('node:process');
 
 const {
   DEFAULT_API_PATH,
+  DEFAULT_ASSET_CONCURRENCY,
   DEFAULT_BANK_ID,
   DEFAULT_BANK_PATH,
   DEFAULT_BASE_URL,
@@ -23,6 +24,7 @@ const {
   DEFAULT_VERIFICATION_POLL,
   DEFAULT_VERIFICATION_PROBE_INTERVAL,
   DEFAULT_VERIFICATION_TIMEOUT,
+  MAX_ASSET_CONCURRENCY,
   MAX_LIST_CONCURRENCY,
   MAX_SESSION_SWITCHES,
   SITE_PAGE_LIMIT,
@@ -52,6 +54,7 @@ function usage() {
   --safety-page-limit <n> 分页安全上限，默认 10000，只防止无限非空页
   --limit <n>             本次最多保存题数，便于验收；0 表示不限
   --concurrency <n>       同一 Cookie 列表并发路数，默认 8，最大 16
+  --asset-concurrency <n> 素材（题图/公式）预取并发数，默认 8，最大 32；只作用于静态素材主机
 
 运行选项：
   --headless              显式使用无头 Chrome；默认有头 Chrome
@@ -113,6 +116,7 @@ function parseArgs(argv = []) {
     profileDir: path.resolve(projectRoot, '.cache/zujuan-sync-profile'),
     fallbackProfileDirs: [],
     concurrency: DEFAULT_LIST_CONCURRENCY,
+    assetConcurrency: DEFAULT_ASSET_CONCURRENCY,
     eventsStdout: false,
     statusOnly: false,
     help: false,
@@ -166,6 +170,7 @@ function parseArgs(argv = []) {
         index += 1;
         break;
       case '--concurrency': options.concurrency = parsePositiveInt(needValue(index, flag), flag); index += 1; break;
+      case '--asset-concurrency': options.assetConcurrency = parsePositiveInt(needValue(index, flag), flag); index += 1; break;
       // Diagnostic only: mirror structured job events to stdout as
       // `@@event {json}` lines.  The API manager uses the IPC channel.
       case '--events-stdout': options.eventsStdout = true; break;
@@ -190,6 +195,9 @@ function parseArgs(argv = []) {
   }
   if (options.concurrency > MAX_LIST_CONCURRENCY) {
     throw new Error(`--concurrency 不能超过 ${MAX_LIST_CONCURRENCY}。`);
+  }
+  if (options.assetConcurrency > MAX_ASSET_CONCURRENCY) {
+    throw new Error(`--asset-concurrency 不能超过 ${MAX_ASSET_CONCURRENCY}。`);
   }
   if (!options.resume && options.resumeRunId != null) {
     throw new Error('--resume-run-id 不能与 --no-resume 同时使用。');

@@ -10,6 +10,7 @@
  */
 
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const process = require('node:process');
 
@@ -200,7 +201,62 @@ function createCollectorPageFactory(context, options) {
   };
 }
 
+const SINGLETON_FILES = ['SingletonLock', 'SingletonSocket', 'SingletonCookie'];
+
+function pidAlive(pid) {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code === 'EPERM';
+  }
+}
+
+/**
+ * Chrome refuses to open a persistent profile whose `SingletonLock` names a
+ * live process, and treats a lock from another hostname as "in use on another
+ * computer" without checking the pid.  After a hard container restart the
+ * old container's hostname/pid stay in the lock and every launch dies with
+ * "Target page, context or browser has been closed".  Remove the lock only
+ * when it is provably stale: different host, or a dead pid on this host.
+ */
+function clearStaleProfileLock(profileDir, { hostname = os.hostname(), isAlive = pidAlive } = {}) {
+  const root = String(profileDir || '').trim();
+  if (!root) return { cleared: false, reason: 'no_profile' };
+  const lockPath = path.join(root, 'SingletonLock');
+  let target;
+  try {
+    target = fs.readlinkSync(lockPath);
+  } catch (error) {
+    if (error?.code === 'ENOENT') return { cleared: false, reason: 'no_lock' };
+    if (error?.code === 'EINVAL') {
+      // Not a symlink (unexpected); leave it to Chrome.
+      return { cleared: false, reason: 'not_symlink' };
+    }
+    return { cleared: false, reason: error?.code || 'unreadable' };
+  }
+  const match = /^(.*)-(\d+)$/.exec(String(target));
+  const lockHost = match ? match[1] : String(target);
+  const lockPid = match ? Number(match[2]) : NaN;
+  const sameHost = lockHost === String(hostname);
+  if (sameHost && isAlive(lockPid)) return { cleared: false, reason: 'live', lockHost, lockPid };
+  for (const name of SINGLETON_FILES) {
+    try { fs.unlinkSync(path.join(root, name)); } catch {}
+  }
+  return {
+    cleared: true,
+    reason: sameHost ? 'dead_pid' : 'other_host',
+    lockHost,
+    lockPid: Number.isSafeInteger(lockPid) ? lockPid : null,
+  };
+}
+
 async function launchCollectorContext(playwright, options) {
+  const stale = clearStaleProfileLock(options.profileDir);
+  if (stale.cleared) {
+    console.warn(`[环境] 清除过期的 Chrome profile 锁（${stale.reason}：${stale.lockHost}-${stale.lockPid ?? '?'}）`);
+  }
   markProfileCleanExit(options.profileDir);
   const launchOptions = {
     channel: 'chrome',
@@ -402,9 +458,11 @@ async function inspectRobots(context, options) {
       failOnStatusCode: false,
     });
     if ([401, 403].includes(response.status())) {
+      try { await response.dispose?.(); } catch {}
       return { status: 'unavailable', reason: `HTTP ${response.status()}` };
     }
     const text = await response.text();
+    try { await response.dispose?.(); } catch {}
     if (!/^\s*user-agent\s*:/im.test(text)) {
       return { status: 'unknown', reason: '返回内容不是可解析的 robots.txt（可能是 JS 防护页）' };
     }
@@ -531,6 +589,7 @@ module.exports = {
   chooseCollectorPage,
   chooseInitialHeadless,
   classifyProtectionState,
+  clearStaleProfileLock,
   closeCollectorContext,
   collectorPageIsBlank,
   collectorPageIsOpen,

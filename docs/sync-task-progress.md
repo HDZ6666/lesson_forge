@@ -81,7 +81,9 @@ PC → Service /bank/sync/* → Collector /v1/jobs
 | 2026-09-02 | 新列表 API 入口 | 220 节点，知识点 223709 首页面 10 题、30 关系、28 标签、47 素材引用；130 项测试。只限页验证，不是整册成功 |
 | 2026-09-03～04 | 扫描与异常策略 | 有修改、部署与讨论记录，最新审核多次中断；未找到对应最终版本完整线上验收结论 |
 | 2026-09-07 | 文档整理 | 源码与历史记录核对；未执行测试或部署 |
-| 2026-09-07 | 计划 3 采集端拆分与运行时机制替换 | Collector `npm test` 174 通过（基线 151）；service 契约相关 pytest 52 通过；导出名、16 条路由、`--help`、既有 schema 对象与基线一致。全部为离线/隔离测试，未做真实采集或部署 |
+| 2026-09-07 | 计划 3 采集端拆分与运行时机制替换 | Collector `npm test` 175 通过（基线 151）；service 契约相关 pytest 52 通过；导出名、16 条路由、`--help`、既有 schema 对象与基线一致。全部为离线/隔离测试 |
+| 2026-09-07 | 生产部署 collector（release `20260907-174521`） | 仅重建并切换 `lesson-forge-collector` 容器，service/pc/nginx/mysql/redis 未动；切换前无活动任务，SQLite 备份到 `~/db_backups/zujuan-before-20260907-174521.sqlite3`（3.2GB），旧镜像保留为 `lesson-forge-collector:20260904-165707`。预检：镜像内 Node 22.23 跑测试 172/175 通过，3 项失败为 `qbpkg` 依赖系统 `zip`（slim 镜像本无，API 不使用）。切换后容器 healthy，`/health`/`/v1/health`/401 正常，`collector_jobs` 表已建（schema 对象 74 → 77），既有 12 个 run 完整，service → collector 200。真实任务复验待做 |
+| 2026-09-07 | 生产部署 collector（release `20260907-192105`，素材预取 + 节奏配置） | 隔离实例 48 页基准：默认 2.2 页/秒、`1500–2500 / 12 / 32` 5.2 页/秒，无风控信号；生产按后者配置切换，run 13 封存为可续采 `interrupted`；service 轮询无重试导致任务 14 判 failed，需新建任务重采。真实整册在新配置下的稳定性待观察 |
 
 ## 7. 文档整理记录
 

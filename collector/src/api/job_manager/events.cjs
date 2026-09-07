@@ -77,6 +77,18 @@ class EventMethods {
         break;
       }
       case 'heartbeat':
+        if (event.rssMb != null) {
+          job.childRssMb = event.rssMb;
+          job.childRssPeakMb = Math.max(Number(job.childRssPeakMb || 0), event.rssMb);
+          if (this.childMaxRssMb > 0 && event.rssMb > this.childMaxRssMb) {
+            this.abortJob(
+              job,
+              'memory_limit',
+              `采集子进程内存 ${event.rssMb}MB 超过上限 ${this.childMaxRssMb}MB，已停止并封存为可续采`,
+            );
+            return;
+          }
+        }
         break;
       case 'verification_wait':
         job.waitingReason = event.reason || 'verification';

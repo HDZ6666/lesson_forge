@@ -81,7 +81,7 @@ const {
   postQuestionList,
   postQuestionListTotal,
 } = require('../sources/zujuan/list_window.cjs');
-const { downloadAsset } = require('../assets/download.cjs');
+const { downloadAsset, prefetchAssets } = require('../assets/download.cjs');
 const { QuestionSyncStore } = require('../storage/question_store/index.cjs');
 const { saveRawPage } = require('../storage/raw_pages.cjs');
 const { createProcessEventEmitter } = require('../jobs/events.cjs');
@@ -144,6 +144,60 @@ async function runSync(options, dependencies = {}) {
     sourceTotal: state?.expectedTotal,
   });
   opts.onVerificationWait = (info) => events.emit('verification_wait', { runId, ...info });
+
+  // SIGTERM/SIGINT from the API manager or a container stop.  Node's default
+  // action would exit immediately: no `finally`, Chrome left running with a
+  // stale profile lock, run left `running`.  Instead remember the signal and
+  // stop at the next safe point (between windows) as a resumable interrupt.
+  let stopSignal = null;
+  const onStopSignal = (signal) => {
+    if (stopSignal) return;
+    stopSignal = String(signal || 'SIGTERM');
+    console.warn(`[停止] 收到 ${stopSignal}，将在当前窗口结算后封存为可续采运行`);
+  };
+  const stopHandlers = { SIGTERM: () => onStopSignal('SIGTERM'), SIGINT: () => onStopSignal('SIGINT') };
+  const registerStop = dependencies.registerStopSignal || ((handlers) => {
+    for (const [signal, handler] of Object.entries(handlers)) process.on(signal, handler);
+    return () => {
+      for (const [signal, handler] of Object.entries(handlers)) process.removeListener(signal, handler);
+    };
+  });
+  const unregisterStop = registerStop(stopHandlers) || (() => {});
+  const assertNotStopped = () => {
+    if (!stopSignal) return;
+    throw new QuestionSyncError(`收到 ${stopSignal}，采集在安全点停止`, 'stop_requested');
+  };
+  const rssMb = () => Math.round(process.memoryUsage().rss / (1024 * 1024));
+
+  // Assets dominate per-page time (tens of CDN downloads per page).  Fetch a
+  // whole window's assets with a bounded pool before settling its pages, so
+  // the per-page persist step only reads the cache.  List API pressure is
+  // unchanged: this only parallelises static asset hosts.
+  async function prefetchWindowAssets(rows) {
+    if (!opts.downloadAssets) return null;
+    const assets = [];
+    for (const row of rows) {
+      for (const question of row?.parsed?.questions || []) {
+        for (const asset of question.assets || []) assets.push(asset);
+      }
+    }
+    if (!assets.length) return null;
+    const summary = await prefetchAssets(assets, {
+      concurrency: opts.assetConcurrency,
+      cache: assetCache,
+      download: (asset) => downloadAsset(context, opts, asset),
+      onSuccess: (result) => {
+        if (result?.contentSha256) counters.assetsDownloaded += 1;
+      },
+      onFailure: (error, asset) => {
+        console.warn(`[素材] 预取失败：${asset.sourceUrl || asset.url} ${error.message}`);
+      },
+    });
+    if (summary.requested > 0) {
+      events.emit('heartbeat', { runId, stage: `assets:${summary.downloaded}/${summary.requested}`, rssMb: rssMb() });
+    }
+    return summary;
+  }
 
   async function disposeCollectorSession() {
     if (dependencies.context || dependencies.page) {
@@ -657,7 +711,7 @@ async function runSync(options, dependencies = {}) {
     }
 
     async function fetchWindow(state, pageNumbers) {
-      events.emit('heartbeat', { runId, stage: `fetch_window:${state.catalog.externalId}:${pageNumbers[0]}` });
+      events.emit('heartbeat', { runId, stage: `fetch_window:${state.catalog.externalId}:${pageNumbers[0]}`, rssMb: rssMb() });
       const rows = await Promise.all(pageNumbers.map(async (pageNumber) => {
         try {
           const parsed = await postQuestionList(page, opts, state.catalog, pageNumber, {
@@ -744,9 +798,11 @@ async function runSync(options, dependencies = {}) {
             }
             break;
           }
+          assertNotStopped();
           beginFetchWindow(state, pageNumbers);
           await requestGate(opts.sleepFn || sleep);
           const rows = await fetchWindow(state, pageNumbers);
+          await prefetchWindowAssets(rows);
           const sessionRows = rows.filter((row) => row.error && isCookieSwitchError(row.error));
           if (sessionRows.length) {
             const sessionPages = new Set(sessionRows.map((row) => row.pageNumber));
@@ -839,13 +895,20 @@ async function runSync(options, dependencies = {}) {
       }
     }
     if (error instanceof VerificationRequiredError || error.code === 'waiting_verification') finalStatus = 'blocked';
-    else if (['network_error', 'navigation_error', 'tree_network_error'].includes(String(error.code || ''))
+    else if (['network_error', 'navigation_error', 'tree_network_error', 'stop_requested'].includes(String(error.code || ''))
       || /^http_(408|429|5\d\d)$/.test(String(error.code || ''))) finalStatus = 'interrupted';
     else finalStatus = error instanceof StopCrawlError ? 'blocked' : 'failed';
     let completeness = null;
     if (runId) {
       completeness = store.validateRunCompleteness(runId, scope, selectedCatalogs, counters);
-      store.finishRun(runId, finalStatus, counters, finalMessage, { ...completeness, scope });
+      try {
+        store.finishRun(runId, finalStatus, counters, finalMessage, { ...completeness, scope });
+      } catch (sealError) {
+        // The API manager may already have sealed this run (shutdown/abort)
+        // before the child reached its safe point; the immutable trigger then
+        // rejects a second terminal write.  Keep the original error.
+        console.warn(`[封存] 运行 ${runId} 已被封存，跳过重复写入：${sealError.message}`);
+      }
     }
     events.emit('error', {
       runId,
@@ -881,6 +944,7 @@ async function runSync(options, dependencies = {}) {
         await closeCollectorContext(context);
       }
     }
+    unregisterStop();
     store.close();
     release();
   }

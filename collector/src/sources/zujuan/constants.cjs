@@ -20,6 +20,10 @@ const DEFAULT_PAGE_CAPACITY = 10;
 const DEFAULT_PAGINATION_SAFETY_LIMIT = 10000;
 const DEFAULT_LIST_CONCURRENCY = 8;
 const MAX_LIST_CONCURRENCY = 16;
+// Asset (image / formula) downloads hit the static CDN hosts, not the list
+// API.  They are prefetched per paging window with this many in flight.
+const DEFAULT_ASSET_CONCURRENCY = 8;
+const MAX_ASSET_CONCURRENCY = 32;
 const COOKIE_SWITCH_WAIT_MS = 3000;
 const MAX_SESSION_SWITCHES = 3;
 const MAX_RETRIES = 3;
@@ -63,6 +67,8 @@ const TEXTBOOK_FATAL_CODES = new Set([
   'checkpoint_contract',
   'asset_storage_error',
   'resume_source_invalid',
+  // Operator/manager stop signal: end the whole run at a safe point.
+  'stop_requested',
 ]);
 
 const FORMAL_ASSET_TYPES = Object.freeze([
@@ -123,6 +129,7 @@ module.exports = {
   DEFAULT_BANK_PATH,
   DEFAULT_BASE_URL,
   DEFAULT_CONSECUTIVE_EMPTY_PAGES,
+  DEFAULT_ASSET_CONCURRENCY,
   DEFAULT_DELAY_MAX,
   DEFAULT_DELAY_MIN,
   DEFAULT_LIST_CONCURRENCY,
@@ -137,6 +144,7 @@ module.exports = {
   DEFAULT_VERIFICATION_TIMEOUT,
   FORMAL_ASSET_TYPES,
   MAX_ASSET_BYTES,
+  MAX_ASSET_CONCURRENCY,
   MAX_LIST_CONCURRENCY,
   MAX_RETRIES,
   MAX_SESSION_SWITCHES,

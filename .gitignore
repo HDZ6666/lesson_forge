@@ -127,6 +127,8 @@ collector/data/*
 collector/.cache/
 collector/**/raw/
 collector/**/assets/
+# `collector/src/assets/` is source code (asset download module), not downloaded files.
+!collector/src/assets/
 collector/**/profile/
 collector/**/profiles/
 collector/**/browser-profile/

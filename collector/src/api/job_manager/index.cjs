@@ -40,6 +40,7 @@ const {
   PERSIST_INTERVAL_MS,
   SITE_PAGE_LIMIT,
 } = require('./constants.cjs');
+const { MAX_ASSET_CONCURRENCY, MAX_LIST_CONCURRENCY } = require('../../sources/zujuan/constants.cjs');
 const { ExecutionMethods } = require('./execution.cjs');
 const { EventMethods } = require('./events.cjs');
 const { LifecycleMethods } = require('./lifecycle.cjs');
@@ -51,6 +52,27 @@ function positiveDuration(value, fallback, name) {
     throw new Error(`${name} 必须是大于 0 的毫秒数`);
   }
   return Math.floor(number);
+}
+
+/**
+ * Optional crawl pacing overrides for the question script.  Each value is
+ * validated here (bounds match the CLI) and passed through as the matching
+ * CLI flag; `null` means "leave the CLI default".
+ */
+function resolveCrawlTuning(raw = {}) {
+  const optional = (value, name, min, max) => (
+    value == null || value === '' ? null : intInRange(value, name, min, max)
+  );
+  const tuning = {
+    listConcurrency: optional(raw.listConcurrency, 'COLLECTOR_LIST_CONCURRENCY', 1, MAX_LIST_CONCURRENCY),
+    assetConcurrency: optional(raw.assetConcurrency, 'COLLECTOR_ASSET_CONCURRENCY', 1, MAX_ASSET_CONCURRENCY),
+    delayMinMs: optional(raw.delayMinMs, 'COLLECTOR_DELAY_MIN_MS', 0, 600000),
+    delayMaxMs: optional(raw.delayMaxMs, 'COLLECTOR_DELAY_MAX_MS', 0, 600000),
+  };
+  if (tuning.delayMinMs != null && tuning.delayMaxMs != null && tuning.delayMaxMs < tuning.delayMinMs) {
+    throw new Error('COLLECTOR_DELAY_MAX_MS 不能小于 COLLECTOR_DELAY_MIN_MS');
+  }
+  return tuning;
 }
 
 class CollectorJobManager {
@@ -82,6 +104,20 @@ class CollectorJobManager {
       DEFAULT_STALL_TIMEOUT_MS,
       'COLLECTOR_STALL_TIMEOUT_MS',
     );
+    // Crawl pacing is an operator setting (deployment env), never a request
+    // field.  Unset values keep the child's own defaults so the CLI contract
+    // stays the single source of truth.
+    this.crawlTuning = resolveCrawlTuning({
+      listConcurrency: options.listConcurrency ?? process.env.COLLECTOR_LIST_CONCURRENCY,
+      assetConcurrency: options.assetConcurrency ?? process.env.COLLECTOR_ASSET_CONCURRENCY,
+      delayMinMs: options.delayMinMs ?? process.env.COLLECTOR_DELAY_MIN_MS,
+      delayMaxMs: options.delayMaxMs ?? process.env.COLLECTOR_DELAY_MAX_MS,
+    });
+    // Memory guard for the crawler child (reported via heartbeat events).
+    // 0 disables it.  A leak that reaches this limit stops the crawl as a
+    // resumable interrupt instead of swapping the whole host.
+    const maxRss = options.childMaxRssMb ?? process.env.COLLECTOR_CHILD_MAX_RSS_MB;
+    this.childMaxRssMb = maxRss == null || maxRss === '' ? 0 : intInRange(maxRss, 'COLLECTOR_CHILD_MAX_RSS_MB', 0, 65536);
     this.ownerToken = randomUUID();
     this.owner = { pid: process.pid, token: this.ownerToken };
     registerOwner(this.ownerToken);

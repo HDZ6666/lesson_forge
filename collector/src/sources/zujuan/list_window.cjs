@@ -215,7 +215,9 @@ async function fetchCatalogTree(page, options) {
           failOnStatusCode: false,
         });
         const status = responseStatus(response);
-        if (status < 400) return JSON.parse(await response.text());
+        const text = status < 400 ? await response.text() : null;
+        try { await response.dispose?.(); } catch {}
+        if (text != null) return JSON.parse(text);
       }
     } catch {}
     throw new QuestionSyncError(`目录请求失败：${result.networkError}`, 'tree_network_error');

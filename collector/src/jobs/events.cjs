@@ -82,6 +82,10 @@ function normalizeEvent(raw) {
       break;
     case 'heartbeat':
       event.stage = boundedString(raw.stage, 64);
+      {
+        const rss = boundedInt(raw.rssMb);
+        if (rss != null && rss >= 0) event.rssMb = rss;
+      }
       break;
     case 'verification_wait':
       event.reason = boundedString(raw.reason, 200);

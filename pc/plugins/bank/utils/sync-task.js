@@ -514,6 +514,14 @@ const normalizeLiveProjection = (value) => {
     listSeenCount: collectedQuestionCount,
     progressPercent,
     progress: progressPercent,
+    // Page-based progress basis (collector >= 2026-09-07): lets the page show
+    // "已扫描 X / 约 Y 页 · 目录 m/n" instead of a bare percentage.
+    attemptedPages: numberOrNull(firstTaskField(value, ['attemptedPages', 'attempted_pages'], null)),
+    estimatedTotalPages: numberOrNull(firstTaskField(value, ['estimatedTotalPages', 'estimated_total_pages'], null)),
+    estimateComplete: booleanValue(firstTaskField(value, ['estimateComplete', 'estimate_complete'], true), true),
+    selectedCatalogCount: numberOrNull(firstTaskField(value, ['selectedCatalogCount', 'selected_catalog_count'], null)),
+    startedCatalogCount: numberOrNull(firstTaskField(value, ['startedCatalogCount', 'started_catalog_count'], null)),
+    completedCatalogCount: numberOrNull(firstTaskField(value, ['completedCatalogCount', 'completed_catalog_count'], null)),
     scanComplete: booleanValue(firstTaskField(value, ['scanComplete', 'scan_complete'], false), false),
     dataComplete: booleanValue(firstTaskField(value, ['dataComplete', 'data_complete'], true), true),
     completionQuality: firstTaskField(value, ['completionQuality', 'completion_quality'], null),

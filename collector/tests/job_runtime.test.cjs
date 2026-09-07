@@ -468,6 +468,42 @@ test('API 侧关闭 IPC 通道后，子进程 emitter 继续运行而不会因 p
   assert.doesNotMatch(stderr, /ERR_IPC_CHANNEL_CLOSED/);
 });
 
+test('优雅关闭（部署/重启）把活动任务封存为可续采的 interrupted，而不是不可续采的 cancelled', async () => {
+  const { directory, dbPath } = temporaryDb();
+  seedMetadata(dbPath);
+  let child;
+  let runId;
+  const manager = new CollectorJobManager({
+    dbPath,
+    spawnImpl(_node, args) {
+      runId = seedChildRun(dbPath, args[args.indexOf('--textbook-id') + 1], 'running', { finish: false });
+      child = fakeChild();
+      return child;
+    },
+  });
+  const started = manager.start(contentPayload());
+  await waitFor(() => child != null);
+  child.emit('message', { type: 'run_created', runId, runType: 'content' });
+  await waitFor(() => manager.get(started.id)?.scopeItems[0].collectorRunId === runId);
+  await manager.shutdown();
+  const job = manager.get(started.id);
+  assert.equal(job.status, 'interrupted');
+  assert.equal(job.errorCode, 'collector_shutdown');
+  assert.equal(job.scopeItems[0].status, 'interrupted');
+  assert.equal(job.scopeItems[0].resumable, true);
+  assert.ok(child.killed.length > 0, '子进程应被终止');
+  const db = new DatabaseSync(dbPath, { readOnly: true });
+  const run = db.prepare('SELECT status, snapshot_locked_at FROM sync_runs WHERE id = ?').get(runId);
+  const row = db.prepare('SELECT status, active_slot, error_code FROM collector_jobs WHERE id = ?').get(started.id);
+  db.close();
+  assert.equal(run.status, 'interrupted');
+  assert.ok(run.snapshot_locked_at);
+  assert.equal(row.status, 'interrupted');
+  assert.equal(row.active_slot, null);
+  assert.equal(row.error_code, 'collector_shutdown');
+  fs.rmSync(directory, { recursive: true, force: true });
+});
+
 test('A3-7 --events-stdout 是隐藏诊断参数：--help 不提及，parseArgs 接受', () => {
   assert.doesNotMatch(usage(), /events-stdout/);
   assert.equal(parseArgs(['--textbook-id', '260617']).eventsStdout, false);

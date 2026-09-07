@@ -32,6 +32,15 @@ const {
   WATCHDOG_MAX_TICK_MS,
 } = require('./constants.cjs');
 
+function crawlTuningArgs(tuning = {}) {
+  const args = [];
+  if (tuning.listConcurrency != null) args.push('--concurrency', String(tuning.listConcurrency));
+  if (tuning.assetConcurrency != null) args.push('--asset-concurrency', String(tuning.assetConcurrency));
+  if (tuning.delayMinMs != null) args.push('--delay-min', String(tuning.delayMinMs));
+  if (tuning.delayMaxMs != null) args.push('--delay-max', String(tuning.delayMaxMs));
+  return args;
+}
+
 class ExecutionMethods {
   captureChildSnapshot(job, scope, watermark, result) {
     if (!scope) return null;
@@ -385,6 +394,7 @@ class ExecutionMethods {
       // cap is an existing bounded contract; only a resume source changes the
       // checkpoint switch passed to the child.
       if (job.maxPages < SITE_PAGE_LIMIT) childArgs.push('--max-pages', String(job.maxPages));
+      childArgs.push(...crawlTuningArgs(this.crawlTuning));
       if (scope?.resumeFromCollectorRunId != null) {
         childArgs.push('--resume-run-id', String(scope.resumeFromCollectorRunId));
       } else {

@@ -388,25 +388,90 @@ function readLiveRunProgress(dbPath, runId, options = {}) {
       && expectedTotalNumber >= 0 ? expectedTotalNumber : null;
     const collectedQuestionCount = uniqueQuestionCount;
     const queriedProgress = [...progressByCatalog.values()];
-    let attemptedTargetPages = 0;
-    let targetPageTotal = 0;
-    let scanHighWater = 0;
-    for (const item of queriedProgress) {
+
+    // Run-level progress is page based over the WHOLE selected catalog set,
+    // not only over catalogs that already started.  Catalogs that have not
+    // started yet are estimated per level (average target pages of started
+    // catalogs at that level, else the root-probe total spread over the
+    // level).  This replaces the old "attempted / started-target, max'ed
+    // with the best single catalog" formula, which hit 99% during the first
+    // chapter and then stayed there for the rest of the textbook.
+    const pageCapacity = Math.max(1, Number(runScope.pageCapacity) || 10);
+    const selectedLevels = Array.isArray(runScope.catalogLevels) && runScope.catalogLevels.length
+      ? runScope.catalogLevels.map((value) => Number(value)).filter((value) => Number.isFinite(value))
+      : [1, 2, 3];
+    const selectedIds = Array.isArray(runScope.catalogIds) && runScope.catalogIds.length
+      ? new Set(runScope.catalogIds.map((value) => String(value)))
+      : null;
+    const levelByCatalog = new Map(db.prepare(`
+      SELECT item.catalog_external_id, item.node_level
+      FROM sync_run_catalog_items AS item
+      WHERE ${where}
+      LIMIT 20000
+    `).all(...parameters).map((row) => [String(row.catalog_external_id), row.node_level == null ? null : Number(row.node_level)]));
+    const isSelected = (catalogId, level) => (
+      selectedIds ? selectedIds.has(String(catalogId)) : selectedLevels.includes(Number(level))
+    );
+    const selectedCountByLevel = new Map();
+    for (const [catalogId, level] of levelByCatalog) {
+      if (!isSelected(catalogId, level)) continue;
+      selectedCountByLevel.set(level, (selectedCountByLevel.get(level) || 0) + 1);
+    }
+    const startedByLevel = new Map();
+    let attemptedPages = 0;
+    let knownTargetPages = 0;
+    let completedCatalogCount = 0;
+    for (const [catalogId, item] of progressByCatalog) {
+      const level = levelByCatalog.get(catalogId) ?? null;
       const target = Math.max(0, Number(item.targetPages || item.expectedPages || 0));
       const attempted = Math.max(0, Number(item.attemptedPageCount || 0));
-      if (target > 0) {
-        targetPageTotal += target;
-        attemptedTargetPages += Math.min(attempted, target);
-      }
-      const catalogPercent = item.scanComplete
-        ? 100
-        : (item.scanPercentHighWater == null
-          ? (target > 0 ? Math.min(100, (Math.min(attempted, target) / target) * 100) : 0)
-          : Number(item.scanPercentHighWater));
-      scanHighWater = Math.max(scanHighWater, catalogPercent);
+      // A finished catalog counts exactly its real pages; a running one counts
+      // its current target (the provider total can still grow).
+      const known = item.scanComplete ? attempted : Math.max(target, attempted);
+      knownTargetPages += known;
+      attemptedPages += item.scanComplete ? attempted : Math.min(attempted, known);
+      if (item.scanComplete) completedCatalogCount += 1;
+      const bucket = startedByLevel.get(level) || { count: 0, pages: 0 };
+      bucket.count += 1;
+      bucket.pages += known;
+      startedByLevel.set(level, bucket);
     }
+    let estimatedRemainingPages = 0;
+    let estimateComplete = true;
+    const levelDerivedCount = [...selectedCountByLevel.values()].reduce((sum, count) => sum + count, 0);
+    const scopeSelectedCount = Number(runScope.selectedCatalogCount) > 0 ? Number(runScope.selectedCatalogCount) : null;
+    let selectedCatalogCount = levelDerivedCount;
+    if (scopeSelectedCount != null && scopeSelectedCount < levelDerivedCount) {
+      // `--max-catalogs` truncated the selection; levels are not known per
+      // selected catalog, so estimate the remainder with the overall average.
+      selectedCatalogCount = scopeSelectedCount;
+      const unstarted = Math.max(0, selectedCatalogCount - queriedProgress.length);
+      if (unstarted > 0) {
+        if (queriedProgress.length > 0) estimatedRemainingPages = unstarted * (knownTargetPages / queriedProgress.length);
+        else if (textbookExpectedTotal != null) estimatedRemainingPages = Math.ceil(textbookExpectedTotal / pageCapacity);
+        else estimateComplete = false;
+      }
+    } else {
+      for (const [level, selectedCount] of selectedCountByLevel) {
+        const started = startedByLevel.get(level) || { count: 0, pages: 0 };
+        const unstarted = Math.max(0, selectedCount - started.count);
+        if (unstarted === 0) continue;
+        let perCatalog = null;
+        if (started.count > 0) perCatalog = started.pages / started.count;
+        else if (textbookExpectedTotal != null) perCatalog = Math.ceil(textbookExpectedTotal / pageCapacity) / selectedCount;
+        if (perCatalog == null) {
+          estimateComplete = false;
+          continue;
+        }
+        estimatedRemainingPages += unstarted * perCatalog;
+      }
+    }
+    const estimatedTotalPages = Math.round(knownTargetPages + estimatedRemainingPages);
+    // "All started catalogs are complete" is not "the run is complete" while
+    // selected catalogs have not started yet.
+    const allSelectedStarted = selectedCatalogCount === 0 || queriedProgress.length >= selectedCatalogCount;
     const scanComplete = runScanComplete
-      || (queriedProgress.length > 0 && queriedProgress.every((item) => item.scanComplete));
+      || (queriedProgress.length > 0 && allSelectedStarted && queriedProgress.every((item) => item.scanComplete));
     const dataComplete = run.snapshotComplete === true
       || run.dataComplete === true
       || (scanComplete && queriedProgress.every((item) => (
@@ -426,13 +491,12 @@ function readLiveRunProgress(dbPath, runId, options = {}) {
       totalQuestionCount = textbookExpectedTotal;
       progressPercent = 100;
     } else {
-      totalsKnown = textbookExpectedTotal != null || targetPageTotal > 0;
+      totalsKnown = textbookExpectedTotal != null || knownTargetPages > 0;
       statisticsPending = !questionItemsAvailable && queriedProgress.length === 0;
       totalQuestionCount = textbookExpectedTotal;
-      const rawProgress = targetPageTotal > 0
-        ? Math.min(100, (attemptedTargetPages / targetPageTotal) * 100)
-        : (scanHighWater > 0 ? scanHighWater : null);
-      progressPercent = rawProgress == null ? null : Math.min(99, Math.max(rawProgress, scanHighWater || 0));
+      progressPercent = estimatedTotalPages > 0
+        ? Math.min(99, Math.round((attemptedPages / estimatedTotalPages) * 1000) / 10)
+        : null;
     }
     const counts = (level) => Number(levelCounts.get(level) || 0);
     const fetchWindows = [];
@@ -537,6 +601,17 @@ function readLiveRunProgress(dbPath, runId, options = {}) {
       snapshotComplete: run.snapshotComplete === true,
       progressPercent,
       progress: progressPercent,
+      // Progress basis, so a UI can show "已扫描 X / 约 Y 页" instead of a bare
+      // percentage.  `estimateComplete=false` means some level has no basis
+      // for estimating unstarted catalogs yet.
+      progressBasis: 'pages_estimated',
+      attemptedPages,
+      knownTargetPages,
+      estimatedTotalPages: estimatedTotalPages > 0 ? estimatedTotalPages : null,
+      estimateComplete,
+      selectedCatalogCount,
+      startedCatalogCount: queriedProgress.length,
+      completedCatalogCount,
       chapterCount: counts(1),
       knowledgePointCount: counts(2),
       secondaryKnowledgePointCount: counts(3),
