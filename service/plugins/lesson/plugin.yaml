@@ -1,0 +1,82 @@
+manifestVersion: 1
+id: lesson
+name: 教案生成
+version: 0.1.0
+description: 基于正式题库按知识点、课型与规则确定性抽题，生成可编辑、可导出 Word 的教案初稿。
+
+metadata:
+  category: education
+  tags:
+    - lesson-plan
+    - question-picking
+  author: RuoYi
+  license: MIT
+  homepage: ''
+  repository: ''
+  documentation: ''
+
+backend:
+  module: plugins.lesson
+  routers:
+    autoScan: true
+  migrations:
+    - migrations/mysql/001_init.sql
+  seeds: []
+  hooks: {}
+  jobs: []
+
+frontend:
+  basePath: lesson
+  pluginId: lesson
+  viewsPath: views
+  apiPath: api
+  delivery:
+    type: source
+    buildRequired: true
+  menus:
+    - name: 教案生成
+      path: lesson
+      component: Layout
+      perms: ''
+      type: M
+      orderNum: 11
+      icon: edit
+      children:
+        - name: 抽题生成
+          path: plan
+          component: plugin/lesson/plan/index
+          routeName: LessonPlan
+          query: ''
+          isFrame: 1
+          isCache: 0
+          perms: lesson:plan:list
+          type: C
+          orderNum: 1
+          icon: documentation
+
+permissions:
+  - code: lesson:plan:list
+    name: 教案查看
+    description: 查看抽题选项、模拟候选数与历史生成结果
+  - code: lesson:plan:generate
+    name: 教案生成
+    description: 生成、重新生成、换题和保存教案文字
+  - code: lesson:plan:export
+    name: 教案导出
+    description: 导出教案 Word 文档
+  - code: lesson:plan:remove
+    name: 教案删除
+    description: 删除历史生成记录
+
+dependencies:
+  python:
+    - python-docx>=1.1.0
+  npm: []
+  npmDev: []
+  plugins:
+    - id: bank
+      description: 读取正式题库的教材、目录与题目
+
+compatibility:
+  databases:
+    - mysql
