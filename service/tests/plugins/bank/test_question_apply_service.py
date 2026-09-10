@@ -32,6 +32,7 @@ from plugins.bank.entity.do.bank_do import (
     QbQuestionAsset,
     QbQuestionCatalog,
     QbQuestionTag,
+    QbQuestionTaskReview,
     QbSyncJob,
     QbSyncJobScope,
     QbTextbook,
@@ -54,6 +55,7 @@ def _compile_longtext(_type: LONGTEXT, _compiler: object, **_kwargs: object) -> 
 
 
 FORMAL_TABLES = [
+    QbQuestionTaskReview.__table__,
     QbSyncJob.__table__,
     QbSyncJobScope.__table__,
     QbTextbookVersion.__table__,
@@ -257,6 +259,31 @@ async def test_first_apply_is_idempotent_and_records_scope_state(db: AsyncSessio
     again = await QuestionApplyService.apply(db, 9, expected_state_token=state.state_token)
     assert again['alreadyApplied'] is True
     assert await db.scalar(select(func.count()).select_from(QbQuestionApplyHistory)) == 1
+
+
+@pytest.mark.asyncio
+async def test_excluded_question_skips_all_scope_relations_and_assets(db, snapshot_reader):
+    await _seed(db, {9: [('tb-a', 1, 101), ('tb-b', 2, 102)]})
+    snapshot_reader[102] = _raw(102, 'tb-b', catalog='c-b', tag='B')
+    db.add(QbQuestionTaskReview(task_id=9, baseline_json={}, excluded_json=['q-1'], revision=1, captured_at=datetime.now()))
+    await db.commit()
+    await QuestionApplyService.apply(db, 9)
+    for model in (QbQuestion, QbQuestionCatalog, QbQuestionTag, QbQuestionAsset):
+        assert await db.scalar(select(func.count()).select_from(model)) == 0
+
+
+@pytest.mark.asyncio
+async def test_exclusion_preserves_existing_formal_question_and_material(db, snapshot_reader):
+    await _seed(db, {9: [('tb-a', 1, 101)], 10: [('tb-a', 1, 101)]})
+    await QuestionApplyService.apply(db, 9)
+    state = await db.get(QbQuestionApplyState, ('zujuan', 'tb-a'))
+    token = state.state_token
+    db.add(QbQuestionTaskReview(task_id=10, baseline_json={}, excluded_json=['q-1'], revision=1, captured_at=datetime.now()))
+    await db.commit()
+    await QuestionApplyService.apply(db, 10, expected_state_token=token)
+    for model in (QbQuestion, QbQuestionCatalog, QbQuestionTag, QbQuestionAsset):
+        assert await db.scalar(select(func.count()).select_from(model)) == 1
+    assert (await db.scalar(select(QbQuestion))).status == '0'
 
 
 @pytest.mark.asyncio
@@ -684,6 +711,9 @@ async def test_question_apply_rechecks_task_scope_signature_after_remote_reads(
 
         async def rollback(self) -> None:
             self.rollbacks += 1
+
+        async def get(self, *_args, **_kwargs):
+            return None
 
     async def read_snapshot(_run_id: int, _textbook_id: str) -> dict[str, Any]:
         return _raw(101, 'tb-a')

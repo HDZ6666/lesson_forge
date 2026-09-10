@@ -27,6 +27,7 @@ const {
   deploymentBoolean,
   intInRange,
   normalizeIndependentTextbookScopes,
+  requestBoolean,
   validateIndependentResumeScopes,
 } = require('../request_validation.cjs');
 const { orphanRunIsResumable, sealOrphanContentRun, sealOrphanMetadataRun } = require('../orphan_runs.cjs');
@@ -82,6 +83,7 @@ class CollectorJobManager {
     this.profileDir = path.resolve(options.profileDir || path.join(COLLECTOR_ROOT, '.cache', 'zujuan-sync-profile'));
     this.nodeBin = options.nodeBin || process.execPath;
     this.spawnImpl = options.spawnImpl || spawn;
+    this.killGraceMs = positiveDuration(options.killGraceMs, 60000, 'killGraceMs');
     // Headful is an operator/deployment setting only.  It is intentionally
     // read once here and never taken from a request payload.
     this.headful = deploymentBoolean(
@@ -244,7 +246,7 @@ class CollectorJobManager {
     if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
       throw new Error('请求体必须是 JSON 对象');
     }
-    if (this.disposed) {
+    if (this.disposed || this.stopping) {
       const error = new Error('采集器任务管理器已关闭');
       error.statusCode = 503;
       throw error;
@@ -261,6 +263,7 @@ class CollectorJobManager {
     const runType = String(payload.runType || '');
     if (!['metadata', 'content'].includes(runType)) throw new Error('不支持的同步任务类型');
     const maxPages = intInRange(payload.maxPages ?? SITE_PAGE_LIMIT, 'maxPages', 1, SITE_PAGE_LIMIT);
+    const limitTo1000Pages = requestBoolean(payload.limitTo1000Pages, 'limitTo1000Pages', false);
     const hasIndependentScopes = runType === 'content'
       && Object.prototype.hasOwnProperty.call(payload, 'textbookScopes');
     if (runType === 'content'
@@ -276,7 +279,7 @@ class CollectorJobManager {
         const normalized = normalizeIndependentTextbookScopes(payload);
         textbookExternalIds = normalized.textbookExternalIds;
         independentScopes = normalized.scopes;
-        validateIndependentResumeScopes(this.dbPath, independentScopes, maxPages);
+        validateIndependentResumeScopes(this.dbPath, independentScopes, maxPages, limitTo1000Pages);
       } else {
         metadataRunId = intInRange(payload.metadataRunId, 'metadataRunId', 1, Number.MAX_SAFE_INTEGER);
         textbookExternalIds = (Array.isArray(payload.textbookExternalIds)
@@ -344,6 +347,7 @@ class CollectorJobManager {
         })
         : [],
       maxPages,
+      limitTo1000Pages,
       totalVersions: 0,
       completedVersions: 0,
       totalTextbooks: textbookExternalIds.length,
@@ -380,7 +384,7 @@ class CollectorJobManager {
     this.jobs.set(job.id, job);
     this.activeJobId = job.id;
     this.trimJobs();
-    queueMicrotask(() => this.execute(job).catch((error) => this.failJob(job, error)));
+    job.execution = Promise.resolve().then(() => this.execute(job)).catch((error) => this.failJob(job, error));
     return publicJob(job);
   }
 

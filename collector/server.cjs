@@ -45,9 +45,18 @@ async function main() {
     server.listen(port, host, resolve);
   });
   console.log(`collector API 已启动：http://${host}:${port}`);
-  const shutdown = async () => {
-    await server.collectorManager.shutdown();
-    server.close(() => process.exit(0));
+  let stopping;
+  const shutdown = () => {
+    if (stopping) return stopping;
+    // Stop accepting connections before waiting for the active writer.
+    const closed = new Promise(resolve => server.close(resolve));
+    server.closeIdleConnections?.();
+    stopping = (async () => {
+      await server.collectorManager.shutdown();
+      server.closeAllConnections?.();
+      await closed;
+    })().catch(error => { console.error(`[停止失败] ${error.message}`); process.exitCode = 1; });
+    return stopping;
   };
   process.once('SIGINT', shutdown);
   process.once('SIGTERM', shutdown);

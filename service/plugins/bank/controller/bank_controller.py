@@ -33,6 +33,7 @@ from plugins.bank.entity.vo.bank_vo import (
     QuestionModel,
     QuestionPageQueryModel,
     QuestionTaskCreateModel,
+    QuestionTaskSelectionModel,
     QuestionWriteModel,
     SyncCompareQueryModel,
     SyncCompareResponseModel,
@@ -60,6 +61,7 @@ from plugins.bank.entity.vo.bank_vo import (
 )
 from plugins.bank.service.bank_service import BankService
 from plugins.bank.service.question_apply_service import QuestionApplyService
+from plugins.bank.service.question_review_service import QuestionReviewService
 from plugins.bank.service.sync_run_service import SyncRunService
 from plugins.bank.service.sync_service import SyncService
 from plugins.bank.service.task_service import SyncTaskService
@@ -463,6 +465,26 @@ async def delete_question_sync_task(
 ) -> Response:
     await SyncTaskService.delete_question(db, task_id)
     return ResponseUtil.success(msg='删除成功')
+
+
+@bank_controller.get('/sync/question/tasks/{task_id}/review/catalogs', dependencies=[UserInterfaceAuthDependency(_QUESTION_TASK_QUERY_PERMISSIONS)])
+async def review_question_catalogs(task_id: Annotated[int, Path(gt=0)], query: Annotated[TaskComparisonQueryModel, Query()], db: Annotated[AsyncSession, DBSessionDependency()]) -> Response:
+    return ResponseUtil.success(data=await QuestionReviewService.catalogs(db, task_id, query))
+
+
+@bank_controller.get('/sync/question/tasks/{task_id}/review/questions', dependencies=[UserInterfaceAuthDependency(_QUESTION_TASK_QUERY_PERMISSIONS)])
+async def review_question_list(task_id: Annotated[int, Path(gt=0)], query: Annotated[TaskComparisonQueryModel, Query()], db: Annotated[AsyncSession, DBSessionDependency()]) -> Response:
+    return ResponseUtil.success(data=await QuestionReviewService.questions(db, task_id, query))
+
+
+@bank_controller.get('/sync/question/tasks/{task_id}/review/questions/{external_id}', dependencies=[UserInterfaceAuthDependency(_QUESTION_TASK_QUERY_PERMISSIONS)])
+async def review_question_detail(task_id: Annotated[int, Path(gt=0)], external_id: Annotated[str, Path(min_length=1, max_length=64)], query: Annotated[TaskComparisonQueryModel, Query()], db: Annotated[AsyncSession, DBSessionDependency()]) -> Response:
+    return ResponseUtil.success(data=await QuestionReviewService.detail(db, task_id, external_id, query))
+
+
+@bank_controller.post('/sync/question/tasks/{task_id}/review/selection', dependencies=[UserInterfaceAuthDependency('bank:sync:question:apply')])
+async def review_question_selection(task_id: Annotated[int, Path(gt=0)], body: QuestionTaskSelectionModel, query: Annotated[TaskComparisonQueryModel, Query()], db: Annotated[AsyncSession, DBSessionDependency()]) -> Response:
+    return ResponseUtil.success(data=await QuestionReviewService.select_questions(db, task_id, body, query))
 
 
 @bank_controller.get(

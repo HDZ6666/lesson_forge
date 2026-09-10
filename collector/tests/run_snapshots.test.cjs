@@ -430,6 +430,11 @@ test('运行目录/题目快照服务端分页、筛选和题目详情保持教�
     assert.equal(filtered.total, 1);
     assert.equal(filtered.rows[0].externalTextbookId, 'tb2');
     assert.equal(filtered.rows[0].externalQuestionId, 'q-shared');
+    const selection = readRunQuestions(dbPath, runId, { textbookExternalId: 'tb2', excludedIds: ['q-shared'], selection: 'included' });
+    assert.equal(selection.total, 0);
+    assert.equal(selection.summary.excluded, 1);
+    assert.equal(readRunQuestions(dbPath, runId, { textbookExternalId: 'tb2', excludedIds: ['q-shared'], selection: 'excluded' }).total, 1);
+    assert.equal(readRunCatalogs(dbPath, runId, { textbookExternalId: 'tb2', excludedIds: ['q-shared'] }).rows[0].excludedQuestionCount, 1);
 
     assert.throws(
       () => readRunQuestion(dbPath, runId, 'q-shared'),

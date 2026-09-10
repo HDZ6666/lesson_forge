@@ -50,6 +50,8 @@ const {
 } = require('./common.cjs');
 
 function readRunCatalogs(dbPath, runId, options = {}) {
+  const excludedIds = options.excludedIds || [];
+  if (!Array.isArray(excludedIds) || excludedIds.length > 100000 || excludedIds.some((id) => !safeExternalId(id))) throw httpError('排除题目 ID 无效');
   const textbookExternalId = optionalExternalId(
     options.textbookExternalId,
     'textbookExternalId',
@@ -68,6 +70,10 @@ function readRunCatalogs(dbPath, runId, options = {}) {
     assertSnapshotTables(db);
     assertRunTextbook(db, run, textbookExternalId);
     const itemColumns = tableColumns(db, 'sync_run_catalog_items');
+    const progressColumns = tableNames(db).has('sync_run_catalog_progress') ? tableColumns(db, 'sync_run_catalog_progress') : new Set();
+    const scanCompleteSql = progressColumns.has('scan_complete') ? `(SELECT MAX(progress.scan_complete) FROM sync_run_catalog_progress AS progress
+      WHERE progress.run_id = item.run_id AND progress.provider = item.provider
+      AND progress.textbook_external_id = item.textbook_external_id AND progress.catalog_external_id = item.catalog_external_id)` : 'NULL';
     const predicates = ['item.run_id = ?', 'item.provider = ?'];
     const parameters = [run.id, PROVIDER];
     if (textbookExternalId) {
@@ -111,7 +117,15 @@ function readRunCatalogs(dbPath, runId, options = {}) {
              ${optionalSelect(itemColumns, 'item', 'catalog_path')},
              ${optionalSelect(itemColumns, 'item', 'sort_order')},
              ${optionalSelect(itemColumns, 'item', 'captured_at')},
-             ${questionCountSql} AS question_count
+             ${questionCountSql} AS question_count, ${scanCompleteSql} AS scan_complete,
+             (SELECT COUNT(DISTINCT link.question_external_id) FROM sync_run_question_catalogs AS link
+              WHERE link.run_id = item.run_id AND link.provider = item.provider
+              AND link.textbook_external_id = item.textbook_external_id
+              AND link.catalog_external_id = item.catalog_external_id) AS unique_question_count,
+             (SELECT COUNT(DISTINCT link.question_external_id) FROM sync_run_question_catalogs AS link
+              WHERE link.run_id = item.run_id AND link.provider = item.provider
+              AND link.textbook_external_id = item.textbook_external_id AND link.catalog_external_id = item.catalog_external_id
+              AND link.question_external_id IN (SELECT value FROM json_each(?))) AS excluded_question_count
       FROM sync_run_catalog_items AS item
       WHERE ${where}
       ORDER BY item.textbook_external_id ASC,
@@ -119,7 +133,7 @@ function readRunCatalogs(dbPath, runId, options = {}) {
                ${itemColumns.has('node_level') ? 'COALESCE(item.node_level, 2147483647)' : 'CAST(2147483647 AS INTEGER)'} ASC,
                item.catalog_external_id ASC
       LIMIT ? OFFSET ?
-    `).all(...parameters, pageSize, offset).map((row) => ({
+    `).all(JSON.stringify(excludedIds), ...parameters, pageSize, offset).map((row) => ({
       sourceProvider: PROVIDER,
       externalTextbookId: String(row.textbook_external_id),
       externalCatalogId: String(row.catalog_external_id),
@@ -131,6 +145,9 @@ function readRunCatalogs(dbPath, runId, options = {}) {
       catalogPath: boundedString(row.catalog_path || row.name, 8000),
       sortOrder: row.sort_order == null ? null : Number(row.sort_order),
       questionCount: Number(row.question_count || 0),
+      uniqueQuestionCount: Number(row.unique_question_count || 0),
+      scanComplete: Number(row.scan_complete || 0) === 1,
+      excludedQuestionCount: Number(row.excluded_question_count || 0),
       capturedAt: row.captured_at,
     }));
     return {

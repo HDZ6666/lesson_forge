@@ -39,6 +39,7 @@ const {
   MAX_SESSION_SWITCHES,
   PAGE_RESULT,
   PROVIDER,
+  SITE_PAGE_LIMIT,
 } = require('../sources/zujuan/constants.cjs');
 const {
   classifyListPageContent,
@@ -328,6 +329,10 @@ async function runSync(options, dependencies = {}) {
 
     const safetyPageLimit = catalogSafetyPageLimit(opts);
     const explicitLastPage = catalogLastPage(opts);
+    const capTargetPages = (value) => {
+      const target = Math.max(0, Number(value) || 0);
+      return opts.limitTo1000Pages === true ? Math.min(explicitLastPage, target) : target;
+    };
     const consecutiveEmptyPages = Number(opts.consecutiveEmptyPages) > 0
       ? Number(opts.consecutiveEmptyPages)
       : DEFAULT_CONSECUTIVE_EMPTY_PAGES;
@@ -366,13 +371,13 @@ async function runSync(options, dependencies = {}) {
         previousSignatures,
         previousQuestionIds,
         lastPageSignature: lastSavedPage?.signature || null,
-        expectedPages: savedProgress?.targetPages ?? savedProgress?.expectedPages ?? 0,
+        expectedPages: capTargetPages(savedProgress?.targetPages ?? savedProgress?.expectedPages ?? 0),
         expectedTotal: savedProgress?.expectedTotal ?? null,
         maxObservedTotal: maxObserved || 0,
-        targetPages: growTargetPages(
+        targetPages: capTargetPages(growTargetPages(
           savedProgress?.targetPages ?? savedProgress?.expectedPages ?? 0,
           maxObserved || null,
-        ),
+        )),
         emptyStreak: 0,
         zeroNewWindows: 0,
         boundaryProbe: false,
@@ -403,11 +408,16 @@ async function runSync(options, dependencies = {}) {
       if (pageTotal == null) return;
       state.expectedTotal = pageTotal;
       state.maxObservedTotal = Math.max(Number(state.maxObservedTotal) || 0, pageTotal);
-      state.targetPages = growTargetPages(state.targetPages, state.maxObservedTotal);
+      state.targetPages = capTargetPages(growTargetPages(state.targetPages, state.maxObservedTotal));
       state.expectedPages = state.targetPages;
     };
 
-    const finishCatalogScan = (state, { stalled = false, stallReason = null, rawSnapshot = null } = {}) => {
+    const finishCatalogScan = (state, {
+      stalled = false,
+      stallReason = null,
+      pageLimitReached = false,
+      rawSnapshot = null,
+    } = {}) => {
       catalogsDone += 1;
       store.completeCatalog({
         runId,
@@ -419,13 +429,15 @@ async function runSync(options, dependencies = {}) {
         queryFingerprint: state.scopeKey,
         filterJson: state.filterJson,
         rawSnapshot,
+        targetPageLimit: opts.limitTo1000Pages === true ? explicitLastPage : null,
         stalled,
         stallReason,
+        pageLimitReached,
       });
       state.finished = true;
       const progress = store.getRunCatalogProgress(runId, opts.textbookId, state.catalog.externalId);
       console.log(
-        `[列表] catalog=${state.catalog.externalId} scan=${stalled ? 'stalled' : 'complete'}`
+        `[列表] catalog=${state.catalog.externalId} scan=${pageLimitReached ? 'limited' : (stalled ? 'stalled' : 'complete')}`
         + ` quality=${progress?.completionQuality || ''} last=${progress?.lastCompletedPage || 0}`
         + ` target=${state.targetPages || 0}`,
       );
@@ -468,6 +480,7 @@ async function runSync(options, dependencies = {}) {
             filterJson,
             expectedTotal: state.expectedTotal,
             targetPages: state.targetPages,
+            targetPageLimit: opts.limitTo1000Pages === true ? explicitLastPage : null,
             rawSnapshot,
           });
           state.savedPageNumbers.add(Number(pageNumber));
@@ -489,6 +502,7 @@ async function runSync(options, dependencies = {}) {
           filterJson,
           expectedTotal: state.expectedTotal,
           targetPages: state.targetPages,
+          targetPageLimit: opts.limitTo1000Pages === true ? explicitLastPage : null,
           rawSnapshot,
         });
         state.savedPageNumbers.add(Number(pageNumber));
@@ -512,6 +526,7 @@ async function runSync(options, dependencies = {}) {
           filterJson,
           expectedTotal: state.expectedTotal,
           targetPages: state.targetPages,
+          targetPageLimit: opts.limitTo1000Pages === true ? explicitLastPage : null,
           rawSnapshot,
         });
         if (signature) state.previousSignatures.add(signature);
@@ -574,6 +589,7 @@ async function runSync(options, dependencies = {}) {
         queryFingerprint: scopeKey,
         filterJson,
         rawSnapshot,
+        targetPageLimit: opts.limitTo1000Pages === true ? explicitLastPage : null,
       });
       counters.pagesOk += 1;
       counters.questionsSeen += questions.length;
@@ -607,6 +623,7 @@ async function runSync(options, dependencies = {}) {
           filterJson: state.filterJson,
           expectedTotal: state.expectedTotal,
           targetPages: state.targetPages,
+          targetPageLimit: opts.limitTo1000Pages === true ? explicitLastPage : null,
         });
         state.savedPageNumbers.add(Number(row.pageNumber));
         state.nextPage = Math.max(state.nextPage, Number(row.pageNumber) + 1);
@@ -783,11 +800,26 @@ async function runSync(options, dependencies = {}) {
         catalogPages:
         while (!state.finished) {
           if (opts.limit > 0 && counters.questionsSeen >= opts.limit) break;
+          // Check the task policy boundary before the generic safety ceiling.
+          // This keeps an explicitly configured safetyPageLimit of 1000 from
+          // turning the intentional policy stop into a stalled catalog.
+          if (opts.limitTo1000Pages === true && !opts.maxPagesProvided
+            && explicitLastPage === SITE_PAGE_LIMIT && state.nextPage > explicitLastPage) {
+            finishCatalogScan(state, {
+              pageLimitReached: true,
+              stallReason: 'page_limit_1000',
+            });
+            break;
+          }
           if (state.nextPage > safetyPageLimit) {
             finishCatalogScan(state, { stalled: true, stallReason: 'pagination_safety_limit' });
             break;
           }
-          if (opts.maxPagesProvided && state.nextPage > explicitLastPage) break;
+          if (state.nextPage > explicitLastPage) {
+            // `--max-pages` is an explicit diagnostic truncation and keeps
+            // its historical incomplete-run semantics.
+            break;
+          }
           if (state.targetPages > 0 && state.nextPage > state.targetPages && !state.boundaryProbe) {
             state.boundaryProbe = true;
           }

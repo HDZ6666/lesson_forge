@@ -135,12 +135,12 @@ function sendAssetResponse(response, asset) {
   else stream.once('open', startStreaming);
 }
 
-async function readJson(request) {
+async function readJson(request, maxBytes = MAX_BODY_BYTES) {
   const chunks = [];
   let size = 0;
   for await (const chunk of request) {
     size += chunk.length;
-    if (size > MAX_BODY_BYTES) {
+    if (size > maxBytes) {
       const error = new Error('请求体过大');
       error.statusCode = 413;
       throw error;

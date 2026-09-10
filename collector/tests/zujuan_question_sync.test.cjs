@@ -309,6 +309,13 @@ test('resume scope 区分素材模式，但允许放宽验收边界继续克隆�
     assert.notEqual(withAssets, noAssets);
     assert.equal(store.lastBeginMeta.clonedFrom, null);
 
+    const limited = store.beginRun({
+      textbookId: '260617', bankId: 2, bankPath: 'czsx', downloadAssets: false,
+      limitTo1000Pages: true, maxCatalogs: 100, maxPages: 1000, limit: 0,
+    });
+    assert.notEqual(limited, noAssets);
+    assert.equal(store.lastBeginMeta.clonedFrom, null);
+
     const widerProbe = store.beginRun({
       textbookId: '260617', bankId: 2, bankPath: 'czsx', downloadAssets: false,
       maxCatalogs: 100, maxPages: 1000, limit: 0,
@@ -406,6 +413,8 @@ test('默认有头、固定 profile，完整抓取才允许 success', () => {
   assert.equal(options.delayMin, 2500);
   assert.equal(options.delayMax, 4000);
   assert.equal(options.concurrency, 8);
+  assert.equal(options.limitTo1000Pages, false);
+  assert.equal(script.parseArgs(['--limit-to-1000-pages']).limitTo1000Pages, true);
   assert.equal(DEFAULT_LIST_CONCURRENCY, 8);
   assert.deepEqual(listWindow(1, Infinity, 8), [1, 2, 3, 4, 5, 6, 7, 8]);
   assert.deepEqual(listWindow(1002, 1005, 8), [1002, 1003, 1004, 1005]);
@@ -797,6 +806,107 @@ test('未遇到空页就达到 --max-pages 或 --limit 时任务仍不完整', a
     assert.ok(limitResult.completeness.reasons.some((reason) => /limit/.test(reason)));
   } finally {
     fs.rmSync(limitDir, { recursive: true, force: true });
+  }
+});
+
+test('最多 1000 页策略不请求第 1001 页、继续其他目录且按策略正常完成', async () => {
+  const { directory, dbPath } = tempDb();
+  const requested = new Map([['261285', []], ['261286', []]]);
+  const page = mockSyncPage(({ curPage, categoryId }) => {
+    if (!requested.has(categoryId)) return { status: 200, headers: {}, text: listApiText(10001, ['35020603']) };
+    requested.get(categoryId).push(curPage);
+    if (categoryId === '261285') {
+      return { status: 200, headers: {}, text: listApiText(10001, [String(97000000 + curPage)]) };
+    }
+    return curPage === 1
+      ? { status: 200, headers: {}, text: listApiText(1, ['98000001']) }
+      : { status: 200, headers: {}, text: listApiText(1, []) };
+  });
+  try {
+    const result = await runSync(baseSyncOptions(directory, dbPath, {
+      limitTo1000Pages: true,
+      safetyPageLimit: SITE_PAGE_LIMIT,
+    }), {
+      context: {},
+      page,
+      catalogTree: {
+        id: '260617', title: '九年级上册', children: [
+          { id: '261285', title: '第一章', children: [] },
+          { id: '261286', title: '第二章', children: [] },
+        ],
+      },
+    });
+    assert.equal(result.status, 'success');
+    assert.equal(result.completeness.complete, true);
+    assert.equal(Math.max(...requested.get('261285')), 1000);
+    assert.ok(!requested.get('261285').includes(1001));
+    assert.ok(requested.get('261286').length > 0, '达到上限后仍应继续其他目录');
+    const replay = new QuestionSyncStore(dbPath, { dataDir: directory });
+    try {
+      const limited = replay.getRunCatalogProgress(result.runId, '260617', '261285');
+      assert.equal(limited.status, 'completed');
+      assert.equal(limited.scanComplete, true);
+      assert.equal(limited.dataComplete, true);
+      assert.equal(limited.pageLimitReached, true);
+      assert.equal(limited.stallReason, 'page_limit_1000');
+      assert.equal(limited.targetPages, 1000);
+      const second = replay.getRunCatalogProgress(result.runId, '260617', '261286');
+      assert.equal(second.status, 'completed');
+      const live = readLiveRunProgress(dbPath, result.runId, { textbookExternalId: '260617' });
+      assert.equal(live.pageLimitReached, true);
+      assert.equal(live.tree.find((node) => node.externalId === '261285')?.pageLimitReached, true);
+    } finally {
+      replay.close();
+    }
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('最多 1000 页策略不会洗掉失败页，且失败页进度目标仍不超过上限', () => {
+  const { directory, dbPath } = tempDb();
+  const store = new QuestionSyncStore(dbPath, { dataDir: directory });
+  try {
+    const runId = store.beginRun({ textbookId: '260617', limitTo1000Pages: true });
+    const catalog = {
+      externalId: '261285',
+      chapterExternalId: '261285',
+      title: '第一章',
+    };
+    store.recordPageAttempt({
+      runId,
+      textbookExternalId: '260617',
+      catalog,
+      pageNumber: 1000,
+      resultType: PAGE_RESULT.REQUEST_FAILED,
+      errorCode: 'request_failed',
+      queryFingerprint: 'policy-scope',
+      expectedTotal: 10001,
+      targetPages: 1000,
+      targetPageLimit: SITE_PAGE_LIMIT,
+    });
+    const running = store.getRunCatalogProgress(runId, '260617', '261285');
+    assert.equal(running.targetPages, SITE_PAGE_LIMIT);
+    assert.equal(running.failedPageCount, 1);
+
+    store.completeCatalog({
+      runId,
+      textbookExternalId: '260617',
+      catalog,
+      expectedTotal: 10001,
+      expectedPages: SITE_PAGE_LIMIT,
+      queryFingerprint: 'policy-scope',
+      targetPageLimit: SITE_PAGE_LIMIT,
+      pageLimitReached: true,
+    });
+    const completed = store.getRunCatalogProgress(runId, '260617', '261285');
+    assert.equal(completed.pageLimitReached, true);
+    assert.equal(completed.failedPageCount, 1);
+    assert.equal(completed.dataComplete, false);
+    assert.equal(completed.completionQuality, 'completed_with_issues');
+  } finally {
+    store.close();
+    fs.rmSync(directory, { recursive: true, force: true });
   }
 });
 
@@ -1334,4 +1444,3 @@ test('图片下载失败时仍保存题目，并标记数据不完整', async ()
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });
-

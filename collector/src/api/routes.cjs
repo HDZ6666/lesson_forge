@@ -31,7 +31,7 @@ function createCollectorServer(options = {}) {
     try {
       const url = new URL(request.url || '/', 'http://collector.local');
       if (request.method === 'GET' && url.pathname === '/health') {
-        sendJson(response, 200, { ok: true, service: 'lesson-bank-collector' });
+        sendJson(response, manager.stopping ? 503 : 200, { ok: !manager.stopping, service: 'lesson-bank-collector' });
         return;
       }
       if (token) {
@@ -64,6 +64,11 @@ function createCollectorServer(options = {}) {
         return;
       }
       const runCatalogMatch = url.pathname.match(/^\/v1\/runs\/([^/]+)\/catalogs\/?$/i);
+      const catalogPreviewMatch = url.pathname.match(/^\/v1\/runs\/([^/]+)\/catalogs-preview\/?$/i);
+      if (request.method === 'POST' && catalogPreviewMatch) {
+        sendJson(response, 200, readRunCatalogs(manager.dbPath, decodeURIComponent(catalogPreviewMatch[1]), await readJson(request, 8 * 1024 * 1024)));
+        return;
+      }
       if (request.method === 'GET' && runCatalogMatch) {
         sendJson(response, 200, readRunCatalogs(manager.dbPath, decodeURIComponent(runCatalogMatch[1]), {
           textbookExternalId: url.searchParams.get('textbookExternalId'),
@@ -137,6 +142,12 @@ function createCollectorServer(options = {}) {
         return;
       }
       const runQuestionsMatch = url.pathname.match(/^\/v1\/runs\/([^/]+)\/questions\/?$/i);
+      const previewMatch = url.pathname.match(/^\/v1\/runs\/([^/]+)\/questions-preview\/?$/i);
+      if (request.method === 'POST' && previewMatch) {
+        const body = await readJson(request, 8 * 1024 * 1024);
+        sendJson(response, 200, readRunQuestions(manager.dbPath, decodeURIComponent(previewMatch[1]), body));
+        return;
+      }
       if (request.method === 'GET' && runQuestionsMatch) {
         sendJson(response, 200, readRunQuestions(manager.dbPath, decodeURIComponent(runQuestionsMatch[1]), {
           textbookExternalId: url.searchParams.get('textbookExternalId'),

@@ -6,7 +6,6 @@
 
 const { publicJob } = require('../progress.cjs');
 const { unregisterOwner } = require('../job_store.cjs');
-const { orphanRunIsResumable, sealOrphanContentRun, sealOrphanMetadataRun } = require('../orphan_runs.cjs');
 const { ACTIVE_STATUSES } = require('./constants.cjs');
 
 class LifecycleMethods {
@@ -134,52 +133,33 @@ class LifecycleMethods {
     }
   }
 
-  /**
-   * A deployment / restart is not a user cancel: seal the active run as a
-   * resumable `interrupted` snapshot (or `failed` when nothing usable was
-   * saved), stop the child and free the mutex slot.  `cancelled` runs can
-   * never be resumed, so a graceful stop must not produce one.
-   */
+  // Request a cooperative stop, but do not seal a snapshot while its writer
+  // is still alive. runChild/execute finalize after the real close event.
   interruptForShutdown(job) {
     if (!job || !ACTIVE_STATUSES.has(String(job.status))) return;
-    const message = '采集服务停止（部署或重启），已保存进度并封存为可续采';
-    const now = new Date().toISOString();
-    let resumable = false;
-    for (const scope of job.scopeItems || []) {
-      if (!['running', 'cancelling', 'queued'].includes(String(scope.status || ''))) continue;
-      const runId = Number(scope.collectorRunId || job._childRunId || 0);
-      if (scope.status !== 'queued' && runId > 0) {
-        const ok = orphanRunIsResumable(this.dbPath, runId);
-        sealOrphanContentRun(this.dbPath, runId, ok ? 'interrupted' : 'failed', message);
-        scope.collectorRunId = runId;
-        scope.status = ok ? 'interrupted' : 'failed';
-        scope.resumable = ok;
-        resumable = resumable || ok;
-      } else {
-        scope.status = 'cancelled';
-      }
-      scope.error = scope.error || message;
-      scope.errorCode = 'collector_shutdown';
-      scope.finishedAt = scope.finishedAt || now;
+    if (!job.cancelRequested) {
+      job.abortCode = 'collector_shutdown';
+      job.abortMessage = '采集服务停止（部署或重启），正在保存进度';
     }
-    if (job.runType === 'metadata' && job.metadataRunId) {
-      sealOrphanMetadataRun(this.dbPath, job.metadataRunId, 'failed', message);
-    }
-    job.abortCode = 'collector_shutdown';
-    job.abortMessage = message;
-    job.lines.push(`[stderr] [错误] ${message}`);
+    this.persist(job, { force: true });
     this.terminateChild(job);
-    this.finishJob(job, resumable ? 'interrupted' : 'failed', message, 'collector_shutdown');
   }
 
-  async shutdown() {
-    const active = this.activeJob;
-    if (active && ACTIVE_STATUSES.has(String(active.status))) {
-      try { this.interruptForShutdown(active); } catch {}
-    }
-    this.dispose();
+  shutdown() {
+    if (this._shutdownPromise) return this._shutdownPromise;
+    this.stopping = true;
+    this._shutdownPromise = (async () => {
+      const active = this.activeJob;
+      if (active && ACTIVE_STATUSES.has(String(active.status))) {
+        this.interruptForShutdown(active);
+      }
+      // This includes runChild's exit, snapshot reconciliation and mutex
+      // release. The SQLite store stays open throughout those callbacks.
+      await Promise.all([...this.jobs.values()].map(job => job.execution).filter(Boolean));
+      this.dispose();
+    })();
+    return this._shutdownPromise;
   }
 }
 
 module.exports = { LifecycleMethods };
-

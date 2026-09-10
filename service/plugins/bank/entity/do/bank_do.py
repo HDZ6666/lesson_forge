@@ -347,6 +347,16 @@ class QbSyncReview(Base):
     update_time = Column(DateTime, nullable=False)
 
 
+class QbQuestionTaskReview(Base):
+    __tablename__ = 'qb_question_task_review'
+
+    task_id = Column(BigInteger, primary_key=True)
+    baseline_json = Column(JSON, nullable=False)
+    excluded_json = Column(JSON, nullable=False)
+    revision = Column(Integer, nullable=False, default=0)
+    captured_at = Column(DateTime, nullable=False)
+
+
 class QbSyncJob(Base):
     """Persistent state for the backend-triggered source crawler."""
 

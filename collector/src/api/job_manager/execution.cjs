@@ -13,11 +13,13 @@ const {
   readRunSnapshotSummary,
 } = require('../../storage/readers/index.cjs');
 const { isResumablePartialRun } = require('../../storage/resume.cjs');
+const { descendants, killOwned } = require('../process_tree.cjs');
 const { scopeErrorText } = require('../request_validation.cjs');
 const {
   lastError,
   looksBlocked,
   orphanHasResumablePartial,
+  orphanRunIsResumable,
   sealOrphanContentRun,
   sealOrphanMetadataRun,
 } = require('../orphan_runs.cjs');
@@ -61,7 +63,9 @@ class ExecutionMethods {
       if (summaryStatus === 'running') {
         const orphanStatus = result.cancelled
           ? 'cancelled'
-          : (looksBlocked(job.lines)
+          : (job.abortCode === 'collector_shutdown'
+            ? (orphanRunIsResumable(this.dbPath, summary.id) ? 'interrupted' : 'failed')
+            : looksBlocked(job.lines)
             ? 'blocked'
             : (orphanHasResumablePartial(this.dbPath, summary.id, job.lines)
               ? 'interrupted'
@@ -143,23 +147,27 @@ class ExecutionMethods {
 
   terminateChild(job) {
     const child = job.child;
-    if (!child?.pid) return;
+    if (!child?.pid || child._terminationTimer) return;
+    child._ownedProcesses = descendants(child.pid);
     try {
       if (process.platform === 'win32') child.kill('SIGTERM');
       else process.kill(-child.pid, 'SIGTERM');
     } catch {
       try { child.kill?.('SIGTERM'); } catch {}
     }
-    const timer = setTimeout(() => {
-      if (!job.child?.pid) return;
+    child._terminationTimer = setTimeout(() => {
+      if (job.child !== child) return;
+      killOwned(child._ownedProcesses);
+      // exit can precede close when a descendant inherited a pipe. Do not
+      // signal a possibly reused process-group ID after the root exited.
+      if (child.exitCode != null || child.signalCode != null) return;
       try {
-        if (process.platform === 'win32') job.child.kill('SIGKILL');
-        else process.kill(-job.child.pid, 'SIGKILL');
+        if (process.platform === 'win32') child.kill('SIGKILL');
+        else process.kill(-child.pid, 'SIGKILL');
       } catch {
-        try { job.child.kill?.('SIGKILL'); } catch {}
+        try { child.kill?.('SIGKILL'); } catch {}
       }
-    }, KILL_GRACE_MS);
-    timer.unref?.();
+    }, this.killGraceMs || KILL_GRACE_MS);
   }
 
   startWatchdog(job) {
@@ -254,6 +262,9 @@ class ExecutionMethods {
       });
     } finally {
       this.stopWatchdog(job);
+      clearTimeout(child._terminationTimer);
+      child._terminationTimer = null;
+      killOwned(child._ownedProcesses);
       if (typeof child.off === 'function') child.off('message', onMessage);
       else if (typeof child.removeListener === 'function') child.removeListener('message', onMessage);
       job.child = null;
@@ -277,6 +288,10 @@ class ExecutionMethods {
   }
 
   async execute(job) {
+    if (job.abortCode) {
+      this.finishJob(job, 'interrupted', job.abortMessage, job.abortCode);
+      return;
+    }
     if (job.cancelRequested) {
       this.finishJob(job, 'cancelled', '同步在启动前被停止');
       return;
@@ -394,6 +409,7 @@ class ExecutionMethods {
       // cap is an existing bounded contract; only a resume source changes the
       // checkpoint switch passed to the child.
       if (job.maxPages < SITE_PAGE_LIMIT) childArgs.push('--max-pages', String(job.maxPages));
+      if (job.limitTo1000Pages === true) childArgs.push('--limit-to-1000-pages');
       childArgs.push(...crawlTuningArgs(this.crawlTuning));
       if (scope?.resumeFromCollectorRunId != null) {
         childArgs.push('--resume-run-id', String(scope.resumeFromCollectorRunId));
@@ -484,4 +500,3 @@ class ExecutionMethods {
 }
 
 module.exports = { ExecutionMethods };
-

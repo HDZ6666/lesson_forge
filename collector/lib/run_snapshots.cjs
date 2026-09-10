@@ -267,6 +267,17 @@ function dedupeRows(db, table, columns) {
   if (!tableExists(db, table)) return;
   const actual = tableColumns(db, table);
   if (columns.some((column) => !actual.has(column))) return;
+  // A complete, non-null unique key already proves there are no duplicates.
+  // Avoid re-scanning every historical row at each API startup. Nullable or
+  // partially indexed legacy schemas still take the repair path below.
+  const info = db.prepare(`PRAGMA table_info(${quoteIdentifier(table)})`).all();
+  if (columns.every(column => info.some(item => item.name === column && item.notnull))) {
+    const indexes = db.prepare(`PRAGMA index_list(${quoteIdentifier(table)})`).all();
+    if (indexes.some(index => index.unique && !index.partial && (() => {
+      const keys = db.prepare(`PRAGMA index_info(${quoteIdentifier(index.name)})`).all().map(item => item.name);
+      return keys.length === columns.length && columns.every(column => keys.includes(column));
+    })())) return;
+  }
   // Tables created by this collector are rowid tables.  A defensive catch
   // keeps migration usable if an operator imported a WITHOUT ROWID table.
   try {

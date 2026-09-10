@@ -43,10 +43,11 @@ class QuestionSyncStore {
       textbookId: String(value.textbookId ?? ''),
       catalogIds: [...(value.catalogIds || [])].map(String).sort(),
       catalogLevels: [...(value.catalogLevels || [])].map(Number).sort(),
-      // These are operational bounds.  Omitting them lets an interrupted
-      // probe run be resumed with larger max-catalogs/max-pages (or without
-      // a row limit) while retaining the same formal textbook scope.
+      // max-catalogs/max-pages (or a row limit) are operational bounds and
+      // may widen when an interrupted probe is resumed. Asset collection and
+      // the 1000-page policy are data/scope semantics, so they stay frozen.
       downloadAssets: value.downloadAssets !== false,
+      limitTo1000Pages: value.limitTo1000Pages === true,
       filters: value.filters || {},
     });
   }

@@ -11,6 +11,7 @@ const { normalizeId, sha256 } = require('../shared/utils.cjs');
 const {
   DEFAULT_PAGE_CAPACITY,
   DEFAULT_PAGINATION_SAFETY_LIMIT,
+  SITE_PAGE_LIMIT,
 } = require('../sources/zujuan/constants.cjs');
 
 function catalogSafetyPageLimit(options = {}) {
@@ -21,11 +22,18 @@ function catalogSafetyPageLimit(options = {}) {
 
 function catalogLastPage(options = {}) {
   const safety = catalogSafetyPageLimit(options);
+  // The task-level policy cap is deliberately independent from the debug
+  // `--max-pages` bound.  When enabled, a catalog may request at most the
+  // provider's 1000-page policy window; the caller decides whether reaching
+  // this boundary is a normal (policy-limited) completion.
+  const policyLimit = options.limitTo1000Pages === true
+    ? Math.min(safety, SITE_PAGE_LIMIT)
+    : safety;
   if (options.maxPagesProvided) {
     const configured = Number(options.maxPages);
-    if (Number.isFinite(configured) && configured > 0) return Math.min(safety, configured);
+    if (Number.isFinite(configured) && configured > 0) return Math.min(policyLimit, configured);
   }
-  return safety;
+  return policyLimit;
 }
 
 function growTargetPages(currentTarget, maxObservedTotal, pageCapacity = DEFAULT_PAGE_CAPACITY) {

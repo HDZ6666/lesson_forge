@@ -121,6 +121,12 @@
             <p v-else>一次任务可选择同一版本下的一本或多本教材，不会拆成多个任务。</p>
           </div>
         </el-form-item>
+        <el-form-item label="分页限制">
+          <div class="page-limit-option">
+            <el-switch v-model="createForm.limitTo1000Pages" active-text="最多 1000 页" inactive-text="按当前模式继续" />
+            <p>开启后每个目录最多请求 1000 页，达到边界后正常结束该目录并继续其他目录；这不代表网站总题目已全部抓完。</p>
+          </div>
+        </el-form-item>
         <el-form-item label="采集确认">
           <el-checkbox v-model="acknowledged">我已确认来源授权和采集规则，并了解本任务不会自动发布。</el-checkbox>
         </el-form-item>
@@ -177,7 +183,7 @@ const optionsLoading = ref(false)
 const optionError = ref('')
 const optionVersions = ref([])
 const acknowledged = ref(false)
-const createForm = reactive({ versionId: '', textbookIds: [] })
+const createForm = reactive({ versionId: '', textbookIds: [], limitTo1000Pages: false })
 const filters = reactive({ taskNo: '', status: undefined, versionName: '', createTimeRange: [], pageNum: 1, pageSize: 10 })
 let refreshTimer = null
 let mounted = false
@@ -286,6 +292,7 @@ async function openCreate() {
 function resetCreate() {
   createForm.versionId = ''
   createForm.textbookIds = []
+  createForm.limitTo1000Pages = false
   acknowledged.value = false
   optionError.value = ''
 }
@@ -298,10 +305,12 @@ async function createTask() {
   if (!canCreate.value || creating.value) return
   creating.value = true
   try {
-    const task = unwrapSyncTask(await createQuestionSyncTask({
+    const requestData = {
       versionId: createForm.versionId,
       textbookIds: [...new Set(createForm.textbookIds)],
-    }), 'question')
+    }
+    if (createForm.limitTo1000Pages === true) requestData.limitTo1000Pages = true
+    const task = unwrapSyncTask(await createQuestionSyncTask(requestData), 'question')
     if (!task?.taskId) throw new Error('服务端未返回任务编号')
     createVisible.value = false
     ElMessage.success('同步题库任务已创建')
@@ -455,5 +464,7 @@ onBeforeUnmount(() => { mounted = false; clearRefreshTimer() })
 .scope-summary strong, .scope-summary span { display: block; }
 .scope-summary span { margin-top: 4px; color: var(--el-text-color-secondary); font-size: 12px; }
 .scope-summary p { margin: 7px 0 0; color: var(--el-text-color-secondary); font-size: 12px; line-height: 1.6; }
+.page-limit-option { width: 100%; }
+.page-limit-option p { margin: 7px 0 0; color: var(--el-text-color-secondary); font-size: 12px; line-height: 1.6; }
 @media (max-width: 760px) { .page-heading { flex-direction: column; } .heading-actions { justify-content: flex-start; } .table-footer { align-items: flex-start; flex-direction: column; } .textbook-options { grid-template-columns: 1fr; } .textbook-option { border-right: 0; } }
 </style>

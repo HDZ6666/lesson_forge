@@ -222,6 +222,142 @@ async def test_execute_remote_uses_collector_client_and_finishes_from_remote_sta
 
 
 @pytest.mark.asyncio
+async def test_recovered_worker_rehydrates_page_policy_from_durable_options(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    row = SimpleNamespace(
+        run_id=73,
+        status='running',
+        run_type='content',
+        task_module='question',
+        collector_job_id=None,
+        options_json={
+            'limitTo1000Pages': True,
+            'textbookExternalIds': ['tb-1'],
+            'textbookScopes': [
+                {
+                    'sourceProvider': 'zujuan',
+                    'externalVersionId': 'version-1',
+                    'externalTextbookId': 'tb-1',
+                    'versionName': '版本 1',
+                    'textbookName': '教材 1',
+                }
+            ],
+        },
+    )
+    observed: dict[str, Any] = {}
+
+    async def load_row(_run_id: int) -> object:
+        return row
+
+    async def current_status(_run_id: int) -> str:
+        return 'running'
+
+    async def durable_scopes(_run_id: int, _options: object) -> list[dict[str, str]]:
+        return [
+            {
+                'sourceProvider': 'zujuan',
+                'externalVersionId': 'version-1',
+                'externalTextbookId': 'tb-1',
+                'versionName': '版本 1',
+                'textbookName': '教材 1',
+            }
+        ]
+
+    async def execute_remote(_run_id: int, handle: object, _max_pages: int) -> None:
+        observed['limitTo1000Pages'] = getattr(handle, 'limit_to_1000_pages', False)
+        observed['resumed'] = getattr(handle, 'resumed', False)
+
+    monkeypatch.setattr(module, '_load_row', load_row)
+    monkeypatch.setattr(module, '_current_status', current_status)
+    monkeypatch.setattr(module, '_durable_question_scope_identities', durable_scopes)
+    monkeypatch.setattr(module, '_execute_remote', execute_remote)
+
+    handle = module._WorkerHandle(
+        token='recovered-token',
+        run_type='content',
+        task_module='question',
+        recovered=True,
+    )
+    await module._execute(73, handle)
+
+    assert observed == {'limitTo1000Pages': True, 'resumed': False}
+
+
+@pytest.mark.asyncio
+async def test_resume_question_persists_and_reuses_page_policy(monkeypatch: pytest.MonkeyPatch) -> None:
+    row = SimpleNamespace(
+        run_id=74,
+        status='interrupted',
+        run_type='content',
+        options_json={
+            'limitTo1000Pages': True,
+            'textbookExternalIds': ['tb-1'],
+        },
+    )
+    scope = SimpleNamespace(
+        source_provider='zujuan',
+        external_version_id='version-1',
+        external_textbook_id='tb-1',
+        version_name_snapshot='版本 1',
+        textbook_name_snapshot='教材 1',
+        status='interrupted',
+        resume_from_collector_run_id=None,
+        collector_run_id=None,
+    )
+    observed: dict[str, Any] = {}
+
+    async def get_for_update(_db: object, task_id: int, task_module: str) -> object:
+        assert task_id == 74
+        assert task_module == 'question'
+        return row
+
+    async def scopes_for_update(_db: object, task_id: int) -> list[object]:
+        assert task_id == 74
+        return [scope]
+
+    async def active(_db: object, task_module: str) -> None:
+        assert task_module == 'question'
+        return None
+
+    class Db:
+        async def flush(self) -> None:
+            return None
+
+        async def commit(self) -> None:
+            return None
+
+        async def rollback(self) -> None:
+            raise AssertionError('resume should commit')
+
+    def execute(run_id: int, handle: object) -> object:
+        observed['runId'] = run_id
+        observed['limitTo1000Pages'] = getattr(handle, 'limit_to_1000_pages', False)
+        return object()
+
+    def schedule(task: object) -> object:
+        observed['scheduled'] = task is not None
+        return object()
+
+    monkeypatch.setattr(module.SyncTaskDao, 'get_for_update', get_for_update)
+    monkeypatch.setattr(module.SyncTaskDao, 'scopes_for_update', scopes_for_update)
+    monkeypatch.setattr(module.SyncTaskDao, 'active', active)
+    monkeypatch.setattr(module, '_status_from_row', lambda *_args: {'runId': 74})
+    monkeypatch.setattr(module, '_execute', execute)
+    monkeypatch.setattr(module.asyncio, 'create_task', schedule)
+
+    module._WORKERS.pop(74, None)
+    try:
+        result = await module.SyncRunService.resume_question(Db(), 74, 'tester')
+        assert result == {'runId': 74}
+        assert row.options_json['limitTo1000Pages'] is True
+        assert row.options_json['resumeTask'] is True
+        assert observed == {'runId': 74, 'limitTo1000Pages': True, 'scheduled': True}
+    finally:
+        module._WORKERS.pop(74, None)
+
+
+@pytest.mark.asyncio
 async def test_execute_remote_maps_terminal_collector_status(monkeypatch: pytest.MonkeyPatch) -> None:
     """A terminal HTTP projection is translated into the durable task state."""
 
@@ -886,6 +1022,7 @@ async def test_create_job_drops_collector_runtime_options(monkeypatch: pytest.Mo
             'questionScript': '/collector/question.cjs',
             'headful': True,
             'visibleLabel': 'remote-only',
+            'limitTo1000Pages': True,
         },
     )
 
@@ -893,6 +1030,7 @@ async def test_create_job_drops_collector_runtime_options(monkeypatch: pytest.Mo
     assert result['runId'] == 41
     options = db.added[0].options_json
     assert options['visibleLabel'] == 'remote-only'
+    assert options['limitTo1000Pages'] is True
     assert not any(key in options for key in ('collectorDb', 'metadataScript', 'questionScript', 'headful'))
 
 
@@ -1037,6 +1175,9 @@ async def test_create_job_refreshes_defaults_and_projects_response_before_worker
     class Db:
         def add_all(self, rows: list[object]) -> None:
             events.append(f'add-scopes:{len(rows)}')
+
+        def add(self, row: object) -> None:
+            pass
 
         async def flush(self) -> None:
             events.append('flush-scopes')
@@ -1253,7 +1394,14 @@ def test_bound_live_projection_keeps_fetch_windows() -> None:
                 },
             ],
             'currentCatalogIds': ['261285'],
-            'tree': [{'externalId': '261285', 'label': '1.2 探索规律', 'children': []}],
+            'tree': [
+                {
+                    'externalId': '261285',
+                    'label': '1.2 探索规律',
+                    'pageLimitReached': True,
+                    'children': [],
+                }
+            ],
         }
     )
 
@@ -1262,3 +1410,4 @@ def test_bound_live_projection_keeps_fetch_windows() -> None:
     assert bounded['fetchWindows'][0]['slots'][0]['pageNumber'] == 47
     assert bounded['fetchWindows'][0]['slots'][0]['line'].startswith('catalog=261285 page=47')
     assert bounded['currentCatalogIds'] == ['261285']
+    assert bounded['tree'][0]['pageLimitReached'] is True

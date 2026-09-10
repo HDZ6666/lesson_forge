@@ -70,6 +70,7 @@ class SyncJobDao:
     ) -> int:
         if not values:
             return 0
+        values = dict(values)
         values.setdefault('update_time', datetime.now())
         statement = update(QbSyncJob).where(QbSyncJob.run_id == run_id)
         if expected_statuses:

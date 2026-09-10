@@ -21,6 +21,12 @@ function deploymentBoolean(value, fallback = false) {
   throw new Error('COLLECTOR_HEADFUL 必须是 true/false');
 }
 
+function requestBoolean(value, name, fallback = false) {
+  if (value == null || value === '') return fallback;
+  if (typeof value !== 'boolean') throw new Error(`${name} 必须是 true 或 false`);
+  return value;
+}
+
 function scopeErrorText(summary, fallback = null) {
   if (!summary) return fallback;
   const first = Array.isArray(summary.errors) && summary.errors.length > 0
@@ -60,7 +66,7 @@ function normalizeScopeName(value, name) {
   return normalized;
 }
 
-function serverContentScope(scope, maxPages) {
+function serverContentScope(scope, maxPages, limitTo1000Pages = false) {
   const textbookId = String(scope.externalTextbookId || '').trim();
   const chapterId = String(scope.bootstrapChapterExternalId || textbookId).trim();
   return {
@@ -81,6 +87,7 @@ function serverContentScope(scope, maxPages) {
     },
     startPage: 1,
     maxPages: Number(maxPages),
+    limitTo1000Pages: limitTo1000Pages === true,
     details: false,
     detailFallback: true,
     refreshDetails: false,
@@ -93,10 +100,10 @@ function serverContentScope(scope, maxPages) {
   };
 }
 
-function validateIndependentResumeScopes(dbPath, scopes, maxPages) {
+function validateIndependentResumeScopes(dbPath, scopes, maxPages, limitTo1000Pages = false) {
   for (const scope of scopes || []) {
     if (scope.resumeFromCollectorRunId == null) continue;
-    const expected = serverContentScope(scope, maxPages);
+    const expected = serverContentScope(scope, maxPages, limitTo1000Pages);
     try {
       validateQuestionListResumeSourceRun(dbPath, scope.resumeFromCollectorRunId, expected);
     } catch (error) {
@@ -187,6 +194,7 @@ module.exports = {
   PROVIDER,
   deploymentBoolean,
   intInRange,
+  requestBoolean,
   normalizeIndependentTextbookScopes,
   normalizeScopeExternalId,
   normalizeScopeName,

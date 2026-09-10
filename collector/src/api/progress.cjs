@@ -215,6 +215,8 @@ function publicJob(job, options = {}) {
     completedVersions: job.completedVersions,
     totalTextbooks: job.totalTextbooks,
     completedTextbooks: job.completedTextbooks,
+    maxPages: job.maxPages,
+    limitTo1000Pages: job.limitTo1000Pages === true,
     catalogCount: job.catalogCount,
     questionCount: job.questionCount,
     questionCatalogCount: Number(job.questionCatalogCount || 0),

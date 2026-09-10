@@ -136,6 +136,8 @@ export function normalizeCatalogComparison(response) {
   const fetchedTree = normalizeCatalogTree(Array.isArray(fetched) ? fetched : [], 'fetched')
   const currentTree = normalizeCatalogTree(Array.isArray(current) ? current : [], 'current')
   return {
+    baselineOrigin: value.baselineOrigin,
+    baselineCapturedAt: value.baselineCapturedAt,
     fetchedTree,
     currentTree,
     summary: firstTaskField(value, ['summary', 'statistics', 'counts'], {}) || {},

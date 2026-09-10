@@ -459,6 +459,7 @@ const normalizeLiveTreeNode = (item, index = 0, depth = 0) => {
     scanComplete: booleanValue(firstTaskField(item, ['scanComplete', 'scan_complete'], false), false),
     dataComplete: booleanValue(firstTaskField(item, ['dataComplete', 'data_complete'], true), true),
     completionQuality: firstTaskField(item, ['completionQuality', 'completion_quality'], null),
+    pageLimitReached: booleanValue(firstTaskField(item, ['pageLimitReached', 'page_limit_reached'], false), false),
     status: String(firstTaskField(item, ['status', 'state'], 'pending') || 'pending'),
     queried: booleanValue(firstTaskField(item, ['queried', 'hasProgress', 'has_progress'], expectedTotal !== null), expectedTotal !== null),
     hasProgress: booleanValue(firstTaskField(item, ['hasProgress', 'has_progress', 'queried'], expectedTotal !== null), expectedTotal !== null),
@@ -525,6 +526,7 @@ const normalizeLiveProjection = (value) => {
     scanComplete: booleanValue(firstTaskField(value, ['scanComplete', 'scan_complete'], false), false),
     dataComplete: booleanValue(firstTaskField(value, ['dataComplete', 'data_complete'], true), true),
     completionQuality: firstTaskField(value, ['completionQuality', 'completion_quality'], null),
+    pageLimitReached: booleanValue(firstTaskField(value, ['pageLimitReached', 'page_limit_reached'], false), false),
     snapshotComplete: booleanValue(firstTaskField(value, ['snapshotComplete', 'snapshot_complete'], false), false),
     firstRoundComplete: booleanValue(firstTaskField(value, ['firstRoundComplete', 'first_round_complete'], totalQuestionCount !== null), totalQuestionCount !== null),
     totalsKnown: booleanValue(firstTaskField(value, ['totalsKnown', 'totals_known'], totalQuestionCount !== null), totalQuestionCount !== null),
@@ -663,6 +665,8 @@ export function normalizeSyncTask(response, kind = '') {
     sourceTaskId: firstTaskField(value, ['sourceTaskId', 'source_task_id'], ''),
     retryOfTaskId: firstTaskField(value, ['retryOfTaskId', 'retry_of_task_id', 'retryOfRunId', 'retry_of_run_id'], ''),
     collectorJobId: firstTaskField(value, ['collectorJobId', 'collector_job_id'], ''),
+    limitTo1000Pages: booleanValue(firstTaskField(value, ['limitTo1000Pages', 'limit_to_1000_pages'], false), false),
+    pageLimitReached: booleanValue(firstTaskField(value, ['pageLimitReached', 'page_limit_reached'], false), false),
     resumeAvailable: booleanValue(firstTaskField(value, ['resumeAvailable', 'resume_available'], undefined), undefined),
     resumeFromCollectorRunId: firstTaskField(value, ['resumeFromCollectorRunId', 'resume_from_collector_run_id'], ''),
     autoResumeEnabled: booleanValue(firstTaskField(value, ['autoResumeEnabled', 'auto_resume_enabled'], true), true),
@@ -696,6 +700,8 @@ export function normalizeSyncTask(response, kind = '') {
     currentStateToken: questionApplyStateToken({ ...value, applyStatus }),
     liveProgress,
     liveProgressByScope,
+    progressStale: value.progressStale === true,
+    progressUpdatedAt: value.progressUpdatedAt || null,
   }
 }
 

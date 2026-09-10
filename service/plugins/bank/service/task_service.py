@@ -403,6 +403,10 @@ def task_payload(row: object, scopes: list[object] | None = None) -> dict[str, A
             selected_live = next(iter(live_by_scope.values()))
     raw_live_progress = options.get('liveProgress') or options.get('live_progress')
     live_progress = _live_projection_summary(selected_live or raw_live_progress)
+    page_limit_reached = any(
+        _as_flag(_pick(item, 'pageLimitReached', 'page_limit_reached', default=False))
+        for item in live_by_scope.values()
+    ) or _as_flag(_pick(live_progress, 'pageLimitReached', 'page_limit_reached', default=False))
     return {
         'taskId': run_id,
         'taskNo': str(run_id),
@@ -420,6 +424,10 @@ def task_payload(row: object, scopes: list[object] | None = None) -> dict[str, A
         'retryOfRunId': _pick(row, 'retry_of_run_id', 'retryOfRunId'),
         'retryOfTaskId': _pick(row, 'retry_of_run_id', 'retryOfTaskId'),
         'collectorJobId': _pick(row, 'collector_job_id', 'collectorJobId'),
+        'limitTo1000Pages': _as_flag(
+            options.get('limitTo1000Pages', options.get('limit_to_1000_pages', False))
+        ),
+        'pageLimitReached': page_limit_reached,
         'versionId': version_id,
         'versionName': version_name,
         'textbookCount': len(scope_payloads) or total_textbooks,
@@ -527,6 +535,9 @@ def _normalise_catalog(row: Mapping[str, Any] | object) -> dict[str, Any] | None
         'sourceUrl': _pick(row, 'sourceUrl', 'source_url'),
         'sortOrder': _pick(row, 'sortOrder', 'sort_order', default=0),
         'questionCount': int(_pick(row, 'questionCount', 'question_count', default=0) or 0),
+        'uniqueQuestionCount': int(_pick(row, 'uniqueQuestionCount', 'questionCount', 'question_count', default=0) or 0),
+        'scanComplete': bool(_pick(row, 'scanComplete', default=False)),
+        'excludedQuestionCount': int(_pick(row, 'excludedQuestionCount', default=0) or 0),
         'capturedAt': _pick(row, 'capturedAt', 'captured_at'),
     }
 
@@ -1159,6 +1170,8 @@ class SyncTaskService:
             raise ServiceException(message='同步任务不存在')
         scopes = await SyncTaskDao.scopes(db, task_id)
         payload = task_payload(row, scopes)
+        from plugins.bank.service.sync_run_service import enrich_live_progress
+        payload = await enrich_live_progress(payload)
         if module == 'textbook':
             from plugins.bank.service.textbook_apply_service import TextbookApplyService  # noqa: PLC0415
 
@@ -1348,7 +1361,14 @@ class SyncTaskService:
             source_task_id=None,
             retry_of_run_id=task_id,
             scope_rows=retry_scopes,
-            extra_options={'versionId': int(version_id), 'textbookIds': [int(item) for item in textbook_ids]},
+            extra_options={
+                'versionId': int(version_id),
+                'textbookIds': [int(item) for item in textbook_ids],
+                # Preserve the original per-task page policy across a retry.
+                'limitTo1000Pages': _as_flag(
+                    options.get('limitTo1000Pages', options.get('limit_to_1000_pages', False))
+                ),
+            },
         )
 
     # ----------------------------- options/create ------------------------
@@ -1521,6 +1541,7 @@ class SyncTaskService:
                     }
                     for book in books
                 ],
+                'limitTo1000Pages': bool(request.limit_to_1000_pages),
             },
         )
 
@@ -1558,11 +1579,12 @@ class SyncTaskService:
         db: AsyncSession,
         task_id: int,
         query: TaskComparisonQueryModel | None,
+        *, allow_running: bool = False,
     ) -> tuple[QbSyncJob, list[Any]]:
         row = await SyncTaskDao.get(db, task_id, 'question')
         if row is None:
             raise ServiceException(message='同步题库任务不存在')
-        if str(_pick(row, 'status', default='')) != 'completed':
+        if not allow_running and str(_pick(row, 'status', default='')) != 'completed':
             raise ServiceException(message='题库任务尚未成功完成，暂不能查看快照对比')
         scopes = await SyncTaskDao.scopes(db, task_id)
         query = query or TaskComparisonQueryModel()

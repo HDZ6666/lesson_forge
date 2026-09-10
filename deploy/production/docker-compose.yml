@@ -52,6 +52,8 @@ services:
       dockerfile: ../deploy/production/collector.Dockerfile
     image: lesson-forge-collector:production
     container_name: lesson-forge-collector
+    init: true
+    stop_grace_period: 90s
     restart: unless-stopped
     environment:
       COLLECTOR_API_HOST: 0.0.0.0

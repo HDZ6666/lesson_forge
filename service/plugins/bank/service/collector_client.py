@@ -224,6 +224,7 @@ class CollectorClient:
         metadata_run_id: int | None = None,
         textbook_external_ids: list[str] | None = None,
         textbook_scopes: list[dict[str, Any]] | None = None,
+        limit_to_1000_pages: bool | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             'runType': run_type,
@@ -237,6 +238,11 @@ class CollectorClient:
         # jobs, which still use metadataRunId.
         if textbook_scopes is not None:
             payload['textbookScopes'] = textbook_scopes
+        # Omit the optional field for older callers; the collector treats an
+        # omitted value as false. Independent question workers pass the
+        # persisted task choice when enabled.
+        if limit_to_1000_pages is not None:
+            payload['limitTo1000Pages'] = bool(limit_to_1000_pages)
         return self._request(
             'POST',
             '/v1/jobs',
@@ -297,6 +303,12 @@ class CollectorClient:
     # wrappers around ``_request`` so callers share one HTTP boundary and a
     # response may evolve from snake case to the stable camelCase contract
     # without changing URL handling.
+
+    def run_questions_preview(self, run_id: int, **options: Any) -> dict[str, Any]:
+        return self._request('POST', f'/v1/runs/{int(run_id)}/questions-preview', payload=options)
+
+    def run_catalogs_preview(self, run_id: int, **options: Any) -> dict[str, Any]:
+        return self._request('POST', f'/v1/runs/{int(run_id)}/catalogs-preview', payload=options)
 
     def run_catalogs(
         self,

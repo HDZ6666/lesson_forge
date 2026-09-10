@@ -365,16 +365,19 @@ export function createQuestionSyncTask(data) {
   const textbookIds = Array.isArray(data?.textbookIds)
     ? [...new Set(data.textbookIds)]
     : [];
-  return request({
+  const requestConfig = {
     url: questionSyncTaskBaseUrl,
     method: "post",
-    // The question-task endpoint accepts exactly versionId/textbookIds.  The
-    // server resolves provider IDs and collector runs from formal data.
+    // The question-task endpoint accepts the formal selection plus the
+    // optional per-task page policy. The server resolves provider IDs and
+    // collector runs from formal data.
     data: {
       versionId: data?.versionId,
       textbookIds,
     },
-  });
+  };
+  if (data?.limitTo1000Pages === true) requestConfig.data.limitTo1000Pages = true;
+  return request(requestConfig);
 }
 
 export function listQuestionSyncTasks(query) {
@@ -410,6 +413,19 @@ export function applyQuestionSyncTask(taskId, expectedCurrentTaskId = null, expe
     method: "post",
     data,
   });
+}
+
+export function getQuestionReviewCatalogs(taskId, query) {
+  return request({ url: `${questionSyncTaskBaseUrl}/${encodeURIComponent(taskId)}/review/catalogs`, method: 'get', params: query });
+}
+export function getQuestionReviewQuestions(taskId, query) {
+  return request({ url: `${questionSyncTaskBaseUrl}/${encodeURIComponent(taskId)}/review/questions`, method: 'get', params: query });
+}
+export function getQuestionReviewDetail(taskId, externalId, query) {
+  return request({ url: `${questionSyncTaskBaseUrl}/${encodeURIComponent(taskId)}/review/questions/${encodeURIComponent(externalId)}`, method: 'get', params: query });
+}
+export function setQuestionReviewSelection(taskId, data, query) {
+  return request({ url: `${questionSyncTaskBaseUrl}/${encodeURIComponent(taskId)}/review/selection`, method: 'post', params: query, data });
 }
 
 export function getQuestionSyncCatalogComparison(taskId, query) {

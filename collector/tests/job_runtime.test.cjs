@@ -485,7 +485,15 @@ test('优雅关闭（部署/重启）把活动任务封存为可续采的 interr
   await waitFor(() => child != null);
   child.emit('message', { type: 'run_created', runId, runType: 'content' });
   await waitFor(() => manager.get(started.id)?.scopeItems[0].collectorRunId === runId);
-  await manager.shutdown();
+  const stopping = manager.shutdown();
+  assert.equal(manager.disposed, false, '关闭必须等待真实退出事件');
+  assert.throws(() => manager.start(contentPayload()), /关闭/);
+  const beforeClose = new DatabaseSync(dbPath, { readOnly: true });
+  assert.equal(beforeClose.prepare('SELECT status FROM sync_runs WHERE id = ?').get(runId).status, 'running');
+  beforeClose.close();
+  child.finish(-15);
+  await stopping;
+  assert.equal(manager.disposed, true);
   const job = manager.get(started.id);
   assert.equal(job.status, 'interrupted');
   assert.equal(job.errorCode, 'collector_shutdown');

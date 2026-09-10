@@ -12,6 +12,7 @@ import json
 import os
 import re
 import secrets
+import time
 from collections import deque
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -116,6 +117,8 @@ class _WorkerHandle:
     terminate_sent: bool = False
     log_lines: deque[str] = field(default_factory=lambda: deque(maxlen=MAX_LOG_LINES))
     last_persist: float = 0.0
+    progress_writes: dict = field(default_factory=dict)
+    options_compacted: bool = False
     # These fields are populated by the creator and are also reconstructed
     # from the durable row when a worker is recovered after a restart.
     run_type: str = 'metadata'
@@ -128,6 +131,9 @@ class _WorkerHandle:
     # A same-ID resume request sets this marker so the remote adapter can
     # omit already completed scopes from the newly-created collector job.
     resumed: bool = False
+    # A per-task question collection policy. Rehydrate this from options_json
+    # so retries/resumes keep the same page-limit mode.
+    limit_to_1000_pages: bool = False
 
 def _max_pages() -> int:
     """Allow an operator/test environment to reduce the site page ceiling."""
@@ -728,7 +734,7 @@ def _bound_live_node(value: Any, budget: list[int]) -> dict[str, Any] | None:
         'lastContiguousSuccessfulPage', 'highestAttemptedPage',
         'failedPageCount', 'duplicatePageCount', 'emptyPageCount',
         'parseErrorCount', 'assetErrorCount', 'scanComplete', 'dataComplete',
-        'completionQuality', 'current',
+        'completionQuality', 'pageLimitReached', 'current',
     ):
         if key in value and value[key] is not None:
             output[key] = _jsonable(value[key])
@@ -810,6 +816,7 @@ def _bound_live_projection(value: Any, *, include_tree: bool = True, max_nodes: 
         'knowledgePointCount', 'secondaryKnowledgePointCount', 'catalogCount',
         'summaryCatalogLevel', 'summaryNodeCount', 'treeNodeCount', 'treeTruncated', 'treeAvailable',
         'scanComplete', 'dataComplete', 'completionQuality', 'snapshotComplete',
+        'pageLimitReached',
         'latestSourceTotal', 'sourceReportedTotal',
     )
     for key in scalar_keys:
@@ -874,11 +881,13 @@ def _remote_live_projection(payload: Mapping[str, Any]) -> tuple[dict[str, Any] 
         payload.get('liveProgress') or payload.get('live_progress'),
         max_nodes=per_scope_nodes,
     )
+    if primary is not None and primary.get('available') is False:
+        primary = None
     by_scope: dict[str, dict[str, Any]] = {}
     if isinstance(raw_scopes, Mapping):
         for key, item in list(raw_scopes.items())[:MAX_SELECTED_TEXTBOOKS]:
             bounded = _bound_live_projection(item, max_nodes=per_scope_nodes)
-            if bounded is not None:
+            if bounded is not None and bounded.get('available') is not False:
                 by_scope[str(key)[:128]] = bounded
     if not by_scope and primary is not None:
         textbook_id = primary.get('textbookExternalId')
@@ -888,73 +897,121 @@ def _remote_live_projection(payload: Mapping[str, Any]) -> tuple[dict[str, Any] 
 
 
 async def _persist_live_progress(run_id: int, payload: Mapping[str, Any] | None) -> bool:
-    """Best-effort persistence of the mutable collector progress projection."""
+    try:
+        return await _cache_live_progress(run_id, payload)
+    except Exception:
+        # UI/cache failures must never fail or cancel a collector task.
+        return False
 
+
+async def _cache_live_progress(run_id: int, payload: Mapping[str, Any] | None) -> bool:
+    """Cache display data only; the collector remains the durable source."""
     if not isinstance(payload, Mapping):
         return False
-    try:
-        primary, by_scope = _remote_live_projection(payload)
-        if primary is None and not by_scope:
-            return False
-        row = await _load_row(run_id)
-        if row is None:
-            return False
-        options = _row_options(row)
-        existing_by_scope = options.get('liveProgressByScope') or options.get('live_progress_by_scope')
-        merged_by_scope: dict[str, dict[str, Any]] = {}
-        bounded_by_scope: dict[str, dict[str, Any]] = {}
-        if isinstance(existing_by_scope, Mapping):
-            merged_by_scope.update({str(key)[:128]: item for key, item in existing_by_scope.items()})
-        merged_by_scope.update(by_scope)
-        if merged_by_scope:
-            scope_count = min(MAX_SELECTED_TEXTBOOKS, len(merged_by_scope))
-            per_scope_nodes = max(
-                1,
-                min(MAX_LIVE_PROJECTION_NODES, MAX_LIVE_PROJECTION_NODES // max(1, scope_count)),
-            )
-            for key, item in list(merged_by_scope.items())[:MAX_SELECTED_TEXTBOOKS]:
-                bounded = _bound_live_projection(item, max_nodes=per_scope_nodes)
-                if bounded is not None:
-                    bounded_by_scope[key] = bounded
-            if bounded_by_scope:
-                options['liveProgressByScope'] = bounded_by_scope
-            else:
-                options.pop('liveProgressByScope', None)
-            options.pop('live_progress_by_scope', None)
-        else:
-            options.pop('liveProgressByScope', None)
-            options.pop('live_progress_by_scope', None)
-        # Keep a compatibility summary without a tree at the top level. The
-        # one authoritative renderable tree per scope lives only in
-        # liveProgressByScope; this prevents primary + by-scope payloads from
-        # tripling the same ~220-node tree in options_json.
-        primary_summary_source = primary
-        if primary_summary_source is None and bounded_by_scope:
-            primary_summary_source = next(iter(bounded_by_scope.values()))
-        primary_summary = _bound_live_projection(
-            primary_summary_source,
-            include_tree=False,
-            max_nodes=0,
-        ) if primary_summary_source is not None else None
-        if primary_summary is not None:
-            options['liveProgress'] = primary_summary
-            options.pop('live_progress', None)
-        else:
-            options.pop('liveProgress', None)
-            options.pop('live_progress', None)
-        current = _row_options(row)
-        if _stable_json(current.get('liveProgress')) == _stable_json(options.get('liveProgress')) \
-            and _stable_json(current.get('liveProgressByScope')) == _stable_json(options.get('liveProgressByScope')):
-            return False
-        return await _update_row(
-            run_id,
-            {'options_json': options},
-            expected_statuses=('starting', 'running', 'cancelling'),
-        )
-    except Exception:
-        # Live progress is diagnostic/UI data. A locked MySQL row, malformed
-        # legacy options value, or collector payload must never fail a crawl.
+    from plugins.bank.service import live_progress_cache as cache
+    primary, by_scope = _remote_live_projection(payload)
+    if primary is None and not by_scope:
         return False
+    job_id = payload.get('id') or payload.get('jobId') or payload.get('job_id')
+    if not job_id:
+        return False
+    return await cache.put(_live_cache_key(job_id, payload.get('status')), {
+        'liveProgress': _bound_live_projection(primary, include_tree=False) if primary else None,
+        'liveProgressByScope': by_scope,
+        'progressUpdatedAt': datetime.now().isoformat(),
+    })
+
+
+def _live_cache_key(job_id, status):
+    return f'bank:live:v2:{job_id}:{status}'
+
+
+async def enrich_live_progress(payload: dict[str, Any]) -> dict[str, Any]:
+    """Overlay a disposable projection without mutating an ORM record."""
+    from plugins.bank.service import live_progress_cache as cache
+    job_id = payload.get('collectorJobId')
+    if not job_id:
+        return payload
+    async def load():
+        try:
+            client = CollectorClient()
+            client.timeout = min(client.timeout, 3.0)
+            remote = await asyncio.to_thread(client.job, job_id)
+            if str(remote.get('id') or remote.get('jobId') or '') != str(job_id):
+                return None
+            primary, by_scope = _remote_live_projection(remote)
+            if primary is None and not by_scope:
+                return None
+            return {
+                'liveProgress': _bound_live_projection(primary, include_tree=False) if primary else None,
+                'liveProgressByScope': by_scope,
+                'progressUpdatedAt': datetime.now().isoformat(),
+            }
+        except Exception:
+            return None
+    live = await cache.get_or_load(_live_cache_key(job_id, payload.get('status')), load)
+    if live is not None:
+        payload.update(live)
+        payload['pageLimitReached'] = any(
+            bool(item.get('pageLimitReached')) for item in (live.get('liveProgressByScope') or {}).values()
+        ) or bool((live.get('liveProgress') or {}).get('pageLimitReached'))
+        payload['progressStale'] = False
+    else:
+        # Preserve a legacy last-known projection; never invent zero counts.
+        payload['progressStale'] = True
+    return payload
+
+
+async def _compact_active_options(run_id: int) -> None:
+    """Remove legacy live trees once, after a fresh collector response exists."""
+    async with DataSourceRegistry.session() as db:
+        row = (await db.execute(select(QbSyncJob).where(QbSyncJob.run_id == run_id)
+                               .with_for_update())).scalars().first()
+        if row is None or row.status not in ('starting', 'running', 'cancelling'):
+            return
+        options = _row_options(row)
+        compact = dict(options)
+        for key in ('liveProgress', 'live_progress', 'liveProgressByScope', 'live_progress_by_scope'):
+            compact.pop(key, None)
+        if isinstance(compact.get('scopeItems'), list):
+            compact['scopeItems'] = [
+                {k: v for k, v in item.items() if k not in ('liveProgress', 'live_progress')}
+                if isinstance(item, dict) else item for item in compact['scopeItems']
+            ]
+        if compact != options:
+            row.options_json = compact
+            await db.commit()
+
+
+def _progress_write_due(handle, key, values, *, now=None):
+    """Changed counters every 5s; unchanged ownership heartbeat every 10s."""
+    now = time.monotonic() if now is None else now
+    previous = handle.progress_writes.get(key)
+    fingerprint = _stable_json(values)
+    important = tuple(values.get(k) for k in (
+        'status', 'phase', 'current_textbook_id', 'collector_run_id',
+        'snapshot_complete', 'error_message'))
+    if previous is None:
+        return True
+    last_time, last_fingerprint, last_important = previous
+    if key.startswith('scope:') and values.get('status') in _TERMINAL_SCOPE_STATUSES:
+        # A terminal poll may add final counts after the status changed.
+        return fingerprint != last_fingerprint
+    return (important != last_important or now - last_time >=
+            (5.0 if fingerprint != last_fingerprint else 10.0))
+
+
+def _mark_progress_write(handle, key, values):
+    handle.progress_writes[key] = (time.monotonic(), _stable_json(values), tuple(
+        values.get(k) for k in ('status', 'phase', 'current_textbook_id', 'collector_run_id',
+                               'snapshot_complete', 'error_message')))
+
+
+async def _persist_progress_scope(handle, run_id, external_id, values):
+    key = f'scope:{external_id}'
+    if _progress_write_due(handle, key, values):
+        await _persist_remote_scope(run_id, external_id, values)
+        _mark_progress_write(handle, key, values)
 
 
 def _auto_resume_enabled(options: Mapping[str, Any]) -> bool:
@@ -2051,6 +2108,8 @@ async def _execute_remote(  # noqa: PLR0912, PLR0915
         }
         if handle.task_module == 'question' and handle.textbook_scopes:
             start_kwargs['textbook_scopes'] = list(handle.textbook_scopes)
+        if handle.task_module == 'question' and handle.limit_to_1000_pages:
+            start_kwargs['limit_to_1000_pages'] = True
         remote = await asyncio.to_thread(
             client.start_job,
             handle.run_type,
@@ -2083,11 +2142,14 @@ async def _execute_remote(  # noqa: PLR0912, PLR0915
             # projection. It must never attach that mutable identity to a new
             # independent question task.
             values.pop('metadata_run_id', None)
-        await _update_row(run_id, values)
-        # The live tree is mutable and best-effort. Persist it separately in
-        # options_json so the task detail API can serve it without touching
-        # immutable snapshot/compare paths.
-        await _persist_live_progress(run_id, remote)
+        cached = await _persist_live_progress(run_id, remote)
+        if cached and not handle.options_compacted:
+            await _compact_active_options(run_id)
+            handle.options_compacted = True
+        terminal = status not in {'queued', 'running', 'cancelling'}
+        if terminal or _progress_write_due(handle, 'task', values):
+            await _update_row(run_id, values)
+            _mark_progress_write(handle, 'task', values)
         # New collector versions expose immutable per-textbook scope data on
         # the job response.  Copy only bounded identity/progress fields into
         # the service scope table; unknown/legacy payloads are ignored.
@@ -2164,11 +2226,7 @@ async def _execute_remote(  # noqa: PLR0912, PLR0915
                     'snapshot_complete': scope_values.get('snapshot_complete'),
                     'snapshot_locked_at': scope_values.get('snapshot_locked_at'),
                 }
-                await _persist_remote_scope(
-                    run_id,
-                    external_id,
-                    scope_values,
-                )
+                await _persist_progress_scope(handle, run_id, external_id, scope_values)
         elif handle.task_module == 'question' and len(handle.textbook_external_ids) == 1:
             # Older collector projections expose a single scope's run ID only
             # at the top level.  Preserve that identity so the comparison
@@ -2192,7 +2250,8 @@ async def _execute_remote(  # noqa: PLR0912, PLR0915
                 'snapshot_locked_at': _scope_datetime(remote.get('snapshotLockedAt') or remote.get('snapshot_locked_at') or remote.get('lockedAt') or remote.get('locked_at')),
             }
             if top_run_id:
-                await _persist_remote_scope(
+                await _persist_progress_scope(
+                    handle,
                     run_id,
                     handle.textbook_external_ids[0],
                     {
@@ -2446,6 +2505,12 @@ async def _execute(run_id: int, handle: _WorkerHandle) -> None:  # noqa: PLR0912
                         options = {}
                 options = options if isinstance(options, Mapping) else {}
                 handle.resumed = handle.resumed or bool(options.get('resumeTask') or options.get('resume_task'))
+                handle.limit_to_1000_pages = _status_flag(
+                    options.get(
+                        'limitTo1000Pages',
+                        options.get('limit_to_1000_pages', handle.limit_to_1000_pages),
+                    )
+                )
                 handle.metadata_run_id = None
                 handle.textbook_scopes = await _durable_question_scope_identities(run_id, options)
                 handle.textbook_external_ids = [
@@ -2491,6 +2556,12 @@ async def _execute(run_id: int, handle: _WorkerHandle) -> None:  # noqa: PLR0912
                     options = {}
             if isinstance(options, dict):
                 handle.resumed = handle.resumed or bool(options.get('resumeTask') or options.get('resume_task'))
+                handle.limit_to_1000_pages = _status_flag(
+                    options.get(
+                        'limitTo1000Pages',
+                        options.get('limit_to_1000_pages', handle.limit_to_1000_pages),
+                    )
+                )
                 # metadataRunId remains a legacy content/center input. An
                 # independent question task is driven by its durable scopes.
                 if handle.task_module != 'question':
@@ -2852,6 +2923,7 @@ class SyncRunService:
                     'autoResumeAttempt': 0,
                     'autoResumePending': False,
                     'autoResumeNextAt': None,
+                    'limitTo1000Pages': False,
                 }
             )
         if run_type == 'content':
@@ -2892,6 +2964,12 @@ class SyncRunService:
                 )
             }
             options.update(_jsonable(safe_extra))
+        if task_module == 'question':
+            # Keep the policy as a canonical boolean in the durable task
+            # snapshot. Missing/legacy values intentionally mean disabled.
+            options['limitTo1000Pages'] = _status_flag(
+                options.get('limitTo1000Pages', options.get('limit_to_1000_pages', False))
+            )
         # Identity fields are always reconstructed from the validated scope
         # rows after optional display options. This prevents an internal
         # caller from replacing the server-owned collector selection.
@@ -2940,6 +3018,9 @@ class SyncRunService:
                     for scope in scope_entities:
                         db.add(scope)
                 await db.flush()
+            if task_module == 'question':
+                from plugins.bank.service.question_review_service import capture_review
+                await capture_review(db, run_id, scope_entities)
             await db.commit()
         except IntegrityError as exc:
             await db.rollback()
@@ -2961,6 +3042,7 @@ class SyncRunService:
             metadata_run_id=None if task_module == 'question' else metadata_run_id,
             textbook_external_ids=selected,
             textbook_scopes=resolved_textbook_scopes,
+            limit_to_1000_pages=bool(options.get('limitTo1000Pages', False)),
         )
         task = asyncio.create_task(_execute(run_id, handle))
         handle.task = task
@@ -3029,7 +3111,7 @@ class SyncRunService:
             return None
         module = str(getattr(row, 'task_module', None) or '')
         scopes = await SyncTaskDao.scopes(db, int(row.run_id)) if module in {'textbook', 'question'} else []
-        return _status_from_row(row, scopes)
+        return await enrich_live_progress(_status_from_row(row, scopes) or {})
 
     @staticmethod
     async def detail(db: AsyncSession, run_id: int) -> dict[str, Any]:
@@ -3038,7 +3120,7 @@ class SyncRunService:
             raise ServiceException(message='同步任务不存在')
         module = str(getattr(row, 'task_module', None) or '')
         scopes = await SyncTaskDao.scopes(db, run_id) if module in {'textbook', 'question'} else []
-        return _status_from_row(row, scopes) or {}
+        return await enrich_live_progress(_status_from_row(row, scopes) or {})
 
     @staticmethod
     async def list(db: AsyncSession, query: SyncRunPageQueryModel) -> Any:
@@ -3251,6 +3333,9 @@ class SyncRunService:
             textbook_external_ids=[identity['externalTextbookId'] for identity in worker_scopes],
             textbook_scopes=worker_scopes,
             resumed=True,
+            limit_to_1000_pages=_status_flag(
+                options.get('limitTo1000Pages', options.get('limit_to_1000_pages', False))
+            ),
         )
         task = asyncio.create_task(_execute(parsed_task_id, handle))
         handle.task = task
@@ -3561,6 +3646,8 @@ async def on_startup(context: object | None = None) -> None:
 
 async def on_shutdown(_context: object | None = None) -> None:
     await SyncRunService.shutdown()
+    from plugins.bank.service.live_progress_cache import close
+    await close()
 
 
 __all__ = ['SyncRunService', 'on_shutdown', 'on_startup']

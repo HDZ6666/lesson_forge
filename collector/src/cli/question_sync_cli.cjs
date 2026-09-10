@@ -51,6 +51,7 @@ function usage() {
   --max-catalogs <n>      本次最多目录数，0 表示不限
   --start-page <n>        每个目录起始页，默认 1
   --max-pages <n>         每个目录最多页数；不传则按来源 total 动态扩展
+  --limit-to-1000-pages   每个目录最多请求 1000 页，达到边界后按策略正常结束
   --safety-page-limit <n> 分页安全上限，默认 10000，只防止无限非空页
   --limit <n>             本次最多保存题数，便于验收；0 表示不限
   --concurrency <n>       同一 Cookie 列表并发路数，默认 8，最大 16
@@ -97,6 +98,7 @@ function parseArgs(argv = []) {
     startPage: 1,
     maxPages: SITE_PAGE_LIMIT,
     maxPagesProvided: false,
+    limitTo1000Pages: false,
     safetyPageLimit: DEFAULT_PAGINATION_SAFETY_LIMIT,
     limit: 0,
     headless: false,
@@ -142,6 +144,7 @@ function parseArgs(argv = []) {
       case '--max-catalogs': options.maxCatalogs = parsePositiveInt(needValue(index, flag), flag, { allowZero: true }); index += 1; break;
       case '--start-page': options.startPage = parsePositiveInt(needValue(index, flag), flag); index += 1; break;
       case '--max-pages': options.maxPages = parsePositiveInt(needValue(index, flag), flag); options.maxPagesProvided = true; index += 1; break;
+      case '--limit-to-1000-pages': options.limitTo1000Pages = true; break;
       case '--safety-page-limit': options.safetyPageLimit = parsePositiveInt(needValue(index, flag), flag); index += 1; break;
       case '--limit': options.limit = parsePositiveInt(needValue(index, flag), flag, { allowZero: true }); index += 1; break;
       case '--headless': options.headless = true; break;
@@ -234,6 +237,7 @@ async function main() {
     if (!options?.help) console.error('使用 --help 查看参数。');
     process.exitCode = 1;
   }
+  return options;
 }
 
 function runCli() {
@@ -241,7 +245,12 @@ function runCli() {
   // handle after its dedicated tab is closed.  This is CLI-only cleanup:
   // all run finally blocks have completed, and we deliberately do not call
   // browser.close() because that browser belongs to the operator.
-  return main().finally(() => process.exit(process.exitCode || 0));
+  return main().then(options => {
+    // Owned browsers have been closed; let IPC/stdout drain and libuv reap
+    // children naturally. Only an external CDP transport needs forced exit.
+    if (process.connected) process.disconnect();
+    if (options?.cdpUrl) process.exit(process.exitCode || 0);
+  });
 }
 
 module.exports = {

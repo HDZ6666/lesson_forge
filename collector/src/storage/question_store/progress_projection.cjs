@@ -45,6 +45,7 @@ class ProgressProjectionMethods {
       parseErrorCount: Number(row.parse_error_count || 0),
       assetErrorCount: Number(row.asset_error_count || 0),
       stallReason: row.stall_reason || null,
+      pageLimitReached: row.stall_reason === 'page_limit_1000',
       scanPercentHighWater: row.scan_percent_high_water == null ? null : Number(row.scan_percent_high_water),
     };
   }
@@ -64,6 +65,7 @@ class ProgressProjectionMethods {
     completionQuality = null,
     stallReason = null,
     assetErrorDelta = 0,
+    targetPageLimit = null,
     observedAt = nowIso(),
   }) {
     const issueCounts = this.catalogPageIssueCounts(runId, textbookId, catalogId);
@@ -82,11 +84,15 @@ class ProgressProjectionMethods {
       Number(existing?.max_observed_total) || 0,
       expectedTotal == null ? 0 : Number(expectedTotal) || 0,
     );
-    const grownTarget = growTargetPages(
+    let grownTarget = growTargetPages(
       Math.max(Number(existing?.target_pages) || 0, targetPages == null ? 0 : Number(targetPages) || 0),
       maxObserved || null,
       pageCapacity,
     );
+    const boundedTargetPageLimit = Number(targetPageLimit);
+    if (Number.isFinite(boundedTargetPageLimit) && boundedTargetPageLimit > 0) {
+      grownTarget = Math.min(grownTarget, boundedTargetPageLimit);
+    }
     const latestTotal = expectedTotal == null
       ? (existing?.max_observed_total == null ? null : Number(existing.max_observed_total))
       : Number(expectedTotal);

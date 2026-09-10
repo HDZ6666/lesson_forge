@@ -123,6 +123,7 @@ class PageRepoMethods {
     expectedTotal = null,
     pageCapacity = DEFAULT_PAGE_CAPACITY,
     targetPages = null,
+    targetPageLimit = null,
     rawSnapshot = null,
     assetErrorDelta = 0,
   }) {
@@ -181,6 +182,7 @@ class PageRepoMethods {
         expectedTotal,
         pageCapacity,
         targetPages,
+        targetPageLimit,
         lastCompletedPage,
         occurrenceCount,
         status: 'running',
@@ -525,6 +527,7 @@ class PageRepoMethods {
     queryFingerprint,
     filterJson = '{}',
     rawSnapshot = null,
+    targetPageLimit = null,
   }) {
     const observedAt = nowIso();
     const normalizedCatalog = catalog || {};
@@ -659,7 +662,11 @@ class PageRepoMethods {
       const lastCompletedPage = this.lastContiguousSuccessfulPage(
         runId, textbookExternalId, normalizedCatalog.externalId,
       );
-      const grownTarget = growTargetPages(expectedPages, expectedTotal, pageCapacity);
+      let grownTarget = growTargetPages(expectedPages, expectedTotal, pageCapacity);
+      const boundedTargetPageLimit = Number(targetPageLimit);
+      if (Number.isFinite(boundedTargetPageLimit) && boundedTargetPageLimit > 0) {
+        grownTarget = Math.min(grownTarget, boundedTargetPageLimit);
+      }
       this._upsertCatalogProgressRow({
         runId,
         textbookId: textbookExternalId,
@@ -667,6 +674,7 @@ class PageRepoMethods {
         expectedTotal,
         pageCapacity,
         targetPages: grownTarget,
+        targetPageLimit,
         lastCompletedPage,
         occurrenceCount,
         status: 'running',
@@ -796,6 +804,8 @@ class PageRepoMethods {
     rawSnapshot = null,
     stalled = false,
     stallReason = null,
+    pageLimitReached = false,
+    targetPageLimit = null,
   }) {
     const observedAt = nowIso();
     const normalizedCatalog = catalog || {};
@@ -827,15 +837,25 @@ class PageRepoMethods {
         expectedTotal,
         pageCapacity,
         targetPages: expectedPages,
+        targetPageLimit,
         lastCompletedPage,
         occurrenceCount,
         status,
         scanComplete: true,
         dataComplete,
         completionQuality,
-        stallReason: stallReason || (stalled ? 'pagination_safety_limit' : null),
+        // A policy-limited catalog is still a completed scan and must not be
+        // treated as a data error. Keep the reason in the progress row so the
+        // UI can say explicitly that the catalog stopped at the configured
+        // 1000-page boundary.
+        stallReason: stallReason || (pageLimitReached ? 'page_limit_1000' : (stalled ? 'pagination_safety_limit' : null)),
         observedAt,
       });
+      let statsExpectedPages = growTargetPages(expectedPages, expectedTotal, pageCapacity);
+      const boundedTargetPageLimit = Number(targetPageLimit);
+      if (Number.isFinite(boundedTargetPageLimit) && boundedTargetPageLimit > 0) {
+        statsExpectedPages = Math.min(statsExpectedPages, boundedTargetPageLimit);
+      }
       this.db.prepare(`
         INSERT INTO catalog_list_stats (
           scope_key, provider, catalog_external_id, chapter_id, filter_json,
@@ -857,7 +877,7 @@ class PageRepoMethods {
         String(normalizedCatalog.chapterExternalId || normalizedCatalog.externalId),
         String(filterJson || '{}'), expectedTotal == null ? null : Number(expectedTotal),
         Number(pageCapacity) || DEFAULT_PAGE_CAPACITY,
-        growTargetPages(expectedPages, expectedTotal, pageCapacity) || null,
+        statsExpectedPages || null,
         occurrenceCount, lastCompletedPage, observedAt,
       );
       if (rawSnapshot?.filePath && rawSnapshot?.sourceUrl) {
@@ -882,6 +902,7 @@ class PageRepoMethods {
       dataComplete,
       completionQuality,
       stalled,
+      pageLimitReached,
     };
   }
 

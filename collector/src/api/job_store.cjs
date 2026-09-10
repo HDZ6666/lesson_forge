@@ -26,7 +26,7 @@ const LIVE_OWNER_TOKENS = new Set();
 
 const PERSISTED_FIELDS = [
   'id', 'runType', 'status', 'phase', 'metadataRunId', 'collectorRunId',
-  'textbookExternalIds', 'scopeItems', 'maxPages', 'totalVersions',
+  'textbookExternalIds', 'scopeItems', 'maxPages', 'limitTo1000Pages', 'totalVersions',
   'completedVersions', 'totalTextbooks', 'completedTextbooks', 'catalogCount',
   'questionCount', 'questionCatalogCount', 'questionTagCount',
   'questionAssetCount', 'snapshotLockedAt', 'snapshotComplete',

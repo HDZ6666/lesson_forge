@@ -48,7 +48,7 @@ const questionTree = questionDetail.indexOf('class="live-catalog-panel panel"')
 const questionComparison = questionDetail.indexOf('class="comparison-workspace panel"')
 assert.ok(textbookComparison >= 0 && textbookComparison < textbookSummary, '教材对比应位于任务摘要上方')
 assert.equal(questionDetail.indexOf('fetch-window-log'), -1, '不再展示抓取窗口面板')
-assert.ok(questionTree >= 0 && questionTree < questionSummary, '题库任务页：动态目录树在上，本次任务信息在下')
+assert.equal(questionTree, -1, '目录树统一在快照对比区域')
 assert.ok(questionLogs > questionSummary, '运行日志位于本次任务信息内')
 assert.ok(questionComparison > questionSummary, '完成后的快照对比在任务信息下方')
 

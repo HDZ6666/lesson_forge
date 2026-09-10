@@ -28,4 +28,4 @@ COPY . .
 
 EXPOSE 9110
 
-CMD ["sh", "-c", "Xvfb :99 -screen 0 1440x1000x24 -nolisten tcp >/tmp/xvfb.log 2>&1 & exec node server.cjs"]
+CMD ["node", "container-entrypoint.cjs"]

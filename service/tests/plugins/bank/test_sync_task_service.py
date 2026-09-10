@@ -287,7 +287,7 @@ async def test_retry_question_creates_fresh_queued_scope_state(monkeypatch: pyte
     row = SimpleNamespace(
         run_id=RETRY_TASK_ID,
         status='failed',
-        options_json={'versionId': 3, 'textbookIds': [8]},
+        options_json={'versionId': 3, 'textbookIds': [8], 'limitTo1000Pages': True},
         source_task_id=SOURCE_TASK_ID,
         metadata_run_id=METADATA_RUN_ID,
     )
@@ -345,6 +345,58 @@ async def test_retry_question_creates_fresh_queued_scope_state(monkeypatch: pyte
     assert captured['source_task_id'] is None
     assert captured['retry_of_run_id'] == RETRY_TASK_ID
     assert captured['metadata_run_id'] is None
+    assert captured['extra_options']['limitTo1000Pages'] is True
+
+
+@pytest.mark.asyncio
+async def test_create_question_carries_page_policy_into_task_options(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    version = SimpleNamespace(
+        status='0',
+        source_provider='zujuan',
+        external_version_id='v-3',
+        version_name='版本 3',
+    )
+    textbook = SimpleNamespace(
+        textbook_id=8,
+        version_id=3,
+        status='0',
+        source_provider='zujuan',
+        external_textbook_id='tb-8',
+        textbook_name='教材 8',
+    )
+    captured: list[dict[str, Any]] = []
+
+    async def get_version(_db: object, version_id: int) -> object:
+        assert version_id == 3
+        return version
+
+    async def get_textbook(_db: object, textbook_id: int) -> object:
+        assert textbook_id == 8
+        return textbook
+
+    async def create_job(_db: object, **kwargs: Any) -> dict[str, Any]:
+        captured.append(kwargs)
+        return {'runId': len(captured)}
+
+    monkeypatch.setattr(task_service.BankDao, 'get_version', get_version)
+    monkeypatch.setattr(task_service.BankDao, 'get_textbook', get_textbook)
+    monkeypatch.setattr(sync_run_service.SyncRunService, '_create_job', create_job)
+
+    await task_service.SyncTaskService.create_question(
+        object(),
+        {'versionId': 3, 'textbookIds': [8], 'limitTo1000Pages': True},
+        'tester',
+    )
+    await task_service.SyncTaskService.create_question(
+        object(),
+        {'versionId': 3, 'textbookIds': [8]},
+        'tester',
+    )
+
+    assert captured[0]['extra_options']['limitTo1000Pages'] is True
+    assert captured[1]['extra_options']['limitTo1000Pages'] is False
 
 
 def test_catalog_tree_breaks_parent_cycles_without_recursion() -> None:

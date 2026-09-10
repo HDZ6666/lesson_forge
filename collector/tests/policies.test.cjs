@@ -30,6 +30,13 @@ describe('pagination policy', () => {
     assert.equal(catalogLastPage({ maxPagesProvided: false, maxPages: 3 }), 10000);
   });
 
+  it('最多 1000 页策略只在开关开启时收紧分页上限', () => {
+    assert.equal(catalogLastPage({ limitTo1000Pages: false }), 10000);
+    assert.equal(catalogLastPage({ limitTo1000Pages: true }), 1000);
+    assert.equal(catalogLastPage({ limitTo1000Pages: true, safetyPageLimit: 500 }), 500);
+    assert.equal(catalogLastPage({ limitTo1000Pages: true, maxPagesProvided: true, maxPages: 3 }), 3);
+  });
+
   it('完全相同的非空页签名判为 pagination_loop，空页返回 null', () => {
     const previous = new Set();
     const first = validatePageResult({

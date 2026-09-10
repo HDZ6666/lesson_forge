@@ -123,6 +123,7 @@ function readLiveRunProgress(dbPath, runId, options = {}) {
              ${progressColumns.has('empty_page_count') ? ', progress.empty_page_count' : ''}
              ${progressColumns.has('parse_error_count') ? ', progress.parse_error_count' : ''}
              ${progressColumns.has('asset_error_count') ? ', progress.asset_error_count' : ''}
+             ${progressColumns.has('stall_reason') ? ', progress.stall_reason' : ''}
              ${progressColumns.has('scan_percent_high_water') ? ', progress.scan_percent_high_water' : ''}
       FROM sync_run_catalog_progress AS progress
       WHERE ${progressWhere}
@@ -228,6 +229,7 @@ function readLiveRunProgress(dbPath, runId, options = {}) {
           || ['completed', 'stalled'].includes(String(row.status || '')),
         dataComplete: Number(row.data_complete || 0) === 1,
         completionQuality: row.completion_quality || null,
+        pageLimitReached: row.stall_reason === 'page_limit_1000',
         failedPageCount: Number(row.failed_page_count || 0),
         duplicatePageCount: Number(row.duplicate_page_count || 0),
         emptyPageCount: Number(row.empty_page_count || 0),
@@ -347,6 +349,7 @@ function readLiveRunProgress(dbPath, runId, options = {}) {
           )
         )),
         completionQuality: progress?.completionQuality || null,
+        pageLimitReached: progress?.pageLimitReached === true,
         status: progress?.status || 'pending',
         queried: Boolean(progress),
         hasProgress: Boolean(progress),
@@ -481,6 +484,7 @@ function readLiveRunProgress(dbPath, runId, options = {}) {
           && !(item.failedPageCount || item.duplicatePageCount
             || item.parseErrorCount || item.assetErrorCount))
       )));
+    const pageLimitReached = [...progressByCatalog.values()].some((item) => item.pageLimitReached === true);
     let totalsKnown;
     let statisticsPending;
     let totalQuestionCount;
@@ -598,6 +602,7 @@ function readLiveRunProgress(dbPath, runId, options = {}) {
       completionQuality: scanComplete
         ? (dataComplete ? 'completed' : 'completed_with_issues')
         : (run.completionQuality || null),
+      pageLimitReached,
       snapshotComplete: run.snapshotComplete === true,
       progressPercent,
       progress: progressPercent,

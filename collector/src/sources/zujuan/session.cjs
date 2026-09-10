@@ -274,14 +274,19 @@ async function launchCollectorContext(playwright, options) {
     ];
   }
   const context = await playwright.chromium.launchPersistentContext(options.profileDir, launchOptions);
-  context.setDefaultTimeout(options.timeout);
-  context.setDefaultNavigationTimeout(options.timeout);
-  await dismissStaleCollectorTabs(context);
-  const page = await prepareCollectorPage(context);
-  if (!options.headless) {
-    await minimizeCollectorWindowWithLog(context, options, page);
+  try {
+    context.setDefaultTimeout(options.timeout);
+    context.setDefaultNavigationTimeout(options.timeout);
+    await dismissStaleCollectorTabs(context);
+    const page = await prepareCollectorPage(context);
+    if (!options.headless) {
+      await minimizeCollectorWindowWithLog(context, options, page);
+    }
+    return context;
+  } catch (error) {
+    await closeCollectorContext(context);
+    throw error;
   }
-  return context;
 }
 
 async function closeCollectorContext(context) {
@@ -336,14 +341,19 @@ async function launchFreshCollectorSession(playwright, options) {
     ];
   }
   const browser = await playwright.chromium.launch(launchOptions);
-  const context = await browser.newContext({
-    locale: 'zh-CN',
-    viewport: { width: 1440, height: 1000 },
-  });
-  context.setDefaultTimeout(options.timeout);
-  context.setDefaultNavigationTimeout(options.timeout);
-  const page = await context.newPage();
-  return { browser, context, page };
+  try {
+    const context = await browser.newContext({
+      locale: 'zh-CN',
+      viewport: { width: 1440, height: 1000 },
+    });
+    context.setDefaultTimeout(options.timeout);
+    context.setDefaultNavigationTimeout(options.timeout);
+    const page = await context.newPage();
+    return { browser, context, page };
+  } catch (error) {
+    try { await browser.close(); } catch {}
+    throw error;
+  }
 }
 
 async function readProtectionSnapshot(page, contentSelector = SOURCE_CONTENT_SELECTOR) {

@@ -174,6 +174,10 @@ function normalizeResumeScope(scope) {
     },
     startPage: canonicalScopeNumber(raw.startPage, 1),
     maxPages: canonicalScopeNumber(raw.maxPages, 1),
+    // The per-task 1000-page policy is part of the immutable resume scope;
+    // changing it mid-run could otherwise turn a bounded snapshot into an
+    // unbounded continuation (or the reverse).
+    limitTo1000Pages: canonicalScopeBoolean(raw.limitTo1000Pages, false),
     limit: canonicalScopeNumber(raw.limit, 0),
     details,
     detailFallback: canonicalScopeBoolean(raw.detailFallback, false),

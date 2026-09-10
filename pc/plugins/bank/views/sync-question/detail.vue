@@ -4,7 +4,7 @@
       <div class="heading-copy">
         <el-button link type="primary" :icon="ArrowLeft" @click="goBack">返回任务列表</el-button>
         <h2>同步题库任务详情</h2>
-        <p>采集中实时展示目录进度；任务完成后，目录和题目对比仍只读取各教材绑定的不可变快照。</p>
+        <p>查看目录新增和题数变化，选择本次需要同步的题目。</p>
       </div>
       <div class="heading-actions">
         <el-button :icon="Refresh" :loading="loading" @click="refreshTask">刷新状态</el-button>
@@ -24,6 +24,9 @@
     </header>
 
     <el-alert v-if="requestError" class="state-alert" type="error" :closable="false" show-icon>{{ requestError }}</el-alert>
+    <el-alert v-if="task?.progressStale" class="state-alert" type="warning" :closable="false" show-icon>
+      实时进度暂不可用，当前显示已保存的数据；不会影响任务的最终验收结果。
+    </el-alert>
     <el-alert
       v-if="applySuccess"
       class="state-alert"
@@ -35,6 +38,10 @@
     />
     <el-alert v-if="task?.status === 'completed'" class="state-alert" type="success" :closable="false" show-icon>
       {{ completedStateMessage }}
+    </el-alert>
+    <el-alert v-if="task?.limitTo1000Pages" class="state-alert" type="warning" :closable="false" show-icon>
+      <template v-if="task?.pageLimitReached || liveProjection?.pageLimitReached">本任务内目录已按“最多 1000 页”策略结束；这是策略内完成，不代表网站全量题目。</template>
+      <template v-else>本任务已开启“最多 1000 页”：每个目录达到 1000 页后正常结束并继续其他目录，不以页面显示题目总数作为验收门槛。</template>
     </el-alert>
     <el-alert v-if="task?.status === 'interrupted'" class="state-alert" type="warning" :closable="false" show-icon>
       <template v-if="task.autoResumePending">已保留完整页断点，系统将于 {{ formatTaskTime(task.autoResumeNextAt) }} 自动续采（{{ task.autoResumeAttempt }}/{{ task.autoResumeMaxAttempts }}）。</template>
@@ -52,52 +59,6 @@
     <el-alert v-if="task?.status === 'completed' && !task?.eligible && task?.eligibilityMessage" class="state-alert" type="warning" :closable="false" show-icon>
       当前任务暂不可应用：{{ task.eligibilityMessage }}
     </el-alert>
-
-    <section v-if="task" class="live-catalog-panel panel" aria-label="动态目录树">
-      <div class="workspace-heading live-workspace-heading">
-        <div>
-          <h3>{{ liveScopeTitle }}</h3>
-          <p>动态目录树 · 每个目录显示自身已采集题目数，不合并父子目录。</p>
-        </div>
-        <el-select
-          v-if="task.scopeItems.length > 1"
-          v-model="selectedScopeKey"
-          placeholder="选择任务教材"
-          filterable
-          class="scope-select"
-          @change="handleScopeChange"
-        >
-          <el-option v-for="scope in task.scopeItems" :key="scopeKey(scope)" :label="scope.textbookName" :value="scopeKey(scope)" />
-        </el-select>
-      </div>
-      <div class="live-tree-toolbar">
-        <span v-if="liveProjection?.treeTruncated">目录较多，当前仅展示前 {{ liveProjection.treeNodeCount || liveCatalogTree.length }} 个节点</span>
-        <span v-else>{{ liveCatalogTree.length ? `共 ${liveProjection?.catalogCount || liveCatalogTree.length} 个目录节点` : '目录树准备中' }}</span>
-        <span v-if="liveProjection?.statisticsPending" class="live-stat-pending">统计总数中</span>
-      </div>
-      <div class="live-tree-scroll" v-loading="loading">
-        <el-tree
-          v-if="liveCatalogTree.length"
-          :data="liveCatalogTree"
-          node-key="nodeKey"
-          :props="treeProps"
-          default-expand-all
-          :expand-on-click-node="false"
-        >
-          <template #default="{ data }">
-            <span class="live-catalog-node" :class="{ 'is-current': Boolean(data.current) }">
-              <span class="node-label">{{ data.label }}</span>
-              <span class="live-node-count">{{ liveNodeCountText(data) }}</span>
-            </span>
-          </template>
-        </el-tree>
-        <el-empty
-          v-else
-          :image-size="64"
-          :description="liveTreeEmptyText"
-        />
-      </div>
-    </section>
 
     <section v-if="task" class="task-summary panel" v-loading="loading" aria-label="本次任务信息">
       <div class="status-line">
@@ -125,9 +86,9 @@
       </section>
     </section>
 
-    <section v-if="task && task.status === 'completed'" class="comparison-workspace panel">
+    <section v-if="task" class="comparison-workspace panel">
       <div class="workspace-heading">
-        <div><h3>任务快照对比</h3><p>先选择本任务中的一本教材，再查看该教材的目录或题目。</p></div>
+        <div><h3>任务快照对比</h3><p>查看本次目录更新，筛选需要同步的题目。采集过程中自动刷新。</p></div>
         <el-select v-model="selectedScopeKey" placeholder="选择任务教材" filterable class="scope-select" @change="handleScopeChange">
           <el-option v-for="scope in task.scopeItems" :key="scopeKey(scope)" :label="scope.textbookName" :value="scopeKey(scope)" />
         </el-select>
@@ -138,37 +99,31 @@
         <el-tab-pane label="目录对比" name="catalog">
           <el-alert v-if="catalogError" class="tab-alert" type="error" :closable="false" show-icon>{{ catalogError }}</el-alert>
           <div class="tree-toolbar">
-            <span>匹配规则：sourceProvider + externalNodeId</span>
+            <span>{{ catalogComparison.baselineOrigin === 'task_start' ? '对比任务开始时的正式库' : '历史任务：对比首次查看时的正式库' }} · {{ formatTaskTime(catalogComparison.baselineCapturedAt) }} · 每个目录独立去重计数</span>
             <el-button link type="primary" :icon="Refresh" :loading="catalogLoading" @click="loadCatalogComparison">刷新目录</el-button>
           </div>
-          <div class="catalog-grid" v-loading="catalogLoading">
+          <div class="review-catalog" v-loading="catalogLoading">
             <section class="tree-pane">
-              <div class="pane-heading"><h4>本次抓取</h4><span>点击已有/变化节点定位右侧</span></div>
+              <div class="pane-heading"><h4>本次抓取与旧目录</h4><span>点击目录筛选下方题目</span></div>
               <div class="tree-scroll">
-                <el-tree ref="fetchedTreeRef" :data="catalogComparison.fetchedTree" node-key="nodeKey" :props="treeProps" default-expand-all :expand-on-click-node="false" highlight-current @node-click="locateCurrentCatalog">
+                <el-tree ref="fetchedTreeRef" :data="catalogComparison.fetchedTree" node-key="nodeKey" :props="treeProps" default-expand-all :expand-on-click-node="false" highlight-current @node-click="selectCatalogQuestions">
                   <template #default="{ data }">
                     <span class="catalog-node" :id="catalogDomId('fetched', data)">
                       <span class="node-label">{{ data.label }}</span>
-                      <el-tag size="small" :type="taskComparisonStatusMeta(data.comparisonStatus).type">{{ taskComparisonStatusMeta(data.comparisonStatus).label }}</el-tag>
+                      <span class="review-node-count">{{ reviewNodeCount(data) }}</span>
+                      <el-tag v-for="tag in data.reviewTags || []" :key="tag" size="small" :type="reviewTag(tag).type">{{ reviewTag(tag).label }}</el-tag>
                     </span>
                   </template>
                 </el-tree>
-                <el-empty v-if="!catalogLoading && !catalogComparison.fetchedTree.length" :image-size="64" description="该任务快照暂无目录" />
-              </div>
-            </section>
-            <section class="tree-pane">
-              <div class="pane-heading"><h4>当前正式目录</h4><span>不会因本次未抓到而自动删除</span></div>
-              <div class="tree-scroll">
-                <el-tree ref="currentTreeRef" :data="catalogComparison.currentTree" node-key="nodeKey" :props="treeProps" default-expand-all :expand-on-click-node="false" highlight-current>
-                  <template #default="{ data }"><span class="catalog-node" :id="catalogDomId('current', data)"><span class="node-label">{{ data.label }}</span></span></template>
-                </el-tree>
-                <el-empty v-if="!catalogLoading && !catalogComparison.currentTree.length" :image-size="64" description="当前正式库暂无目录" />
+                <el-empty v-if="!catalogLoading && !catalogComparison.fetchedTree.length" :image-size="64" description="等待抓取目录" />
               </div>
             </section>
           </div>
         </el-tab-pane>
 
-        <el-tab-pane label="题目对比" name="question">
+      </el-tabs>
+      <section v-if="task.scopeItems.length" class="captured-questions">
+          <div class="pane-heading"><h4>本次抓取题目</h4><span>删除后本任务不再同步该题，可在“已排除”中恢复</span></div>
           <el-alert v-if="questionError" class="tab-alert" type="error" :closable="false" show-icon>{{ questionError }}</el-alert>
           <el-form :inline="true" :model="questionFilters" class="question-filters" @submit.prevent="searchQuestions">
             <el-form-item label="目录">
@@ -182,46 +137,43 @@
               </el-select>
             </el-form-item>
             <el-form-item label="关键词"><el-input v-model="questionFilters.keyword" maxlength="120" show-word-limit clearable placeholder="搜索题干、答案或解析" @keyup.enter="searchQuestions" /></el-form-item>
-            <el-form-item label="差异">
-              <el-select v-model="questionFilters.comparisonStatus" clearable placeholder="全部差异" class="status-select">
-                <el-option v-for="item in taskComparisonStatusOptions" :key="item.value" :label="item.label" :value="item.value" />
+            <el-form-item label="同步选择">
+              <el-select v-model="questionFilters.selection" class="status-select" @change="searchQuestions">
+                <el-option label="待同步" value="included" /><el-option label="已排除" value="excluded" /><el-option label="全部抓取" value="all" />
               </el-select>
             </el-form-item>
             <el-form-item><el-button type="primary" :icon="Search" @click="searchQuestions">查询</el-button><el-button :icon="RefreshLeft" @click="resetQuestionFilters">重置</el-button></el-form-item>
           </el-form>
-          <div class="server-page-hint">服务端按本任务完整快照计算 {{ questionPage.total }} 道题；浏览器当前只加载第 {{ questionFilters.pageNum }} 页。</div>
-          <el-table v-loading="questionLoading" :data="questionRows" stripe size="small" row-key="key" class="question-table" @row-click="openQuestionDetail">
-            <el-table-column label="差异" width="82" align="center"><template #default="scope"><el-tag size="small" :type="taskComparisonStatusMeta(scope.row.comparisonStatus).type">{{ taskComparisonStatusMeta(scope.row.comparisonStatus).label }}</el-tag></template></el-table-column>
+          <div class="review-list-toolbar"><span>当前筛选：抓取 {{ formatLiveCount(questionSummary.captured) }} 题 · 已排除 {{ formatLiveCount(questionSummary.excluded) }} 题 · 待同步 {{ formatLiveCount(questionSummary.included) }} 题</span><div><el-button :disabled="!selectedQuestions.length || acting" @click="changeQuestionSelection(selectedQuestions, true)">批量删除</el-button><el-button :disabled="!selectedQuestions.length || acting" @click="changeQuestionSelection(selectedQuestions, false)">批量恢复</el-button></div></div>
+          <el-table v-loading="questionLoading" :data="questionRows" stripe size="small" row-key="key" class="question-table" @row-click="openQuestionDetail" @selection-change="selectedQuestions = $event">
+            <el-table-column type="selection" width="42" />
+            <el-table-column label="同步" width="82" align="center"><template #default="scope"><el-tag size="small" :type="scope.row.excluded ? 'info' : 'success'">{{ scope.row.excluded ? '已排除' : '待同步' }}</el-tag></template></el-table-column>
             <el-table-column prop="externalQuestionId" label="外部题目 ID" min-width="145" show-overflow-tooltip />
             <el-table-column label="目录" min-width="130" show-overflow-tooltip><template #default="scope">{{ scope.row.catalogName || scope.row.catalogId || '—' }}</template></el-table-column>
             <el-table-column label="题型" width="110" show-overflow-tooltip><template #default="scope">{{ scope.row.questionType || '—' }}</template></el-table-column>
             <el-table-column label="题干摘要" min-width="300" show-overflow-tooltip><template #default="scope">{{ scope.row.stemText || '暂无题干' }}</template></el-table-column>
-            <el-table-column label="操作" width="106" fixed="right" align="center"><template #default="scope"><el-button link type="primary" :icon="View" @click.stop="openQuestionDetail(scope.row)">左右对比</el-button></template></el-table-column>
+            <el-table-column label="操作" width="150" fixed="right" align="center"><template #default="scope"><el-button link type="primary" @click.stop="openQuestionDetail(scope.row)">详情</el-button><el-button link :disabled="acting" :type="scope.row.excluded ? 'primary' : 'danger'" @click.stop="changeQuestionSelection([scope.row], !scope.row.excluded)">{{ scope.row.excluded ? '恢复' : '删除' }}</el-button></template></el-table-column>
           </el-table>
           <el-empty v-if="!questionLoading && !questionRows.length" :image-size="70" description="暂无符合筛选条件的题目" />
           <footer class="table-footer">
             <span>共 {{ questionPage.total }} 道题</span>
             <el-pagination v-model:current-page="questionFilters.pageNum" v-model:page-size="questionFilters.pageSize" :total="questionPage.total" :page-sizes="[10, 20, 50, 100]" layout="sizes, prev, pager, next, total" background @size-change="loadQuestions" @current-change="loadQuestions" />
           </footer>
-        </el-tab-pane>
-      </el-tabs>
+      </section>
     </section>
 
 
-    <el-drawer v-model="questionDetailVisible" title="题目快照对比" direction="rtl" size="min(1100px, 96vw)" append-to-body>
+    <el-drawer v-model="questionDetailVisible" title="本次抓取题目详情" direction="rtl" size="min(900px, 96vw)" append-to-body>
       <el-skeleton v-if="questionDetailLoading" :rows="10" animated />
       <el-alert v-else-if="questionDetailError" type="error" :closable="false" show-icon>{{ questionDetailError }}</el-alert>
       <template v-else-if="questionDetail">
         <div class="question-detail-meta">
-          <el-tag :type="taskComparisonStatusMeta(questionDetail.comparisonStatus).type">{{ taskComparisonStatusMeta(questionDetail.comparisonStatus).label }}</el-tag>
           <span>外部 ID：{{ questionDetail.externalQuestionId || '—' }}</span>
           <span>题型：{{ questionDetail.questionType || '—' }}</span>
           <span>目录：{{ questionDetail.catalogName || questionDetail.catalogId || '—' }}</span>
         </div>
-        <div v-if="questionDetail.diffFields?.length" class="diff-fields"><span>变化字段：</span><el-tag v-for="field in questionDetail.diffFields" :key="field" size="small" type="warning">{{ field }}</el-tag></div>
-        <div class="question-compare-grid">
+        <div>
           <QuestionSnapshot title="本次抓取" :snapshot="questionDetail.fetched" />
-          <QuestionSnapshot title="当前正式题目" :snapshot="questionDetail.current" />
         </div>
       </template>
       <el-empty v-else description="未找到题目快照" />
@@ -237,9 +189,10 @@ import { useRoute, useRouter } from 'vue-router'
 import {
   cancelQuestionSyncTask,
   applyQuestionSyncTask,
-  getQuestionSyncCatalogComparison,
-  getQuestionSyncQuestionComparison,
-  getQuestionSyncQuestionDetail,
+  getQuestionReviewCatalogs as getQuestionSyncCatalogComparison,
+  getQuestionReviewQuestions as getQuestionSyncQuestionComparison,
+  getQuestionReviewDetail as getQuestionSyncQuestionDetail,
+  setQuestionReviewSelection,
   getQuestionSyncTask,
   resumeQuestionSyncTask,
   retryQuestionSyncTask,
@@ -318,8 +271,10 @@ const questionLoading = ref(false)
 const questionError = ref('')
 const questionRows = ref([])
 const questionPage = reactive({ total: 0 })
+const questionSummary = reactive({ captured: 0, excluded: 0, included: 0 })
+const selectedQuestions = ref([])
 const remoteQuestionTypes = ref([])
-const questionFilters = reactive({ catalogId: '', questionType: '', keyword: '', comparisonStatus: '', pageNum: 1, pageSize: 20 })
+const questionFilters = reactive({ catalogId: '', questionType: '', keyword: '', selection: 'included', pageNum: 1, pageSize: 20 })
 const questionDetailVisible = ref(false)
 const questionDetailLoading = ref(false)
 const questionDetailError = ref('')
@@ -405,6 +360,7 @@ const summaryProgressBasis = computed(() => {
   }
   if (live.estimateComplete === false && !live.scanComplete) parts.push('部分层级尚无估算依据，总页数会随采集调整')
   if (live.scanComplete) parts.push(live.dataComplete === false ? '扫描已完成，存在异常页或素材问题' : '扫描已完成')
+  if (live.pageLimitReached || task.value?.pageLimitReached) parts.push('已达到每目录 1000 页策略上限（不代表网站全量）')
   return parts.join(' · ')
 })
 const summaryTotalQuestionText = computed(() => {
@@ -457,6 +413,9 @@ const completedStateMessage = computed(() => {
     || task.value?.snapshotComplete === false
   if (dataIncomplete && task.value?.status === 'completed') {
     return '页面扫描已完成，但存在失败页、重复页或素材异常，当前快照不能直接覆盖正式题库。'
+  }
+  if (task.value?.limitTo1000Pages && (live?.pageLimitReached || task.value?.pageLimitReached)) {
+    return `采集已按每目录最多 1000 页策略完成${task.value?.eligible ? '。请先核对下方快照差异，再确认应用正式题库快照。' : '，但当前快照暂不可应用。'}`
   }
   if (task.value?.eligible) return `采集已完成。请先核对下方快照差异，再确认${questionApplyVerb(task.value)}正式题库快照。`
   return '采集已完成，但当前快照暂不可应用。'
@@ -575,12 +534,10 @@ function selectDefaultScope() {
 }
 
 async function ensureComparisonLoaded() {
-  if (task.value?.status !== 'completed') return
   selectDefaultScope()
-  if (!selectedScopeKey.value || loadedScopeKey === selectedScopeKey.value) return
+  if (!selectedScopeKey.value) return
   loadedScopeKey = selectedScopeKey.value
-  if (activeTab.value === 'catalog') await loadCatalogComparison()
-  else await loadQuestions()
+  await Promise.all([loadCatalogComparison(), loadQuestions()])
 }
 
 async function loadTask(silent = false) {
@@ -609,9 +566,7 @@ async function handleScopeChange() {
   // same key and incorrectly skip loading the comparison workspace.
   loadedScopeKey = task.value?.status === 'completed' ? selectedScopeKey.value : ''
   resetComparisonState()
-  if (task.value?.status !== 'completed') return
-  if (activeTab.value === 'catalog') await loadCatalogComparison()
-  else await loadQuestions()
+  await Promise.all([loadCatalogComparison(), loadQuestions()])
 }
 
 function resetComparisonState() {
@@ -630,16 +585,21 @@ async function handleTabChange(name) {
 
 async function loadCatalogComparison() {
   if (!selectedScope.value || catalogLoading.value) return
+  const requestedKey = `${taskId.value}:${selectedScopeKey.value}`
   catalogLoading.value = true
   catalogError.value = ''
   try {
     const result = normalizeCatalogComparison(await getQuestionSyncCatalogComparison(taskId.value, scopeQuery()))
+    if (requestedKey !== `${taskId.value}:${selectedScopeKey.value}`) return
     Object.assign(catalogComparison, result)
     if (result.sourceAvailable === false) catalogError.value = result.sourceMessage || '该教材未生成可用的目录快照'
   } catch (error) {
     Object.assign(catalogComparison, { fetchedTree: [], currentTree: [], summary: {} })
     catalogError.value = syncTaskErrorMessage(error, '目录快照对比加载失败')
-  } finally { catalogLoading.value = false }
+  } finally {
+    catalogLoading.value = false
+    if (mounted && requestedKey !== `${taskId.value}:${selectedScopeKey.value}`) loadCatalogComparison()
+  }
 }
 
 function catalogDomId(side, node) {
@@ -677,7 +637,7 @@ function questionQuery() {
     catalogId: questionFilters.catalogId || undefined,
     questionType: questionFilters.questionType || undefined,
     keyword: questionFilters.keyword || undefined,
-    comparisonStatus: questionFilters.comparisonStatus || undefined,
+    selection: questionFilters.selection,
     pageNum: questionFilters.pageNum,
     pageSize: questionFilters.pageSize,
   }
@@ -685,10 +645,14 @@ function questionQuery() {
 
 async function loadQuestions() {
   if (!selectedScope.value || questionLoading.value) return
+  const requestedKey = JSON.stringify([taskId.value, questionQuery()])
   questionLoading.value = true
   questionError.value = ''
   try {
-    const page = normalizeQuestionComparisonPage(await getQuestionSyncQuestionComparison(taskId.value, questionQuery()))
+    const response = await getQuestionSyncQuestionComparison(taskId.value, questionQuery())
+    if (requestedKey !== JSON.stringify([taskId.value, questionQuery()])) return
+    const page = normalizeQuestionComparisonPage(response)
+    Object.assign(questionSummary, response.data?.summary || response.summary || {})
     questionRows.value = page.rows
     questionPage.total = page.total
     if (page.questionTypes.length) remoteQuestionTypes.value = page.questionTypes
@@ -696,11 +660,45 @@ async function loadQuestions() {
     questionRows.value = []
     questionPage.total = 0
     questionError.value = syncTaskErrorMessage(error, '题目快照对比加载失败')
-  } finally { questionLoading.value = false }
+  } finally {
+    questionLoading.value = false
+    if (mounted && requestedKey !== JSON.stringify([taskId.value, questionQuery()])) loadQuestions()
+  }
 }
 
 function searchQuestions() { questionFilters.pageNum = 1; loadQuestions() }
-function resetQuestionFilters() { Object.assign(questionFilters, { catalogId: '', questionType: '', keyword: '', comparisonStatus: '', pageNum: 1 }); loadQuestions() }
+function resetQuestionFilters() { Object.assign(questionFilters, { catalogId: '', questionType: '', keyword: '', selection: 'included', pageNum: 1 }); loadQuestions() }
+
+const reviewTags = {
+  new: { label: '新增', type: 'success' }, structure: { label: '目录变更', type: 'warning' },
+  increased: { label: '题数增加', type: 'success' }, decreased: { label: '题数减少', type: 'warning' },
+  existing: { label: '无变化', type: 'info' }, running: { label: '采集中', type: 'primary' },
+  incomplete: { label: '未完成', type: 'warning' }, missing: { label: '本次未发现', type: 'info' },
+  pending: { label: '等待抓取', type: 'info' },
+}
+function reviewTag(tag) { return reviewTags[tag] || { label: tag, type: 'info' } }
+function reviewNodeCount(node) {
+  const previous = node.oldQuestionCount == null ? '' : `旧 ${formatLiveCount(node.oldQuestionCount)} → `
+  const excluded = Number(node.excludedQuestionCount || 0)
+  const selection = excluded ? ` · 待同步 ${formatLiveCount(node.questionCount - excluded)} · 已排除 ${excluded}` : ''
+  return `${previous}${node.questionCount == null ? '本次未抓取' : `${node.scanComplete ? '本次' : '已抓取'} ${formatLiveCount(node.questionCount)} 题`}${selection}`
+}
+function selectCatalogQuestions(node) {
+  questionFilters.catalogId = node.externalNodeId
+  searchQuestions()
+}
+async function changeQuestionSelection(rows, excluded) {
+  try {
+    await ElMessageBox.confirm(excluded ? `从本任务排除 ${rows.length} 道题？相同题号在其他目录中也将跳过，可随时恢复。` : `恢复 ${rows.length} 道题参与同步？`, excluded ? '删除抓取题目' : '恢复题目', { type: 'warning' })
+    acting.value = true
+    await setQuestionReviewSelection(taskId.value, { externalQuestionIds: rows.map(row => row.externalQuestionId), excluded }, scopeQuery())
+    ElMessage.success(excluded ? '已排除，同步时将跳过这些题目' : '已恢复')
+    await Promise.all([loadQuestions(), loadCatalogComparison()])
+    if (!questionRows.value.length && questionFilters.pageNum > 1) { questionFilters.pageNum--; await loadQuestions() }
+  } catch (error) {
+    if (error !== 'cancel' && error !== 'close') ElMessage.error(syncTaskErrorMessage(error, '题目选择保存失败'))
+  } finally { acting.value = false }
+}
 
 async function openQuestionDetail(row) {
   if (!row?.externalQuestionId) {
@@ -860,6 +858,11 @@ onBeforeUnmount(() => { mounted = false; clearPoll() })
 .pane-heading h4 { margin: 0; font-size: 14px; }
 .tree-scroll { min-height: 0; flex: 1; overflow: auto; padding: 10px; }
 .catalog-node { display: flex; min-width: 0; flex: 1; align-items: center; justify-content: space-between; gap: 8px; padding: 3px 5px; border-radius: 4px; }
+.review-catalog .tree-scroll { max-height: 520px; min-height: 220px; }
+.review-catalog .node-label { flex: 1; }
+.review-node-count { color: var(--el-text-color-secondary); font-size: 12px; font-variant-numeric: tabular-nums; margin-left: auto; white-space: nowrap; }
+.captured-questions { border-top: 1px solid var(--el-border-color-light); margin-top: 20px; padding-top: 20px; }
+.review-list-toolbar { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin: 12px 0; color: var(--el-text-color-secondary); font-size: 13px; flex-wrap: wrap; }
 .node-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .is-locate-highlight { animation: locate-highlight 1.9s ease-out; }
 @keyframes locate-highlight { 0%, 55% { background: var(--el-color-warning-light-8); box-shadow: 0 0 0 2px var(--el-color-warning-light-5); } 100% { background: transparent; box-shadow: 0 0 0 transparent; } }

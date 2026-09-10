@@ -63,7 +63,8 @@ assert.match(textbookDetail, /formatTextbookApplyStats\(result\)/)
 assert.match(questionList, /versionId: createForm\.versionId/)
 assert.match(questionList, /textbookIds: \[\.\.\.new Set\(createForm\.textbookIds\)\]/)
 assert.match(questionList, /缺少采集来源标识/)
-assert.match(questionDetail, /服务端按本任务完整快照计算/)
+assert.match(questionDetail, /本次抓取题目/)
+assert.doesNotMatch(questionDetail, /label="题目对比"/)
 // 2026-09-07: the "当前 N 路窗口" block was removed from the task page; the
 // progress basis (pages scanned / estimated total, catalogs done) replaces it.
 assert.doesNotMatch(questionDetail, /路窗口/)

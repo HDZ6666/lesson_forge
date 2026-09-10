@@ -241,6 +241,7 @@ class SyncTaskDao:
     ) -> int:
         if not values:
             return 0
+        values = dict(values)
         values.setdefault('update_time', datetime.now())
         statement = update(QbSyncJobScope).where(QbSyncJobScope.scope_id == scope_id)
         if expected_statuses:

@@ -646,6 +646,11 @@ class QuestionTaskCreateModel(BankModel):
 
     version_id: int = Field(alias='versionId', gt=0)
     textbook_ids: list[int] = Field(alias='textbookIds', min_length=1, max_length=200)
+    limit_to_1000_pages: bool = Field(
+        default=False,
+        alias='limitTo1000Pages',
+        description='每个目录最多请求 1000 页；达到边界后按策略正常结束当前目录',
+    )
 
 
 class SyncTaskPageQueryModel(BankPageQueryModel):
@@ -733,6 +738,8 @@ class SyncTaskModel(BankModel):
     retry_of_run_id: int | None = Field(default=None, alias='retryOfRunId')
     retry_of_task_id: int | None = Field(default=None, alias='retryOfTaskId')
     collector_job_id: str | None = Field(default=None, alias='collectorJobId')
+    limit_to_1000_pages: bool = Field(default=False, alias='limitTo1000Pages')
+    page_limit_reached: bool = Field(default=False, alias='pageLimitReached')
     version_id: int | None = Field(default=None, alias='versionId')
     version_name: str | None = Field(default=None, alias='versionName')
     textbook_count: int = Field(default=0, alias='textbookCount', ge=0)
@@ -866,6 +873,12 @@ class TaskComparisonQueryModel(BankPageQueryModel):
     keyword: str | None = Field(default=None, max_length=120)
     comparison_status: str | None = Field(default=None, alias='comparisonStatus', max_length=30)
     source_provider: str | None = Field(default=None, alias='sourceProvider', max_length=64)
+    selection: Literal['included', 'excluded', 'all'] = 'included'
+
+
+class QuestionTaskSelectionModel(BankModel):
+    external_question_ids: list[str] = Field(alias='externalQuestionIds', min_length=1, max_length=500)
+    excluded: bool = True
 
 
 class TaskOptionsModel(ResponseBaseModel):

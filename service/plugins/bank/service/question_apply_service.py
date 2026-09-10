@@ -1551,6 +1551,10 @@ async def _load_task_and_scopes(
 
 async def _validate_task_snapshots(db: AsyncSession, task_id: int) -> tuple[QbSyncJob, list[QbSyncJobScope], list[dict[str, Any]]]:
     task, scopes = await _load_task_and_scopes(db, task_id)
+    from plugins.bank.entity.do.bank_do import QbQuestionTaskReview
+    review = await db.get(QbQuestionTaskReview, task_id)
+    excluded_ids = set(review.excluded_json) if review else set()
+    review_revision = review.revision if review else 0
     initial_signature = _task_scope_signature(task, scopes)
     if str(_task_value(task, 'status', default='') or '').strip().lower() != 'completed':
         raise ServiceException(message='只有已成功完成的同步题库任务才能应用正式表')
@@ -1585,6 +1589,7 @@ async def _validate_task_snapshots(db: AsyncSession, task_id: int) -> tuple[QbSy
     for textbook_id, collector_run_id in scope_inputs:
         raw = await _read_snapshot(collector_run_id, textbook_id)
         snapshot = _normalise_snapshot(raw, task_id, textbook_id)
+        _filter_review_selection(snapshot, excluded_ids)
         if int(snapshot['collector_run_id'] or 0) != collector_run_id:
             raise ServiceException(message=f'collector 运行 ID 与任务 {task_id} 教材 {textbook_id} 不一致')
         await _download_snapshot_assets(snapshot)
@@ -1594,6 +1599,9 @@ async def _validate_task_snapshots(db: AsyncSession, task_id: int) -> tuple[QbSy
     # asset work has completed. Any status, scope membership, identity or run
     # change during the unlocked phase fails closed before formal writes.
     locked_task, locked_scopes = await _load_task_and_scopes(db, task_id, for_update=True)
+    locked_review = await db.get(QbQuestionTaskReview, task_id, populate_existing=True)
+    if (locked_review.revision if locked_review else 0) != review_revision:
+        raise ServiceException(message='题目选择在同步准备期间发生变化，请重新同步')
     if _task_scope_signature(locked_task, locked_scopes) != initial_signature:
         raise ServiceException(message='同步题库任务或教材范围在快照读取期间发生变化，请刷新后重试')
     locked_by_key = {
@@ -1611,6 +1619,17 @@ async def _validate_task_snapshots(db: AsyncSession, task_id: int) -> tuple[QbSy
         snapshot['scope'] = locked_scope
         snapshot['task_id'] = int(task_id)
     return locked_task, locked_scopes, snapshots
+
+
+def _filter_review_selection(snapshot, excluded_ids):
+    """Filter only after original snapshot integrity validation, before asset IO."""
+    if not excluded_ids:
+        return
+    snapshot['excluded_question_ids'] = set(excluded_ids)
+    snapshot['questions'] = [row for row in snapshot['questions'] if row['external_id'] not in excluded_ids]
+    for collection in ('question_catalogs', 'tags', 'assets'):
+        snapshot[collection] = [row for row in snapshot[collection] if row['question_external_id'] not in excluded_ids]
+    snapshot['snapshot_hash'] = _canonical_hash({'snapshot': snapshot['snapshot_hash'], 'excluded': sorted(excluded_ids)})
 
 
 def _stats_bucket() -> dict[str, int]:
@@ -2270,6 +2289,8 @@ class QuestionApplyService:
             if str(getattr(question_by_id.get(int(row.question_id)), 'source_provider', '') or '') == PROVIDER
         }
         for key, row in old_by_key.items():
+            if str(getattr(question_by_id.get(key[0]), 'external_question_id', '')) in snapshot.get('excluded_question_ids', set()):
+                continue
             relation_managed = getattr(row, 'last_sync_batch_id', None) is not None
             if key not in desired and relation_managed:
                 await db.delete(row)
@@ -2306,6 +2327,8 @@ class QuestionApplyService:
         await db.flush()
 
         target_question_ids = old_question_ids | {int(row.question_id) for row in question_map.values()}
+        target_question_ids -= {int(row.question_id) for row in formal_questions
+                                if str(row.external_question_id) in snapshot.get('excluded_question_ids', set())}
         if target_question_ids:
             enabled_query = select(QbQuestionCatalog.question_id).join(
                 QbCatalogNode, QbCatalogNode.catalog_id == QbQuestionCatalog.catalog_id
@@ -2353,7 +2376,7 @@ class QuestionApplyService:
         # out ownership from active catalog relations: an exclusive question
         # may have its source rows replaced, while a shared question only gets
         # additive updates so another textbook's data is never erased.
-        affected_question_ids = old_question_ids | {int(row.question_id) for row in question_map.values()}
+        affected_question_ids = target_question_ids
         all_active_relations: list[QbQuestionCatalog] = []
         if affected_question_ids:
             relation_result = await db.execute(

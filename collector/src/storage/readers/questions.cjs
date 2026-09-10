@@ -92,6 +92,9 @@ function readRunQuestions(dbPath, runId, options = {}) {
       )`);
       parameters.push(catalogExternalId);
     }
+    const questionTypes = db.prepare(`SELECT DISTINCT item.question_type AS value FROM sync_run_question_items AS item
+      WHERE ${predicates.join(' AND ')} AND item.question_type IS NOT NULL ORDER BY item.question_type`).all(...parameters)
+      .map(row => ({ value: row.value, label: row.value }));
     if (questionType) {
       if (itemColumns.has('question_type_id')) {
         predicates.push('(item.question_type = ? OR item.question_type_id = ?)');
@@ -115,6 +118,18 @@ function readRunQuestions(dbPath, runId, options = {}) {
       }
       predicates.push(`(${keywordPredicates.join('\n        OR ')})`);
       parameters.push(...keywordParameters);
+    }
+    const excludedIds = options.excludedIds || [];
+    if (!Array.isArray(excludedIds) || excludedIds.length > 100000 || excludedIds.some((id) => !safeExternalId(id))) {
+      throw httpError('排除题目 ID 无效');
+    }
+    const baseWhere = predicates.join(' AND ');
+    const counts = db.prepare(`SELECT COUNT(*) AS captured,
+      COALESCE(SUM(item.question_external_id IN (SELECT value FROM json_each(?))), 0) AS excluded
+      FROM sync_run_question_items AS item WHERE ${baseWhere}`).get(JSON.stringify(excludedIds), ...parameters);
+    if (options.selection === 'included' || options.selection === 'excluded') {
+      predicates.push(`item.question_external_id ${options.selection === 'included' ? 'NOT IN' : 'IN'} (SELECT value FROM json_each(?))`);
+      parameters.push(JSON.stringify(excludedIds));
     }
     const where = predicates.join(' AND ');
     const total = Number(db.prepare(`
@@ -161,7 +176,12 @@ function readRunQuestions(dbPath, runId, options = {}) {
                  AND link.provider = item.provider
                  AND link.textbook_external_id = item.textbook_external_id
                  AND link.question_external_id = item.question_external_id
-             ) AS catalog_count
+             ) AS catalog_count,
+             (SELECT group_concat(DISTINCT node.name) FROM sync_run_question_catalogs AS link
+              JOIN sync_run_catalog_items AS node ON node.run_id = link.run_id AND node.provider = link.provider
+              AND node.textbook_external_id = link.textbook_external_id AND node.catalog_external_id = link.catalog_external_id
+              WHERE link.run_id = item.run_id AND link.provider = item.provider
+              AND link.textbook_external_id = item.textbook_external_id AND link.question_external_id = item.question_external_id) AS catalog_name
       FROM sync_run_question_items AS item
       WHERE ${where}
       ORDER BY item.question_external_id ASC
@@ -202,6 +222,7 @@ function readRunQuestions(dbPath, runId, options = {}) {
       useCount: row.use_count == null ? null : Number(row.use_count),
       providerUpdatedAt: row.provider_updated_at || null,
       catalogCount: Number(row.catalog_count || 0),
+      catalogName: boundedString(row.catalog_name, 4000),
       capturedAt: row.captured_at,
     }));
     return {
@@ -212,6 +233,8 @@ function readRunQuestions(dbPath, runId, options = {}) {
       page,
       pageSize,
       rows,
+      questionTypes,
+      summary: { captured: Number(counts.captured), excluded: Number(counts.excluded), included: Number(counts.captured) - Number(counts.excluded) },
     };
   } finally {
     db.close();

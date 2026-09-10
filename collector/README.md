@@ -55,6 +55,8 @@ npm run legacy:sync:book -- --version-name 北师大版 --textbook-name 九年�
 
 `zujuan_question_sync.cjs` 是题库内容任务的正式 Collector 入口，由 `server.cjs` 在网页提交内容同步后启动；它不会修改正式表或 service。它先在同一持久 Chrome 档案打开教材入口，再读取静态目录 JSON，并在该页面会话中 POST `/zujuan-api/question/list`（当前默认 8 路分页窗口，并有请求门控）。默认使用已有的 `.cache/zujuan-sync-profile` 有头 Chrome 会话；只有显式传 `--headless` 才无头。它与 `legacy/zujuan_sync.cjs`/服务共用 `${db}.lock`，不能并行占用同一 SQLite 或 profile。已有 Chrome 调试端口运行时可传 `--cdp-url http://127.0.0.1:9222`（或 `--connect-over-cdp`），脚本通过该已有 context 共享 cookies/session，但始终新建专用采集 tab；连接模式结束只关闭自己新建的 tab，不关闭用户 browser/context。默认遍历章/小节/知识点和全部分页，验收时可用 `--max-catalogs`、`--catalog-id`、`--max-pages` 缩小范围。题目答案/解析固定写入 `answerStatus=not_collected`，列表题干标记 `contentSource=list_api` 与 `contentComplete`，原始接口页保存为 gzip 快照；`--no-download-assets` 可只记录素材 URL。遇到 401/403、JSON 变 HTML 或验证码/滑块时会把窗口置前，等待人工处理并以间隔 probe 同一页，不自动绕过验证。
 
+题库同步任务可按任务选择 `--limit-to-1000-pages`：每个目录最多请求 1000 页，达到边界后将该目录按策略正常结束并继续其他目录；这属于策略内完成，不以网页显示的 `total` 或题目数相等作为验收门槛，也不表示网站全量题目都已抓取。未开启时保持原有分页行为，超过 1000 页会继续请求；`--max-pages` 仍是独立的调试截断参数。
+
 `npm start` 默认在 `127.0.0.1:9110` 启动 API。对外绑定时必须配置令牌：
 
 ```bash
