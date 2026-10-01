@@ -6,9 +6,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import hashlib
+import sqlite3
+import zlib
 from datetime import datetime
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
@@ -39,7 +43,10 @@ from plugins.bank.entity.do.bank_do import (
     QbTextbookVersion,
 )
 from plugins.bank.entity.vo.bank_vo import QuestionApplyRequestModel
+from plugins.bank.service import large_initial_apply as large_apply_module
 from plugins.bank.service import question_apply_service as module
+from plugins.bank.service.large_snapshot_reader import LargeSnapshotReader
+from plugins.bank.service.large_snapshot_spool import _json_bytes, _open_spool
 from plugins.bank.service.question_apply_service import QuestionApplyService
 from plugins.bank.service.task_service import SyncTaskService
 
@@ -259,6 +266,75 @@ async def test_first_apply_is_idempotent_and_records_scope_state(db: AsyncSessio
     again = await QuestionApplyService.apply(db, 9, expected_state_token=state.state_token)
     assert again['alreadyApplied'] is True
     assert await db.scalar(select(func.count()).select_from(QbQuestionApplyHistory)) == 1
+
+
+@pytest.mark.asyncio
+async def test_large_initial_apply_is_atomic_and_records_complete_scope(
+    db: AsyncSession, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await _seed(db, {18: [('tb-a', 1, 17)]})
+    scope = await db.get(QbSyncJobScope, 181)
+    scope.snapshot_complete = 1
+    scope.snapshot_locked_at = datetime(2026, 8, 29, 8, 0, 1)
+    await db.commit()
+    raw = _raw(17, 'tb-a', tag='knowledge', asset=True)
+    normalized_summary = module._normalise_snapshot_summary(raw, 18, 'tb-a')
+    run = raw['run']
+    spool = tmp_path / 'run-17-tb-a.sqlite3'
+    identity = {
+        'runId': 17, 'textbookExternalId': 'tb-a',
+        'snapshotLockedAt': str(run['snapshot_locked_at']),
+        'counts': normalized_summary['counts'],
+    }
+    staging = _open_spool(spool, identity)
+    try:
+        for collection in ('catalogs', 'questions', 'questionCatalogs', 'tags', 'assets'):
+            staging.executemany(
+                'INSERT INTO rows (collection,ordinal,question_external_id,payload) VALUES (?,?,?,?)',
+                [
+                    (collection, index, item.get('question_external_id'), zlib.compress(_json_bytes(item)))
+                    for index, item in enumerate(raw[collection])
+                ],
+            )
+        staging.execute("INSERT INTO metadata (key,value) VALUES ('complete',?)", (b'1',))
+        staging.commit()
+    finally:
+        staging.close()
+    with LargeSnapshotReader(spool, raw, 18, 'tb-a') as reader:
+        validation = reader.validate_all()
+        with sqlite3.connect(spool) as staging:
+            staging.execute('CREATE TABLE asset_paths (file_hash TEXT PRIMARY KEY, storage_path TEXT NOT NULL)')
+            staging.execute('INSERT INTO asset_paths VALUES (?,?)', (
+                hashlib.sha256(b'asset-bytes').hexdigest(), 'assets/aa/asset.png',
+            ))
+            staging.execute("INSERT INTO metadata VALUES ('asset_preparation_hash',?)", (
+                validation['normalizedHash'].encode('ascii'),
+            ))
+            staging.execute("INSERT INTO metadata VALUES ('asset_reference_count',?)", (b'1',))
+            staging.commit()
+
+        original_add_history = QuestionApplyDao.add_history
+
+        async def fail_history(*_args: Any) -> None:
+            raise RuntimeError('late history failure')
+
+        monkeypatch.setattr(QuestionApplyDao, 'add_history', fail_history)
+        with pytest.raises(RuntimeError, match='late history failure'):
+            await large_apply_module.apply_initial_large(db, reader, spool)
+        for model in (QbCatalogNode, QbQuestion, QbQuestionCatalog, QbQuestionTag, QbQuestionAsset, QbQuestionApplyState):
+            assert await db.scalar(select(func.count()).select_from(model)) == 0
+
+        monkeypatch.setattr(QuestionApplyDao, 'add_history', original_add_history)
+        result = await large_apply_module.apply_initial_large(db, reader, spool)
+        repeated = await large_apply_module.apply_initial_large(db, reader, spool)
+        assert repeated['alreadyApplied'] is True
+        assert repeated['stateToken'] == result['stateToken']
+    assert result['stats']['questions']['inserted'] == 1
+    assert result['stats']['tags']['inserted'] == 1
+    assert result['stats']['assets']['inserted'] == 1
+    assert await db.scalar(select(func.count()).select_from(QbQuestionApplyHistory)) == 1
+    state = await db.get(QbQuestionApplyState, ('zujuan', 'tb-a'))
+    assert state.current_task_id == 18 and state.current_collector_run_id == 17
 
 
 @pytest.mark.asyncio
@@ -556,8 +632,18 @@ async def test_expected_token_conflict_and_delete_protection(db: AsyncSession, s
 
 
 @pytest.mark.asyncio
-async def test_task_detail_injects_apply_status(db: AsyncSession, snapshot_reader: dict[int, dict[str, Any]]) -> None:
+async def test_task_detail_injects_apply_status(
+    db: AsyncSession, snapshot_reader: dict[int, dict[str, Any]], monkeypatch: pytest.MonkeyPatch,
+) -> None:
     await _seed(db, {9: [('tb-a', 1, 101)]})
+    row = await db.get(QbSyncJob, 9)
+    row.collector_job_id = 'terminal-collector-job'
+    await db.flush()
+
+    async def unexpected_live(_payload: dict[str, Any]) -> dict[str, Any]:
+        raise AssertionError('completed task detail must not fetch live Collector progress')
+
+    monkeypatch.setattr('plugins.bank.service.sync_run_service.enrich_live_progress', unexpected_live)
     detail = await SyncTaskService.question_detail(db, 9)
     assert 'applyStatus' in detail
     assert detail['applyStatus']['scopes'][0]['externalTextbookId'] == 'tb-a'
@@ -583,34 +669,34 @@ async def test_interrupted_apply_status_requires_positive_resume_run_id(db: Asyn
 
 
 @pytest.mark.asyncio
-async def test_task_apply_status_projects_internal_summary_counts(
+async def test_task_apply_status_reads_verified_persisted_counts_without_collector(
     db: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     await _seed(db, {9: [('tb-a', 1, 101)]})
 
-    async def summary(_run_id: int, _textbook_id: str) -> dict[str, Any]:
-        return {
-            'collector_run_id': 101,
-            'counts': {
-                'catalogs': 2,
-                'questions': 11,
-                'questionCatalogs': 13,
-                'tags': 7,
-                'assets': 5,
-            },
-            'run': {'snapshot_locked_at': '2026-08-29T08:00:01Z'},
-        }
+    async def unexpected_summary(_run_id: int, _textbook_id: str) -> dict[str, Any]:
+        raise AssertionError('task detail must not scan the Collector snapshot')
 
-    monkeypatch.setattr(module, '_read_snapshot_summary', summary)
+    monkeypatch.setattr(module, '_read_snapshot_summary', unexpected_summary)
     task = await db.get(QbSyncJob, 9)
     scopes = list(
         (
             await db.execute(select(QbSyncJobScope).where(QbSyncJobScope.run_id == 9))
         ).scalars()
     )
+    scope_row = scopes[0]
+    scope_row.catalog_count = 2
+    scope_row.question_count = 11
+    scope_row.question_catalog_count = 13
+    scope_row.question_tag_count = 7
+    scope_row.question_asset_count = 5
+    scope_row.snapshot_complete = 1
+    scope_row.snapshot_locked_at = datetime(2026, 8, 29, 8, 0, 1)
     status = await QuestionApplyService.task_apply_status(db, task, scopes)
     scope = status['scopes'][0]
+
+    assert status['eligible'] is True
 
     assert (
         scope['catalogCount'],
@@ -619,6 +705,16 @@ async def test_task_apply_status_projects_internal_summary_counts(
         scope['questionTagCount'],
         scope['questionAssetCount'],
     ) == (2, 11, 13, 7, 5)
+
+    scope_row.question_tag_count = 611_575
+    status = await QuestionApplyService.task_apply_status(db, task, scopes)
+    assert status['eligible'] is False
+    assert 'tags 有 611575 行' in status['eligibilityMessage']
+    scope_row.question_tag_count = 7
+
+    scope_row.snapshot_locked_at = None
+    status = await QuestionApplyService.task_apply_status(db, task, scopes)
+    assert status['eligible'] is False
 
 
 @pytest.mark.asyncio
@@ -743,6 +839,37 @@ def test_question_apply_route_and_request_vo_are_registered() -> None:
 
 
 @pytest.mark.asyncio
+async def test_asset_materialization_uses_bounded_workers(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv('BANK_ASSET_ROOT', str(tmp_path))
+
+    class Client:
+        run_asset_bytes = staticmethod(lambda *_args, **_kwargs: b'')
+
+    monkeypatch.setattr(module, 'CollectorClient', Client)
+    active = 0
+    peak = 0
+
+    async def prepare(_semaphore, _client, _method, root, _run_id, _textbook_id, digest, _item, _size):
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        await asyncio.sleep(0.001)
+        active -= 1
+        relative = f'assets/{digest[:2]}/{digest}.png'
+        return root / relative, relative
+
+    monkeypatch.setattr(module, '_materialize_one_asset', prepare)
+    assets = [{'file_hash': f'{index:064x}', 'byte_size': 1} for index in range(41)]
+    snapshot = {'collector_run_id': 17, 'textbook_external_id': 'tb-a', 'assets': assets}
+
+    await module._download_snapshot_assets(snapshot)
+
+    assert peak <= module.ASSET_DOWNLOAD_CONCURRENCY
+    assert peak > 1
+    assert all(item['download_status'] == 'downloaded' and item['storage_path'] for item in assets)
+
+
+@pytest.mark.asyncio
 async def test_dao_missing_state_table_does_not_rollback_loaded_transaction(monkeypatch: pytest.MonkeyPatch) -> None:
     db = type('Db', (), {})()
     error = Exception('Table qb_question_apply_state doesn\'t exist')
@@ -751,3 +878,70 @@ async def test_dao_missing_state_table_does_not_rollback_loaded_transaction(monk
     # compatibility case; a raw exception must remain visible to callers.
     with pytest.raises(Exception, match='doesn\'t exist'):
         await QuestionApplyService._state(db, 'zujuan', 'tb-a')
+
+
+def test_tag_observations_merge_only_distinct_queries_for_same_identity():
+    raw = _raw(17, 'tb-a', tag='函数')
+    first = raw['tags'][0]
+    first.update(tag_external_id='k1', query_fingerprint='query1', observed_at='2026-09-01T00:00:00Z')
+    second = {**first, 'query_fingerprint': 'query2', 'observed_at': '2026-09-02T00:00:00Z'}
+    raw['tags'].append(second)
+    raw['counts']['questionTagCount'] = 2
+    result = module._normalise_snapshot(raw, 18, 'tb-a')
+    assert result['counts']['tags'] == 2
+    assert len(result['tags']) == 1
+    assert result['tags'][0]['last_seen_at'] == datetime(2026, 9, 2)
+    for mutation in ({'tag_external_id': 'k2'}, {'query_fingerprint': 'query1'}, {'query_fingerprint': ''}, {'sort_order': 3}):
+        invalid = copy.deepcopy(raw)
+        invalid['tags'][1].update(mutation)
+        with pytest.raises(ServiceException):
+            module._normalise_snapshot(invalid, 18, 'tb-a')
+
+
+def test_canonical_asset_cache_hit_does_not_scan_hash_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    content = b'cached-asset'
+    digest = hashlib.sha256(content).hexdigest()
+    relative = f'assets/{digest[:2]}/{digest}.png'
+    target = tmp_path / relative
+    target.parent.mkdir(parents=True)
+    target.write_bytes(content)
+    def unexpected_glob(*_args, **_kwargs):
+        raise AssertionError('canonical cache hit must not enumerate neighboring files')
+    monkeypatch.setattr(Path, 'glob', unexpected_glob)
+    assert module._valid_cached_asset(tmp_path, digest, len(content), relative) == target
+
+
+@pytest.mark.asyncio
+async def test_apply_rejects_revision_seen_before_review_was_changed(db, snapshot_reader):
+    await _seed(db, {18: [('tb-a', 1, 101)]})
+    db.add(QbQuestionTaskReview(task_id=18, baseline_json={}, excluded_json=[], revision=2, captured_at=datetime.now()))
+    await db.commit()
+    with pytest.raises(ServiceException, match='审核选择版本已变化'):
+        await QuestionApplyService.apply(db, 18, expected_review_revision=1)
+    assert await db.scalar(select(func.count()).select_from(QbQuestion)) == 0
+    result = await QuestionApplyService.apply(db, 18, expected_review_revision=2)
+    assert result['alreadyApplied'] is False
+
+
+@pytest.mark.asyncio
+async def test_current_large_task_does_not_report_pending_import_failure(db, snapshot_reader):
+    await _seed(db, {18: [('tb-a', 1, 101)]})
+    await QuestionApplyService.apply(db, 18)
+    task = await db.get(QbSyncJob, 18)
+    scope = await db.get(QbSyncJobScope, 181)
+    scope.snapshot_complete = 1
+    scope.snapshot_locked_at = datetime(2026, 9, 29)
+    scope.question_tag_count = 611575
+    status = await QuestionApplyService.task_apply_status(db, task, [scope])
+    assert status['isCurrent'] is True
+    assert status['action'] == 'alreadyApplied'
+    assert status['eligible'] is False
+    assert status['eligibilityMessage'] is None
+
+
+def test_question_apply_http_payload_accepts_review_revision():
+    assert QuestionApplyRequestModel(expectedReviewRevision=0).expected_review_revision == 0
+    assert QuestionApplyRequestModel(expectedReviewRevision=3).model_dump(by_alias=True)['expectedReviewRevision'] == 3
+    assert QuestionApplyRequestModel().expected_review_revision is None
+    with pytest.raises(ValueError):
+        QuestionApplyRequestModel(expectedReviewRevision=-1)

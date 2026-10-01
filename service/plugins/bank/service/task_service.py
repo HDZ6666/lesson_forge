@@ -1170,8 +1170,9 @@ class SyncTaskService:
             raise ServiceException(message='同步任务不存在')
         scopes = await SyncTaskDao.scopes(db, task_id)
         payload = task_payload(row, scopes)
-        from plugins.bank.service.sync_run_service import enrich_live_progress
-        payload = await enrich_live_progress(payload)
+        if str(payload.get('status') or '').lower() in ('starting', 'running', 'cancelling'):
+            from plugins.bank.service.sync_run_service import enrich_live_progress
+            payload = await enrich_live_progress(payload)
         if module == 'textbook':
             from plugins.bank.service.textbook_apply_service import TextbookApplyService  # noqa: PLC0415
 

@@ -2,13 +2,15 @@
 
 本文档面向插件开发者，说明如何在当前插件系统中创建、安装、启用、调试和发布插件。
 
+本仓库后端目录为 `service`，前端目录为 `pc`（Vue 3）。本文保留框架通用能力说明，Vue 2、PostgreSQL 等可选示例不构成本轮重构要求；当前业务目标和进度见[文档入口](../../docs/README.md)。改造 bank/lesson 时复用已有插件和迁移链，不另起一套框架。
+
 ## 1. 基本模型
 
 插件由后端插件和可选前端插件组成。默认源码布局如下：
 
 ```text
-ruoyi-fastapi-backend/plugins/<plugin_id>/
-ruoyi-fastapi-frontend/plugins/<plugin_id>/
+service/plugins/<plugin_id>/
+pc/plugins/<plugin_id>/
 ```
 
 运行时不会把前后端仓库名写死在各操作入口中。插件系统优先使用显式传入的目录，其次读取
@@ -25,7 +27,7 @@ ruoyi-fastapi-frontend/plugins/<plugin_id>/
 进入后端项目目录：
 
 ```bash
-cd ruoyi-fastapi-backend
+cd service
 ```
 
 使用脚手架创建插件：
@@ -637,14 +639,14 @@ jobs:
 插件前端代码放在：
 
 ```text
-ruoyi-fastapi-frontend/plugins/<plugin_id>/
+pc/plugins/<plugin_id>/
 ```
 
 菜单组件路径和真实 Vue 文件的映射关系：
 
 ```text
-plugin/demo/index -> ruoyi-fastapi-frontend/plugins/demo/views/index.vue
-plugin/demo/report/list -> ruoyi-fastapi-frontend/plugins/demo/views/report/list.vue
+plugin/demo/index -> pc/plugins/demo/views/index.vue
+plugin/demo/report/list -> pc/plugins/demo/views/report/list.vue
 ```
 
 只允许两类组件值：
@@ -842,7 +844,7 @@ ruoyi plugin test demo --env=dev
 全栈插件还应执行前端构建检查：
 
 ```bash
-cd ../ruoyi-fastapi-frontend
+cd ../pc
 npm run build:prod
 ```
 

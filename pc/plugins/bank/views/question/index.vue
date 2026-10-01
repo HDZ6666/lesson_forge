@@ -90,11 +90,12 @@
 </template>
 
 <script setup>
-import { computed, getCurrentInstance, onMounted, reactive, ref } from 'vue'
+import { computed, getCurrentInstance, onMounted, reactive, ref, watch } from 'vue'
 import { Document, Refresh, RefreshLeft, Search, View } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
-import { getQuestion, listCatalog, listQuestionAssets, listQuestions, listTextbooks, listVersions } from '../../api/bank'
-import { resolveAssetUrl, sanitizeHtml } from '../../utils/html'
+import { getQuestion, getQuestionAsset, listCatalog, listQuestionAssets, listQuestions, listTextbooks, listVersions } from '../../api/bank'
+import { sanitizeHtml } from '../../utils/html'
+import { useQuestionAssetStore } from '../../utils/assets'
 import { createQuestionQuery, resetQuestionState } from '../../utils/state'
 import { unwrapList, unwrapPage, unwrapTree } from '../../utils/response'
 
@@ -119,6 +120,8 @@ const loadingDetail = ref(false)
 const detailVisible = ref(false)
 const detail = ref(null)
 const assets = ref([])
+const assetStore = useQuestionAssetStore(getQuestionAsset)
+let detailRequestId = 0
 const errorMessage = ref('')
 const catalogRef = ref(null)
 const treeProps = { label: 'nodeName', children: 'children' }
@@ -132,10 +135,10 @@ function rowText(row) { return row?.plainText || row?.sourceText || row?.paperNa
 function safeHtml(value) {
   return sanitizeHtml(value, (key) => {
     const asset = assets.value.find((item) => String(item.assetKey || '') === String(key))
-    return resolveAssetUrl(asset, detail.value?.questionId)
+    return assetStore.resolve(asset)
   })
 }
-function resolveAsset(asset) { return resolveAssetUrl(asset, detail.value?.questionId) }
+function resolveAsset(asset) { return assetStore.resolve(asset) }
 
 async function loadVersions() {
   try {
@@ -217,22 +220,29 @@ function resetFilters() { resetQuestionState(query, 'filters'); loadQuestions() 
 async function openDetail(row) {
   const questionId = idOf(row, 'questionId')
   if (questionId === undefined || questionId === null) return
+  const requestId = ++detailRequestId
   detailVisible.value = true
   loadingDetail.value = true
   detail.value = null
   assets.value = []
+  assetStore.reset()
   try {
     const [questionResult, assetResult] = await Promise.all([getQuestion(questionId), listQuestionAssets(questionId)])
+    if (requestId !== detailRequestId) return
     const questionValue = questionResult?.data && !questionResult.questionId ? questionResult.data : questionResult
     detail.value = questionValue?.data && !questionValue.questionId ? questionValue.data : questionValue
     assets.value = unwrapList(assetResult)
+    void assetStore.load(questionId, assets.value)
   } catch (error) {
-    ElMessage.error(error?.message || '题目详情加载失败')
+    if (requestId === detailRequestId) ElMessage.error(error?.message || '题目详情加载失败')
   } finally {
-    loadingDetail.value = false
+    if (requestId === detailRequestId) loadingDetail.value = false
   }
 }
 
+watch(detailVisible, (visible) => {
+  if (!visible) { detailRequestId += 1; assetStore.reset() }
+})
 onMounted(loadVersions)
 </script>
 

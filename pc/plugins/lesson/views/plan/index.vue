@@ -514,7 +514,7 @@ async function loadAssets(detail) {
         if (assetUrls[key]) continue
         assetUrls[key] = 'loading'
         pending.push(
-          getPlanAsset(item.questionId, asset.assetKey)
+          getPlanAsset(item.questionId, asset.assetKey, detail.generationId)
             .then((blob) => {
               assetUrls[key] = blob instanceof Blob ? URL.createObjectURL(blob) : ''
             })

@@ -613,7 +613,7 @@ function migrateRunSnapshotSchema(db) {
       ON sync_run_question_items (run_id, textbook_external_id, question_type, question_external_id);
     CREATE INDEX IF NOT EXISTS idx_sync_run_question_catalogs_catalog
       ON sync_run_question_catalogs (
-        run_id, textbook_external_id, catalog_external_id, question_external_id
+        run_id, provider, textbook_external_id, catalog_external_id, question_external_id
       );
     CREATE INDEX IF NOT EXISTS idx_sync_run_question_catalogs_question
       ON sync_run_question_catalogs (
@@ -909,7 +909,37 @@ function ensureRunSnapshotSchema(dbPath) {
   try {
     db.exec('PRAGMA foreign_keys = ON;');
     db.exec('PRAGMA busy_timeout = 5000;');
-    migrateRunSnapshotSchema(db);
+    db.exec('BEGIN IMMEDIATE;');
+    try {
+      // The migration repairs legacy rows and recreates immutable-run
+      // triggers.  A committed version bit makes normal restarts constant
+      // time while a failed migration rolls back both data and triggers.
+      const version = Number(db.prepare('PRAGMA user_version').get().user_version || 0);
+      let nextVersion = version;
+      const ready = (version & 2) !== 0 && Boolean(db.prepare(
+        "SELECT 1 FROM sqlite_master WHERE type='trigger' AND name='trg_sync_runs_no_reopen'",
+      ).get());
+      if (!ready) {
+        migrateRunSnapshotSchema(db);
+        nextVersion |= 2;
+      }
+      const previewIndex = Boolean(db.prepare(
+        "SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_sync_run_question_items_preview_types'",
+      ).get());
+      if ((version & 4) === 0 || !previewIndex) {
+        // The older scope index omits provider, so DISTINCT question_type
+        // must visit each large question row. This covering index keeps the
+        // first preview request fast even with a cold SQLite page cache.
+        db.exec(`CREATE INDEX IF NOT EXISTS idx_sync_run_question_items_preview_types
+          ON sync_run_question_items (run_id, provider, textbook_external_id, question_type);`);
+        nextVersion |= 4;
+      }
+      if (nextVersion !== version) db.exec(`PRAGMA user_version = ${nextVersion};`);
+      db.exec('COMMIT;');
+    } catch (error) {
+      try { db.exec('ROLLBACK;'); } catch {}
+      throw error;
+    }
   } finally {
     db.close();
   }

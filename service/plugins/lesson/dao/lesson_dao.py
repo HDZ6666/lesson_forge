@@ -281,6 +281,7 @@ class LessonDao:
         matched_catalog_ids: list[int],
         evidence_type: str | None,
         replaced_from_question_id: int,
+        question_snapshot_json: dict[str, Any],
     ) -> None:
         await db.execute(
             update(LpGenerationItem)
@@ -292,6 +293,7 @@ class LessonDao:
                 matched_catalog_ids=matched_catalog_ids,
                 evidence_type=evidence_type,
                 replaced_from_question_id=replaced_from_question_id,
+                question_snapshot_json=question_snapshot_json,
                 update_time=datetime.now(),
             )
         )

@@ -305,7 +305,14 @@ function ensureMetadataSnapshotSchema(dbPath) {
   try {
     db.exec('PRAGMA foreign_keys = ON;');
     db.exec('PRAGMA busy_timeout = 5000;');
-    migrateMetadataSnapshotSchema(db);
+    const version = Number(db.prepare('PRAGMA user_version').get().user_version || 0);
+    const ready = (version & 1) !== 0 && Boolean(db.prepare(
+      "SELECT 1 FROM sqlite_master WHERE type='trigger' AND name='trg_source_metadata_runs_no_reopen'",
+    ).get());
+    if (!ready) {
+      migrateMetadataSnapshotSchema(db);
+      db.exec(`PRAGMA user_version = ${version | 1};`);
+    }
   } finally {
     db.close();
   }

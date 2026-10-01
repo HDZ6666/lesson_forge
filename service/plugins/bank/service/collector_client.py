@@ -25,6 +25,7 @@ DEFAULT_MAX_ASSET_BYTES = 64 * 1024 * 1024
 DEFAULT_SNAPSHOT_PAGE_SIZE = 500
 MAX_SNAPSHOT_PAGE_SIZE = 5_000
 MAX_SNAPSHOT_ROWS = 100_000
+MAX_STREAM_SNAPSHOT_ROWS = 2_000_000
 SNAPSHOT_COLLECTIONS = ('catalogs', 'questions', 'questionCatalogs', 'tags', 'assets')
 _URL_MAX_PORT = 65_535
 _URL_CONTROL_CHAR_LIMIT = 32
@@ -465,6 +466,8 @@ class CollectorClient:
         raw_counts: Any,
         payload: Mapping[str, Any],
         run: Mapping[str, Any],
+        *,
+        max_rows: int = MAX_SNAPSHOT_ROWS,
     ) -> dict[str, int]:
         values: Mapping[str, Any] = raw_counts if isinstance(raw_counts, Mapping) else payload
         result: dict[str, int] = {}
@@ -496,7 +499,7 @@ class CollectorClient:
             if parsed and parsed_run and len(scope_ids) <= 1 and parsed[0] != parsed_run[0]:
                 raise ServiceException(message=f'collector 快照 {collection} 计数与运行信息不一致')
             value = parsed[0] if parsed else parsed_run[0]
-            if value > MAX_SNAPSHOT_ROWS:
+            if value > max_rows:
                 raise ServiceException(message=f'collector 快照 {collection} 计数超过安全上限')
             result[collection] = value
         return result
@@ -545,9 +548,16 @@ class CollectorClient:
             if not text:
                 return set()
             try:
-                value = json.loads(text)
+                parsed = json.loads(text)
             except json.JSONDecodeError:
                 return {text}
+            if isinstance(parsed, str):
+                return {parsed.strip()} if parsed.strip() else set()
+            if isinstance(parsed, (int, float)) and not isinstance(parsed, bool):
+                # A numeric source ID such as "260617" is still a scalar ID;
+                # JSON decoding it must not make the scope disappear.
+                return {text}
+            value = parsed
         if isinstance(value, Mapping):
             result: set[str] = set()
             for name in (
@@ -677,7 +687,7 @@ class CollectorClient:
                     raise ServiceException(message='collector 分页快照教材范围不一致')
             elif summary_scope_ids != page_scope_ids:
                 raise ServiceException(message='collector 分页快照教材范围不一致')
-        page_counts = cls._snapshot_counts(page.get('counts'), page, run)
+        page_counts = cls._snapshot_counts(page.get('counts'), page, run, max_rows=MAX_STREAM_SNAPSHOT_ROWS)
         if dict(page_counts) != dict(expected_counts):
             raise ServiceException(message='collector 分页快照计数与摘要不一致')
         total = cls._strict_nonnegative_int(page.get('total'), 'collector 分页快照 total')
@@ -792,7 +802,9 @@ class CollectorClient:
             not isinstance(item, Mapping) for item in payload['items']
         ):
             raise ServiceException(message='collector 分页快照 items 结构不正确')
-        page_counts = self._snapshot_counts(payload.get('counts'), payload, payload['run'])
+        page_counts = self._snapshot_counts(
+            payload.get('counts'), payload, payload['run'], max_rows=MAX_STREAM_SNAPSHOT_ROWS,
+        )
         self._validate_snapshot_page(
             payload,
             run_id,

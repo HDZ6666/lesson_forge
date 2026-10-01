@@ -1,7 +1,7 @@
 manifestVersion: 1
 id: lesson
 name: 教案生成
-version: 0.1.0
+version: 0.1.1
 description: 基于正式题库按知识点、课型与规则确定性抽题，生成可编辑、可导出 Word 的教案初稿。
 
 metadata:
@@ -21,6 +21,7 @@ backend:
     autoScan: true
   migrations:
     - migrations/mysql/001_init.sql
+    - migrations/mysql/002_generation_snapshot.py
   seeds: []
   hooks: {}
   jobs: []

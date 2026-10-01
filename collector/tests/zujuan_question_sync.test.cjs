@@ -1444,3 +1444,35 @@ test('图片下载失败时仍保存题目，并标记数据不完整', async ()
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test('image-only list content is complete while unresolved images and empty content are not', () => {
+  const url = 'https://staticzujuan.xkw.com/quesimg/Upload/formula/only.png';
+  const image = finalizeQuestion({contentHtml: `<img src="${url}">`, assets: [{sourceUrl: url, type: 'formula_image'}]});
+  assert.equal(image.contentComplete, true);
+  assert.equal(image.plainText, null);
+  assert.equal(image.detailFetched, false);
+  assert.equal(finalizeQuestion({contentHtml: `<img src="${url}">`, assets: []}).contentComplete, false);
+  assert.equal(finalizeQuestion({contentHtml: '<p> </p>', assets: []}).contentComplete, false);
+});
+
+test('sealing refuses incomplete list content even when catalog scan is complete', () => {
+  const {directory, dbPath} = tempDb();
+  const store = new QuestionSyncStore(dbPath, {dataDir: directory});
+  try {
+    const scope = {textbookId: '260617'};
+    const runId = store.beginRun(scope, {resume: false});
+    const catalog = {externalId: '261285', name: '第一章', level: 1, type: 'chapter', ancestorIds: ['261285'], categoryId: '261285', catelogTokpointId: '0', chapterExternalId: '261285'};
+    store.saveCatalogTree(runId, '260617', [catalog]);
+    const question = parseQuestionListPayload({code: '0', data: {total: 1, html: listHtml('95000001')}}).questions[0];
+    question.contentComplete = false;
+    store.savePage({runId, textbookExternalId: '260617', catalog, nodes: [catalog], pageNumber: 1, expectedTotal: 1, expectedPages: 1, questions: [question], queryFingerprint: 'incomplete-test'});
+    // savePage finalizes valid input again; simulate an incomplete persisted
+    // row before sealing, while the run is still mutable.
+    store.db.prepare('UPDATE sync_run_question_items SET content_complete = 0 WHERE run_id = ?').run(runId);
+    store.completeCatalog({runId, textbookExternalId: '260617', catalog, expectedTotal: 1, expectedPages: 1, queryFingerprint: 'incomplete-test'});
+    const result = store.validateRunCompleteness(runId, scope, [catalog], {});
+    assert.equal(result.scanComplete, true);
+    assert.equal(result.complete, false);
+    assert.ok(result.dataReasons.includes('列表题干不完整'));
+  } finally { store.close(); fs.rmSync(directory, {recursive: true, force: true}); }
+});

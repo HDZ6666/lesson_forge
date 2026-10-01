@@ -76,6 +76,7 @@ const {
 } = require('./src/jobs/metadata_run.cjs');
 const {
   main,
+  runCli,
   parseArgs,
   usage,
 } = require('./src/cli/metadata_sync_cli.cjs');
@@ -137,5 +138,5 @@ module.exports = {
 };
 
 if (require.main === module) {
-  main();
+  runCli();
 }

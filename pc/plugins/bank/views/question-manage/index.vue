@@ -40,14 +40,17 @@
 </template>
 
 <script setup>
-import { computed, getCurrentInstance, onMounted, reactive, ref } from 'vue'
+import { computed, getCurrentInstance, onMounted, reactive, ref, watch } from 'vue'
 import { Delete, Edit, Plus, Refresh, RefreshLeft, Search, View } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { addQuestion, deleteQuestions, getQuestion, listCatalog, listQuestionAssets, listQuestions, listTextbooks, listVersions, updateQuestion, updateQuestionStatus } from '../../api/bank'
-import { resolveAssetUrl, sanitizeHtml } from '../../utils/html'
+import { addQuestion, deleteQuestions, getQuestion, getQuestionAsset, listCatalog, listQuestionAssets, listQuestions, listTextbooks, listVersions, updateQuestion, updateQuestionStatus } from '../../api/bank'
+import { sanitizeHtml } from '../../utils/html'
+import { useQuestionAssetStore } from '../../utils/assets'
 import { unwrapList, unwrapPage, unwrapTree } from '../../utils/response'
 const { proxy } = getCurrentInstance(); const { qb_question_type, qb_difficulty, sys_normal_disable } = proxy.useDict('qb_question_type', 'qb_difficulty', 'sys_normal_disable')
 const versions = ref([]); const textbooks = ref([]); const catalogOptions = ref([]); const rows = ref([]); const selected = ref([]); const total = ref(0); const loading = ref(false); const submitting = ref(false); const dialogVisible = ref(false); const detailVisible = ref(false); const detailLoading = ref(false); const detail = ref(null); const assets = ref([]); const errorMessage = ref(''); const queryRef = ref(); const formRef = ref(); const isSyncForm = ref(false)
+const assetStore = useQuestionAssetStore(getQuestionAsset)
+let detailRequestId = 0
 const context = reactive({ versionId: undefined, textbookId: undefined }); const query = reactive({ pageNum: 1, pageSize: 10, catalogId: undefined, keyword: '', questionType: undefined, difficulty: undefined, sourceProvider: '', status: undefined, sort: 'questionId', order: 'desc' }); const form = reactive({})
 const rules = { contentHtml: [{ validator: (_rule, _value, callback) => { if (isSyncForm.value || String(form.contentHtml || '').trim() || String(form.plainText || '').trim()) callback(); else callback(new Error('题干 HTML 与纯文本至少填写一个')) }, trigger: 'blur' }], catalogIds: [{ validator: (_rule, _value, callback) => { if (isSyncForm.value || (Array.isArray(form.catalogIds) && form.catalogIds.length)) callback(); else callback(new Error('人工题目至少关联一个目录')) }, trigger: 'change' }] }
 const idOf = (item, key) => item?.[key] ?? item?.[key.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`)]; const isManual = (row) => String(row?.sourceProvider || '').toLowerCase() === 'manual'; const deletableSelected = computed(() => selected.value.length > 0 && selected.value.every(isManual)); function rowText(row) { return row?.plainText || row?.sourceText || row?.paperName || '题目内容未采集' } function flatten(nodes) { return nodes.flatMap((node) => [node, ...flatten(node.children || [])]) }
@@ -63,9 +66,10 @@ async function openEdit(row) { resetForm(); Object.assign(form, row); isSyncForm
 async function handleFormTextbookChange(textbookId) { form.catalogIds = []; if (!textbookId) { catalogOptions.value = []; return } try { catalogOptions.value = flatten(unwrapTree(await listCatalog({ textbookId }))) } catch (error) { ElMessage.error(error?.message || '目录加载失败') } }
 async function submit() { if (!(await formRef.value?.validate().catch(() => false))) return; submitting.value = true; try { if (isSyncForm.value) await updateQuestionStatus(form.questionId, form.status); else { const payload = { ...form }; delete payload.textbookId; if (form.questionId) await updateQuestion(payload); else await addQuestion(payload) } ElMessage.success(form.questionId ? '修改成功' : '新增成功'); dialogVisible.value = false; await loadQuestions() } catch (error) { ElMessage.error(error?.message || '保存失败') } finally { submitting.value = false } }
 async function toggleStatus(row, status) { try { await updateQuestionStatus(row.questionId, status); ElMessage.success('状态已更新'); await loadQuestions() } catch (error) { ElMessage.error(error?.message || '状态更新失败') } }
-async function openDetail(row) { const questionId = idOf(row, 'questionId'); if (!questionId) return; detailVisible.value = true; detailLoading.value = true; detail.value = null; assets.value = []; try { const [questionResult, assetResult] = await Promise.all([getQuestion(questionId), listQuestionAssets(questionId)]); detail.value = unwrapOne(questionResult); assets.value = unwrapList(assetResult) } catch (error) { ElMessage.error(error?.message || '详情加载失败') } finally { detailLoading.value = false } }
-function safeHtml(value) { return sanitizeHtml(value, (key) => resolveAssetUrl(assets.value.find((item) => String(item.assetKey) === String(key)), detail.value?.questionId)) } function resolveAsset(asset) { return resolveAssetUrl(asset, detail.value?.questionId) }
+async function openDetail(row) { const questionId = idOf(row, 'questionId'); if (!questionId) return; const requestId = ++detailRequestId; detailVisible.value = true; detailLoading.value = true; detail.value = null; assets.value = []; assetStore.reset(); try { const [questionResult, assetResult] = await Promise.all([getQuestion(questionId), listQuestionAssets(questionId)]); if (requestId !== detailRequestId) return; detail.value = unwrapOne(questionResult); assets.value = unwrapList(assetResult); void assetStore.load(questionId, assets.value) } catch (error) { if (requestId === detailRequestId) ElMessage.error(error?.message || '详情加载失败') } finally { if (requestId === detailRequestId) detailLoading.value = false } }
+function safeHtml(value) { return sanitizeHtml(value, (key) => assetStore.resolve(assets.value.find((item) => String(item.assetKey) === String(key)))) } function resolveAsset(asset) { return assetStore.resolve(asset) }
 async function remove(row) { await removeRows([row.questionId], `确定删除题目“${row.sourceQuestionNo || row.questionId}”吗？`) } async function removeSelected() { await removeRows(selected.value.map((item) => item.questionId), '确定删除选中的人工题目吗？') } async function removeRows(ids, message) { try { await ElMessageBox.confirm(message, '删除确认', { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' }); await deleteQuestions(ids); ElMessage.success('删除成功'); await loadQuestions() } catch (error) { if (error !== 'cancel' && error !== 'close') ElMessage.error(error?.message || '删除失败') } }
+watch(detailVisible, (visible) => { if (!visible) { detailRequestId += 1; assetStore.reset() } })
 onMounted(async () => { await loadVersions(); await loadQuestions() })
 </script>
 <style scoped>

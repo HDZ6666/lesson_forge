@@ -1,5 +1,9 @@
 # 采集进度存储与进程退出修复
 
+保留为当前代码的运行约束参考，2026-10-01 静态核对了缓存、落库节奏、容器配置与退出实现。新自动同步需求见[实施规格](重构实施规格.md)，实际验证和后续改造见[任务清单](实施任务清单.md)；下面的验证命令不表示本轮全部运行过。
+
+关键入口：[实时缓存](../service/plugins/bank/service/live_progress_cache.py)、[任务运行服务](../service/plugins/bank/service/sync_run_service.py)、[容器启动器](../collector/container-entrypoint.cjs)、[生产 Compose](../deploy/production/docker-compose.yml)。
+
 ## 数据边界
 
 - MySQL 保留任务配置、身份、状态、计数和同步验收结果。实时目录树不再写入 `qb_sync_job.options_json`。

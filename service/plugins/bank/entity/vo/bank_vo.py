@@ -817,6 +817,7 @@ class QuestionApplyRequestModel(BankModel):
     )
 
     expected_current_task_id: int | None = Field(default=None, alias='expectedCurrentTaskId', gt=0)
+    expected_review_revision: int | None = Field(default=None, alias='expectedReviewRevision', ge=0)
     expected_state_token: str | dict[str, str | None] | None = Field(
         default=None,
         alias='expectedStateToken',

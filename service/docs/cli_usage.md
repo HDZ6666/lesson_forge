@@ -1,8 +1,10 @@
 # RuoYi Backend CLI 使用文档
 
+本仓库的命令实现位于 [service/cli](../cli)。此页是按需查命令的参考，不是必须逐项执行的实施清单；业务重构从[项目文档入口](../../docs/README.md)开始。示例中的后端工作目录统一为 `service`。
+
 ## 1. 文档说明
 
-本文档用于说明 `ruoyi-fastapi-backend` 当前已经落地的 CLI 用法。
+本文档用于说明 `service` 当前已经落地的 CLI 用法。
 
 统一命令入口为：
 
@@ -30,10 +32,10 @@ ruoyi <group> <command> [options]
 
 ### 2.1 执行目录
 
-`ruoyi` 命令必须在后端项目根目录执行，也就是 `ruoyi-fastapi-backend` 目录。
+`ruoyi` 命令必须在后端项目根目录执行，也就是 `service` 目录。
 
 ```bash
-cd ruoyi-fastapi-backend
+cd service
 ruoyi --help
 ```
 
@@ -42,14 +44,14 @@ ruoyi --help
 MySQL 版本：
 
 ```bash
-cd ruoyi-fastapi-backend
+cd service
 pip3 install -r requirements.txt
 ```
 
 PostgreSQL 版本：
 
 ```bash
-cd ruoyi-fastapi-backend
+cd service
 pip3 install -r requirements-pg.txt
 ```
 
@@ -62,7 +64,7 @@ pip3 install -r requirements-pg.txt
 
 ```bash
 conda activate ruoyi-fastapi
-cd ruoyi-fastapi-backend
+cd service
 ruoyi --help
 ```
 
@@ -197,7 +199,7 @@ ruoyi gen export sys_user --env=dev --mode=local --dry-run
 ### 4.1 本地开发启动
 
 ```bash
-cd ruoyi-fastapi-backend
+cd service
 ruoyi app doctor --env=dev
 ruoyi app run --env=dev
 ```
@@ -683,11 +685,11 @@ ruoyi db upgrade --env=dev --revision=head --dry-run --yes --output=json
   "command": [
     "alembic",
     "-c",
-    "/path/to/ruoyi-fastapi-backend/alembic.ini",
+    "/path/to/service/alembic.ini",
     "upgrade",
     "head"
   ],
-  "cwd": "/path/to/ruoyi-fastapi-backend"
+  "cwd": "/path/to/service"
 }
 ```
 
@@ -709,7 +711,7 @@ dry_run: true
 message: 代码导出演练完成，未执行实际导出
 table_names:
   - demo_table
-output_file: /path/to/ruoyi-fastapi-backend/gen_code_demo_table.zip
+output_file: /path/to/service/gen_code_demo_table.zip
 ```
 
 代码生成 `dry-run` JSON 样例：
@@ -842,7 +844,7 @@ ruoyi ops health --env=dev --output=json
 
 请依次确认：
 
-- 当前目录是否为 `ruoyi-fastapi-backend`
+- 当前目录是否为 `service`
 - 当前 Python 环境是否执行过 `pip install -r requirements.txt` 或 `pip install -r requirements-pg.txt`
 - 当前终端是否真的使用了安装依赖的那个 Python/Conda 环境
 

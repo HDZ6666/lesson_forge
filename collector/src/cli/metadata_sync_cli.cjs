@@ -187,8 +187,18 @@ async function main() {
   }
 }
 
+function runCli() {
+  return main().finally(() => {
+    // The event emitter's disconnect listener keeps IPC referenced after the
+    // run is sealed. Finish discovery/cleanup first; pending IPC messages
+    // drain when Node closes the channel, without forcing process.exit().
+    if (process.connected) process.disconnect();
+  });
+}
+
 module.exports = {
   main,
+  runCli,
   parseArgs,
   printStatus,
   usage,

@@ -400,13 +400,16 @@ export function getQuestionSyncTask(taskId) {
 // optimistic-concurrency value is expectedStateToken (a map for a
 // multi-textbook task).  Keep expectedCurrentTaskId for older backends.
 export function applyQuestionSyncTask(taskId, expectedCurrentTaskId = null, expectedStateToken = null) {
+  let expectedReviewRevision = null
   // Also accept a single options object for callers that already have the
   // normalized task status at hand.
   if (expectedCurrentTaskId && typeof expectedCurrentTaskId === 'object' && !Array.isArray(expectedCurrentTaskId)) {
+    expectedReviewRevision = expectedCurrentTaskId.expectedReviewRevision ?? null
     expectedStateToken = expectedCurrentTaskId.expectedStateToken ?? expectedCurrentTaskId.expected_state_token ?? null
     expectedCurrentTaskId = expectedCurrentTaskId.expectedCurrentTaskId ?? expectedCurrentTaskId.expected_current_task_id ?? null
   }
   const data = { expectedCurrentTaskId }
+  if (expectedReviewRevision !== null) data.expectedReviewRevision = expectedReviewRevision
   if (expectedStateToken !== null && expectedStateToken !== undefined) data.expectedStateToken = expectedStateToken
   return request({
     url: `${questionSyncTaskBaseUrl}/${encodeURIComponent(taskId)}/apply`,
@@ -419,10 +422,10 @@ export function getQuestionReviewCatalogs(taskId, query) {
   return request({ url: `${questionSyncTaskBaseUrl}/${encodeURIComponent(taskId)}/review/catalogs`, method: 'get', params: query });
 }
 export function getQuestionReviewQuestions(taskId, query) {
-  return request({ url: `${questionSyncTaskBaseUrl}/${encodeURIComponent(taskId)}/review/questions`, method: 'get', params: query });
+  return request({ url: `${questionSyncTaskBaseUrl}/${encodeURIComponent(taskId)}/review/questions`, method: 'get', params: query, timeout: 35000 });
 }
 export function getQuestionReviewDetail(taskId, externalId, query) {
-  return request({ url: `${questionSyncTaskBaseUrl}/${encodeURIComponent(taskId)}/review/questions/${encodeURIComponent(externalId)}`, method: 'get', params: query });
+  return request({ url: `${questionSyncTaskBaseUrl}/${encodeURIComponent(taskId)}/review/questions/${encodeURIComponent(externalId)}`, method: 'get', params: query, timeout: 35000 });
 }
 export function setQuestionReviewSelection(taskId, data, query) {
   return request({ url: `${questionSyncTaskBaseUrl}/${encodeURIComponent(taskId)}/review/selection`, method: 'post', params: query, data });

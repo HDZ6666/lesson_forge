@@ -1,7 +1,7 @@
 """教案 Word 导出：把生成详情渲染成 .docx。
 
 题干 HTML 只保留段落、换行、上下标、表格与题图；其余标签按文本处理。
-题图从 ``BANK_ASSET_ROOT`` 读取，缺失或不可用时写 ``[图]``。
+题图从 ``BANK_ASSET_ROOT`` 读取，缺失或不可用时明确拒绝不完整导出。
 """
 
 from __future__ import annotations
@@ -16,7 +16,10 @@ from typing import Any
 
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.image.image import Image
 from docx.shared import Cm, Pt
+
+from exceptions.exception import ServiceException
 
 AssetResolver = Callable[[int, str], Path | None]
 _BLOCK_TAGS = {'p', 'div', 'li', 'tr', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'section', 'article'}
@@ -44,8 +47,8 @@ class _HtmlBlocks(HTMLParser):
         self._runs: list[_Run] = []
         self._sub = 0
         self._sup = 0
-        self._table: list[list[str]] | None = None
-        self._cell: list[str] | None = None
+        self._table: list[list[Any]] | None = None
+        self._cell: list[_Run] | None = None
 
     def _flush(self) -> None:
         if any(run.kind == 'image' or run.text.strip() for run in self._runs):
@@ -58,7 +61,7 @@ class _HtmlBlocks(HTMLParser):
             self._table = []
             return
         if self._table is not None:
-            self._table_starttag(tag)
+            self._table_starttag(tag, attrs)
             return
         if tag == 'br':
             self._runs.append(_Run('text', '\n'))
@@ -72,8 +75,7 @@ class _HtmlBlocks(HTMLParser):
         elif tag == 'sup':
             self._sup += 1
 
-    def _table_starttag(self, tag: str) -> None:
-        # 表格内只收集单元格文本，图片与换行退化为占位符。
+    def _table_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         if tag == 'tr':
             self._table.append([])
         elif tag in {'td', 'th'}:
@@ -81,20 +83,30 @@ class _HtmlBlocks(HTMLParser):
                 self._table.append([])
             self._cell = []
         elif self._cell is not None and tag == 'img':
-            self._cell.append('[图]')
+            attributes = dict(attrs)
+            self._cell.append(_Run('image', asset_key=str(attributes.get('data-asset-key') or '').strip()))
         elif self._cell is not None and tag == 'br':
-            self._cell.append('\n')
+            self._cell.append(_Run('text', '\n'))
+        elif tag == 'sub':
+            self._sub += 1
+        elif tag == 'sup':
+            self._sup += 1
 
     def handle_endtag(self, tag: str) -> None:
         if self._table is not None:
             if tag in {'td', 'th'} and self._cell is not None:
-                self._table[-1].append(''.join(self._cell).strip())
+                rich = any(run.kind == 'image' or run.sub or run.sup for run in self._cell)
+                self._table[-1].append(self._cell if rich else ''.join(run.text for run in self._cell).strip())
                 self._cell = None
             elif tag == 'table':
                 rows = [row for row in self._table if row]
                 if rows:
                     self.blocks.append(('table', rows))
                 self._table = None
+            elif tag == 'sub':
+                self._sub = max(0, self._sub - 1)
+            elif tag == 'sup':
+                self._sup = max(0, self._sup - 1)
             return
         if tag in _BLOCK_TAGS:
             self._flush()
@@ -107,7 +119,7 @@ class _HtmlBlocks(HTMLParser):
         text = _WHITESPACE_RE.sub(' ', data)
         if self._table is not None:
             if self._cell is not None:
-                self._cell.append(text)
+                self._cell.append(_Run('text', text, sub=self._sub > 0, sup=self._sup > 0))
             return
         if text:
             self._runs.append(_Run('text', text, sub=self._sub > 0, sup=self._sup > 0))
@@ -124,17 +136,17 @@ def html_blocks(html: str | None) -> list[tuple[str, Any]]:
     return parser.blocks
 
 
-def _add_runs(paragraph: Any, runs: list[_Run], question_id: int, resolver: AssetResolver | None) -> None:
+def _add_runs(paragraph: Any, runs: list[_Run], question_id: int, resolver: AssetResolver | None, max_width_cm: float = 6.0) -> None:
     for run in runs:
         if run.kind == 'image':
             path = resolver(question_id, run.asset_key) if resolver and run.asset_key else None
-            if path is not None:
-                try:
-                    paragraph.add_run().add_picture(str(path), width=Cm(min(_MAX_IMAGE_WIDTH_CM, 6.0)))
-                    continue
-                except Exception:
-                    pass
-            paragraph.add_run('[图]')
+            if path is None:
+                raise ServiceException(message=f'题目 {question_id} 的素材 {run.asset_key or "（无素材编号）"} 不可用，无法完整导出')
+            try:
+                natural_width = Image.from_file(str(path)).width
+                paragraph.add_run().add_picture(str(path), width=min(natural_width, Cm(max_width_cm)))
+            except Exception as exc:
+                raise ServiceException(message=f'题目 {question_id} 的素材 {run.asset_key} 无法写入 Word，请检查图片格式') from exc
             continue
         docx_run = paragraph.add_run(run.text)
         if run.sub:
@@ -151,11 +163,19 @@ def _render_question(document: Any, number: int, question: dict[str, Any], resol
     first = True
     for kind, payload in blocks:
         if kind == 'table':
-            table = document.add_table(rows=len(payload), cols=max(len(row) for row in payload))
+            if first:
+                document.add_paragraph().add_run(f'{number}. ').bold = True
+                first = False
+            columns = max(len(row) for row in payload)
+            table = document.add_table(rows=len(payload), cols=columns)
             table.style = 'Table Grid'
             for row_index, row in enumerate(payload):
                 for col_index, cell_text in enumerate(row):
-                    table.cell(row_index, col_index).text = cell_text
+                    cell = table.cell(row_index, col_index)
+                    if isinstance(cell_text, list):
+                        _add_runs(cell.paragraphs[0], cell_text, question_id, resolver, _MAX_IMAGE_WIDTH_CM / columns)
+                    else:
+                        cell.text = cell_text
             continue
         paragraph = document.add_paragraph()
         if first:

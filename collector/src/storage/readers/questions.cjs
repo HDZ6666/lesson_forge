@@ -1,5 +1,7 @@
 'use strict';
 
+const { createHash } = require('node:crypto');
+
 const {
   PROVIDER,
   MAX_CANDIDATE_ROWS,
@@ -49,6 +51,24 @@ const {
   assertRunCatalog,
 } = require('./common.cjs');
 
+// A locked run is immutable. Cache only aggregate results, never page rows;
+// review exclusions are part of the key and therefore cannot leak stale counts.
+const aggregateCache = new Map();
+function cachedAggregate(key, read) {
+  if (key && aggregateCache.has(key)) {
+    const value = aggregateCache.get(key);
+    aggregateCache.delete(key);
+    aggregateCache.set(key, value);
+    return value;
+  }
+  const value = read();
+  if (key) {
+    aggregateCache.set(key, value);
+    if (aggregateCache.size > 128) aggregateCache.delete(aggregateCache.keys().next().value);
+  }
+  return value;
+}
+
 function readRunQuestions(dbPath, runId, options = {}) {
   const textbookExternalId = optionalExternalId(
     options.textbookExternalId,
@@ -92,9 +112,13 @@ function readRunQuestions(dbPath, runId, options = {}) {
       )`);
       parameters.push(catalogExternalId);
     }
-    const questionTypes = db.prepare(`SELECT DISTINCT item.question_type AS value FROM sync_run_question_items AS item
-      WHERE ${predicates.join(' AND ')} AND item.question_type IS NOT NULL ORDER BY item.question_type`).all(...parameters)
-      .map(row => ({ value: row.value, label: row.value }));
+    const immutable = ['success', 'completed'].includes(run.status.toLowerCase())
+      && run.snapshotComplete && Boolean(run.snapshotLockedAt);
+    const cacheBase = immutable ? JSON.stringify([dbPath, run.id, run.snapshotLockedAt, textbookExternalId, catalogExternalId]) : null;
+    const questionTypes = cachedAggregate(cacheBase && `types:${cacheBase}`, () =>
+      db.prepare(`SELECT DISTINCT item.question_type AS value FROM sync_run_question_items AS item
+        WHERE ${predicates.join(' AND ')} AND item.question_type IS NOT NULL ORDER BY item.question_type`).all(...parameters)
+        .map(row => ({ value: row.value, label: row.value })));
     if (questionType) {
       if (itemColumns.has('question_type_id')) {
         predicates.push('(item.question_type = ? OR item.question_type_id = ?)');
@@ -124,17 +148,31 @@ function readRunQuestions(dbPath, runId, options = {}) {
       throw httpError('排除题目 ID 无效');
     }
     const baseWhere = predicates.join(' AND ');
-    const counts = db.prepare(`SELECT COUNT(*) AS captured,
-      COALESCE(SUM(item.question_external_id IN (SELECT value FROM json_each(?))), 0) AS excluded
-      FROM sync_run_question_items AS item WHERE ${baseWhere}`).get(JSON.stringify(excludedIds), ...parameters);
+    const excludedJson = JSON.stringify(excludedIds);
+    const exclusionKey = excludedIds.length ? createHash('sha256').update(excludedJson).digest('hex') : '';
+    const countKey = cacheBase && JSON.stringify(['counts', cacheBase, questionType, keyword, exclusionKey]);
+    const counts = cachedAggregate(countKey, () => {
+      if (immutable && !catalogExternalId && !questionType && !keyword && !excludedIds.length
+          && textbookExternalId && run.textbookExternalId === textbookExternalId
+          && run.questionItemCount > 0) {
+        return { captured: run.questionItemCount, excluded: 0 };
+      }
+      if (!excludedIds.length) {
+        const row = db.prepare(`SELECT COUNT(*) AS captured FROM sync_run_question_items AS item WHERE ${baseWhere}`).get(...parameters);
+        return { captured: Number(row.captured), excluded: 0 };
+      }
+      return db.prepare(`SELECT COUNT(*) AS captured,
+        COALESCE(SUM(item.question_external_id IN (SELECT value FROM json_each(?))), 0) AS excluded
+        FROM sync_run_question_items AS item WHERE ${baseWhere}`).get(excludedJson, ...parameters);
+    });
     if (options.selection === 'included' || options.selection === 'excluded') {
       predicates.push(`item.question_external_id ${options.selection === 'included' ? 'NOT IN' : 'IN'} (SELECT value FROM json_each(?))`);
-      parameters.push(JSON.stringify(excludedIds));
+      parameters.push(excludedJson);
     }
     const where = predicates.join(' AND ');
-    const total = Number(db.prepare(`
-      SELECT COUNT(*) AS total FROM sync_run_question_items AS item WHERE ${where}
-    `).get(...parameters).total || 0);
+    const total = options.selection === 'included'
+      ? Number(counts.captured) - Number(counts.excluded)
+      : options.selection === 'excluded' ? Number(counts.excluded) : Number(counts.captured);
     const offset = pageBounds(page, pageSize);
     const rows = db.prepare(`
       SELECT item.textbook_external_id, item.question_external_id,

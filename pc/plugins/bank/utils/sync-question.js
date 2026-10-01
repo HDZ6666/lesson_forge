@@ -138,6 +138,7 @@ export function normalizeCatalogComparison(response) {
   return {
     baselineOrigin: value.baselineOrigin,
     baselineCapturedAt: value.baselineCapturedAt,
+    currentComparedAt: value.currentComparedAt,
     fetchedTree,
     currentTree,
     summary: firstTaskField(value, ['summary', 'statistics', 'counts'], {}) || {},

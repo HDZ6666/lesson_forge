@@ -390,6 +390,42 @@ async def test_generate_rejects_catalog_outside_textbook(db: Any) -> None:
 
 
 @pytest.mark.asyncio
+async def test_generated_lesson_keeps_question_rule_and_asset_snapshots(db: Any) -> None:
+    created = await LessonService.generate(db, _scheme(), 'tester')
+    image_item = next(
+        item for phase in created['phases'] for item in phase['items']
+        if any(asset['available'] for asset in item['question']['assets'])
+    )
+    question_id = image_item['questionId']
+    original_html = image_item['question']['contentHtml']
+    original_rules = created['rules']
+    original_scheme = created['scheme']
+    original_path, _ = await LessonService.asset_file(db, question_id, 'img-1', created['generationId'])
+
+    question = await db.get(QbQuestion, question_id)
+    question.content_html = '<p>正式题库已更新</p>'
+    asset = (await db.execute(select(QbQuestionAsset).where(QbQuestionAsset.question_id == question_id))).scalars().first()
+    asset.storage_path = 'img/new.png'
+    rule = await db.get(LpPickRule, image_item['ruleId'])
+    rule.rule_name = '已改动的规则'
+    scheme = await db.get(LpScheme, created['schemeId'])
+    scheme.scheme_name = '已改动的方案'
+    await db.commit()
+
+    history = await LessonService.detail(db, created['generationId'])
+    saved_item = next(
+        item for phase in history['phases'] for item in phase['items']
+        if item['itemId'] == image_item['itemId']
+    )
+    saved_path, _ = await LessonService.asset_file(db, question_id, 'img-1', created['generationId'])
+    assert saved_item['question']['contentHtml'] == original_html
+    assert saved_item['question']['assets'] == image_item['question']['assets']
+    assert history['rules'] == original_rules
+    assert history['scheme'] == original_scheme
+    assert saved_path == original_path
+
+
+@pytest.mark.asyncio
 async def test_word_export_contains_sections_questions_tables_and_images(db: Any) -> None:
     detail = await LessonService.generate(db, _scheme(), 'tester')
     image_items = [
@@ -427,3 +463,43 @@ def test_html_blocks_split_paragraphs_tables_and_marks_scripts() -> None:
     assert kinds == ['paragraph', 'table', 'paragraph']
     assert blocks[1][1] == [['x', 'y'], ['1', '2']]
     assert blocks[0][1][1].sup is True
+
+
+@pytest.mark.asyncio
+async def test_historical_replacement_survives_rule_and_scheme_deletion(db: Any) -> None:
+    detail = await LessonService.generate(db, _scheme(), 'tester')
+    target = detail['phases'][2]['items'][0]
+    rules = list((await db.execute(select(LpPickRule).where(LpPickRule.scheme_id == detail['schemeId']))).scalars())
+    for rule in rules:
+        await db.delete(rule)
+    scheme = await db.get(LpScheme, detail['schemeId'])
+    await db.delete(scheme)
+    await db.commit()
+    historical = await LessonService.detail(db, detail['generationId'])
+    assert historical['rules'] == detail['rules']
+    assert historical['scheme'] == detail['scheme']
+    replaced = await LessonService.replace_item(db, detail['generationId'], target['itemId'], 'tester')
+    replacement = next(item for phase in replaced['phases'] for item in phase['items'] if item['itemId'] == target['itemId'])
+    assert replacement['questionId'] != target['questionId']
+    assert replaced['rules'] == detail['rules']
+    assert replaced['scheme'] == detail['scheme']
+
+
+def test_word_table_preserves_images_superscripts_and_table_only_number(tmp_path: Path) -> None:
+    image_path = tmp_path / 'formula.png'
+    from PIL import Image
+    Image.new('RGB', (80, 20), 'white').save(image_path)
+    detail = {'lesson': {'title': '表格公式'}, 'phases': [{'phase': 'practice', 'items': [{'question': {
+        'questionId': 1, 'contentHtml': '<table><tr><td>x<sup>2</sup></td><td><img data-asset-key="f1"></td></tr></table>'
+    }}]}]}
+    content = build_lesson_docx(detail, lambda *_: image_path)
+    doc = Document(io.BytesIO(content))
+    assert len(doc.inline_shapes) == 1
+    assert doc.inline_shapes[0].width < 6 * 360000
+    assert '题干为空' not in '\n'.join(p.text for p in doc.paragraphs)
+    assert any(run.font.superscript for table in doc.tables for row in table.rows for cell in row.cells for p in cell.paragraphs for run in p.runs)
+    with pytest.raises(ServiceException, match='无法完整导出'):
+        build_lesson_docx(detail, lambda *_: None)
+    image_path.write_bytes(b'not-an-image')
+    with pytest.raises(ServiceException, match='图片格式'):
+        build_lesson_docx(detail, lambda *_: image_path)

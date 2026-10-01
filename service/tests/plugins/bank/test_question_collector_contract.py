@@ -338,3 +338,28 @@ def test_summary_route_and_client_wrapper_are_wired_without_starting_server() ->
     assert calls == [
         ('GET', '/v1/runs/42/snapshot-summary', {'textbookExternalId': TEXTBOOK_ID}),
     ]
+
+
+@pytest.mark.parametrize('image_only', [False, True])
+def test_real_list_finalizer_is_accepted_without_detail_capture(sealed_collector_db: Path, image_only: bool) -> None:
+    full = _full_snapshot(sealed_collector_db)
+    item = _node_json('''
+      const { finalizeQuestion } = require('./collector/zujuan_question_sync.cjs');
+      const imageOnly = process.argv[1] === 'True';
+      const url = 'https://staticzujuan.xkw.com/quesimg/Upload/formula/test.png';
+      process.stdout.write(JSON.stringify(finalizeQuestion({
+        contentHtml: imageOnly ? `<img src="${url}">` : '<p>计算 1+1</p>',
+        assets: imageOnly ? [{sourceUrl:url,type:'formula_image',contentSha256:'a'.repeat(64),byteSize:3,storagePath:'assets/aa/test.png'}] : [],
+      })));
+    ''', image_only)
+    full['questions'] = [dict(item, provider='zujuan', textbookExternalId=TEXTBOOK_ID,
+                              questionExternalId='q-1', questionType='计算题')]
+    full['assets'] = [dict(asset, provider='zujuan', textbookExternalId=TEXTBOOK_ID, questionExternalId='q-1') for asset in item['assets']]
+    for name in ('questionAssetCount', 'assetCount'):
+        full['counts'][name] = len(full['assets'])
+        full['run'][name] = len(full['assets'])
+    assert item['detailFetched'] is False
+    assert item['contentComplete'] is True
+    result = apply_module._normalise_snapshot(full, 9001, TEXTBOOK_ID)
+    assert result['questions'][0]['answer_html'] is None
+    assert full['questions'][0]['detailFetched'] is False

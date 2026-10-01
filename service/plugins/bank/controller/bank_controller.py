@@ -448,6 +448,7 @@ async def apply_question_sync_task(
         expected_current_task_id=payload.expected_current_task_id,
         operator=operator,
         expected_state_token=payload.expected_state_token,
+        expected_review_revision=payload.expected_review_revision,
     )
     return ResponseUtil.success(data=result)
 

@@ -383,6 +383,7 @@ class LessonService:
                 'seed': seed,
                 'status': 'partial' if any(result.short for _, result in results) else 'ready',
                 'rule_snapshot_json': [_dump(_rule_input_from_row(row)) for row in rule_rows],
+                'scheme_snapshot_json': cls._scheme_snapshot(scheme),
                 'summary_json': summary,
                 'lesson_json': lesson,
                 'create_by': operator,
@@ -404,6 +405,14 @@ class LessonService:
                         'evidence_type': item.evidence_type,
                     }
                 )
+        picked_ids = [int(item['question_id']) for item in items]
+        details = await LessonDao.get_question_details(db, picked_ids)
+        assets = await LessonDao.get_question_assets(db, picked_ids)
+        for item in items:
+            question_id = int(item['question_id'])
+            item['question_snapshot_json'] = cls._question_snapshot(
+                details.get(question_id), assets.get(question_id, [])
+            )
         await LessonDao.insert_items(db, int(generation.generation_id), items)
         return generation
 
@@ -450,30 +459,35 @@ class LessonService:
         item = await LessonDao.get_item(db, generation_id, item_id)
         if item is None:
             raise ServiceException(message='题目条目不存在')
-        scheme = await LessonDao.get_scheme(db, int(generation.scheme_id))
-        rule_row = next(
-            (
-                row
-                for row in await LessonDao.get_rules(db, int(generation.scheme_id))
-                if int(row.rule_id) == int(item.rule_id)
-            ),
-            None,
-        )
-        if scheme is None or rule_row is None:
+        scheme_payload, rules = await cls._generation_rules(db, generation)
+        rule_payload = next((row for row in rules if row.get('ruleId') == int(item.rule_id)), None)
+        if rule_payload is None:
             raise ServiceException(message='抽题规则不存在')
-        spec = _rule_spec(
-            _rule_input_from_row(rule_row), [int(value) for value in rule_row.catalog_ids], str(int(rule_row.rule_id))
+        rule = RuleInputModel.model_validate(rule_payload)
+        spec = _rule_spec(rule, list(rule.catalog_ids), str(int(item.rule_id)))
+        preference = Preference(
+            current_year=int(scheme_payload.get('preferenceYear') or generation.create_time.year),
+            recent_years=int(scheme_payload.get('recentYears') or 0),
+            province=scheme_payload.get('preferredProvince') or None,
+            city=scheme_payload.get('preferredCity') or None,
+            exam_types=tuple(scheme_payload.get('preferredExamTypes') or []),
+            prefer_real_exam=bool(scheme_payload.get('preferRealExam')),
         )
         candidates = cls._candidates_for(
-            await LessonDao.load_candidates(db, int(scheme.textbook_id), list(spec.catalog_ids)), spec
+            await LessonDao.load_candidates(db, int(scheme_payload['textbookId']), list(spec.catalog_ids)), spec
         )
         used = {int(row.question_id) for row in await LessonDao.get_items(db, generation_id)}
         replacement_seed = (int(generation.seed) + int(item.item_id) * 7919 + int(item.question_id)) % MAX_SEED
         picked = pick_replacement(
-            candidates, spec, _preference_from_scheme(scheme), replacement_seed, used, int(item.question_id)
+            candidates, spec, preference, replacement_seed, used, int(item.question_id)
         )
         if picked is None:
             raise ServiceException(message='该规则下已没有可换的题目')
+        replacement_details = await LessonDao.get_question_details(db, [picked.question_id])
+        replacement_assets = await LessonDao.get_question_assets(db, [picked.question_id])
+        question_snapshot = cls._question_snapshot(
+            replacement_details.get(picked.question_id), replacement_assets.get(picked.question_id, [])
+        )
         try:
             await LessonDao.update_item_question(
                 db,
@@ -484,6 +498,7 @@ class LessonService:
                 matched_catalog_ids=list(picked.matched_catalog_ids),
                 evidence_type=picked.evidence_type,
                 replaced_from_question_id=int(item.question_id),
+                question_snapshot_json=question_snapshot,
             )
             await LessonDao.update_generation(db, generation_id, {'update_by': operator})
             await db.commit()
@@ -520,15 +535,12 @@ class LessonService:
     @classmethod
     async def detail(cls, db: AsyncSession, generation_id: int) -> dict[str, Any]:
         generation = await cls._require_generation(db, generation_id)
-        scheme = await LessonDao.get_scheme(db, int(generation.scheme_id))
-        if scheme is None:
-            raise ServiceException(message='抽题方案不存在')
+        scheme_payload, rules = await cls._generation_rules(db, generation)
         items = await LessonDao.get_items(db, generation_id)
-        question_ids = [int(item.question_id) for item in items]
+        question_ids = [int(item.question_id) for item in items if not item.question_snapshot_json]
         details = await LessonDao.get_question_details(db, question_ids)
         assets = await LessonDao.get_question_assets(db, question_ids)
-        rule_rows = await LessonDao.get_rules(db, int(scheme.scheme_id))
-        rule_order = {int(row.rule_id): index for index, row in enumerate(rule_rows)}
+        rule_order = {int(rule['ruleId']): index for index, rule in enumerate(rules) if rule.get('ruleId') is not None}
         phase_items: dict[str, list[GenerationItemModel]] = {}
         for item in sorted(
             items, key=lambda row: (rule_order.get(int(row.rule_id), 999), int(row.sort_no), int(row.item_id))
@@ -547,8 +559,10 @@ class LessonService:
                     replaced_from_question_id=int(item.replaced_from_question_id)
                     if item.replaced_from_question_id
                     else None,
-                    question=cls._question_model(
-                        details.get(int(item.question_id)), assets.get(int(item.question_id), [])
+                    question=(
+                        GenerationQuestionModel.model_validate(item.question_snapshot_json['question'])
+                        if item.question_snapshot_json
+                        else cls._question_model(details.get(int(item.question_id)), assets.get(int(item.question_id), []))
                     ),
                 )
             )
@@ -557,7 +571,25 @@ class LessonService:
             for phase in templates.PHASES
             if phase['phase'] in phase_items
         ]
-        scheme_payload = {
+        model = GenerationDetailModel(
+            generation_id=int(generation.generation_id),
+            scheme_id=int(generation.scheme_id),
+            seed=int(generation.seed),
+            status=str(generation.status),
+            scheme=scheme_payload,
+            rules=rules,
+            summary=[RuleSummaryModel.model_validate(row) for row in (generation.summary_json or [])],
+            lesson=dict(generation.lesson_json or {}),
+            phases=phases,
+            create_by=generation.create_by,
+            create_time=generation.create_time,
+            update_time=generation.update_time,
+        )
+        return _dump(model)
+
+    @staticmethod
+    def _scheme_snapshot(scheme: LpScheme) -> dict[str, Any]:
+        return {
             'schemeId': int(scheme.scheme_id),
             'schemeName': scheme.scheme_name,
             'textbookId': int(scheme.textbook_id),
@@ -569,22 +601,35 @@ class LessonService:
             'preferredExamTypes': list(scheme.preferred_exam_types or []),
             'preferRealExam': scheme.prefer_real_exam == 'Y',
             'remark': scheme.remark,
+            'preferenceYear': datetime.now().year,
         }
-        model = GenerationDetailModel(
-            generation_id=int(generation.generation_id),
-            scheme_id=int(generation.scheme_id),
-            seed=int(generation.seed),
-            status=str(generation.status),
-            scheme=scheme_payload,
-            rules=[_dump(_rule_input_from_row(row)) for row in rule_rows],
-            summary=[RuleSummaryModel.model_validate(row) for row in (generation.summary_json or [])],
-            lesson=dict(generation.lesson_json or {}),
-            phases=phases,
-            create_by=generation.create_by,
-            create_time=generation.create_time,
-            update_time=generation.update_time,
-        )
-        return _dump(model)
+
+    @classmethod
+    async def _generation_rules(cls, db: AsyncSession, generation: LpGeneration) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        """Historical generations use their saved rules and preferences even after edits/deletion."""
+        scheme_payload = generation.scheme_snapshot_json
+        if not scheme_payload:
+            scheme = await LessonDao.get_scheme(db, int(generation.scheme_id))
+            if scheme is None:
+                raise ServiceException(message='旧教案没有方案快照，原抽题方案已不存在')
+            scheme_payload = cls._scheme_snapshot(scheme)
+            scheme_payload['preferenceYear'] = generation.create_time.year
+        rules = generation.rule_snapshot_json
+        if rules is None:
+            rule_rows = await LessonDao.get_rules(db, int(generation.scheme_id))
+            rules = [_dump(_rule_input_from_row(row)) for row in rule_rows]
+        return scheme_payload, rules
+
+    @classmethod
+    def _question_snapshot(cls, detail: dict[str, Any] | None, assets: list[QbQuestionAsset]) -> dict[str, Any]:
+        model = cls._question_model(detail, assets)
+        if model is None:
+            raise ServiceException(message='所选题目已从正式题库中移除，请重新生成')
+        return {
+            'question': _dump(model),
+            'assetPaths': {str(asset.asset_key): asset.storage_path for asset in assets if asset.storage_path},
+            'assetMimeTypes': {str(asset.asset_key): asset.mime_type for asset in assets if asset.storage_path},
+        }
 
     @staticmethod
     def _question_model(detail: dict[str, Any] | None, assets: list[QbQuestionAsset]) -> GenerationQuestionModel | None:
@@ -633,7 +678,35 @@ class LessonService:
         return await LessonDao.get_asset_by_key(db, question_id, asset_key)
 
     @classmethod
-    async def asset_file(cls, db: AsyncSession, question_id: int, asset_key: str) -> tuple[Path, str]:
+    async def snapshot_asset_paths(cls, db: AsyncSession, generation_id: int) -> dict[tuple[int, str], str]:
+        await cls._require_generation(db, generation_id)
+        paths: dict[tuple[int, str], str] = {}
+        for item in await LessonDao.get_items(db, generation_id):
+            snapshot = item.question_snapshot_json or {}
+            for key, path in (snapshot.get('assetPaths') or {}).items():
+                if path:
+                    paths[(int(item.question_id), str(key))] = str(path)
+        return paths
+
+    @classmethod
+    async def asset_file(
+        cls, db: AsyncSession, question_id: int, asset_key: str, generation_id: int | None = None
+    ) -> tuple[Path, str]:
+        if generation_id is not None:
+            await cls._require_generation(db, generation_id)
+            for item in await LessonDao.get_items(db, generation_id):
+                if int(item.question_id) != question_id:
+                    continue
+                snapshot = item.question_snapshot_json
+                if snapshot:
+                    path = (snapshot.get('assetPaths') or {}).get(asset_key)
+                    if not path:
+                        raise ServiceException(message='教案快照中不存在该素材')
+                    media_type = (snapshot.get('assetMimeTypes') or {}).get(asset_key)
+                    return cls.resolve_asset_path(path), media_type or 'application/octet-stream'
+                break
+            else:
+                raise ServiceException(message='题目不属于该教案')
         asset = await cls.asset_row(db, question_id, asset_key)
         if asset is None:
             raise ServiceException(message='素材不存在')

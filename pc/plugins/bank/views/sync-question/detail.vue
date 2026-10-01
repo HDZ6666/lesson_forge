@@ -50,13 +50,13 @@
     <el-alert v-if="task?.status === 'blocked' && task?.resumeAvailable" class="state-alert" type="warning" :closable="false" show-icon>
       已保留完整页断点。请先确认滑块/403 等风控已解除，再点击“断点续采”；阻断任务不会自动重试。
     </el-alert>
-    <el-alert v-if="task?.status === 'completed' && task?.eligible && task?.isCurrent" class="state-alert" type="info" :closable="false" show-icon>
+    <el-alert v-if="task?.status === 'completed' && task?.isCurrent" class="state-alert" type="info" :closable="false" show-icon>
       当前任务快照已是正式题库，重复提交不会产生新的应用历史。
     </el-alert>
     <el-alert v-if="task?.status === 'completed' && task?.eligible && !task?.isCurrent && questionApplyWillReplace(task)" class="state-alert" type="warning" :closable="false" show-icon>
       本次应用将替换以下教材的当前正式题库快照：{{ affectedTextbookLabel }}。旧快照仍可回退或恢复。
     </el-alert>
-    <el-alert v-if="task?.status === 'completed' && !task?.eligible && task?.eligibilityMessage" class="state-alert" type="warning" :closable="false" show-icon>
+    <el-alert v-if="task?.status === 'completed' && !task?.isCurrent && !task?.eligible && task?.eligibilityMessage" class="state-alert" type="warning" :closable="false" show-icon>
       当前任务暂不可应用：{{ task.eligibilityMessage }}
     </el-alert>
 
@@ -99,12 +99,12 @@
         <el-tab-pane label="目录对比" name="catalog">
           <el-alert v-if="catalogError" class="tab-alert" type="error" :closable="false" show-icon>{{ catalogError }}</el-alert>
           <div class="tree-toolbar">
-            <span>{{ catalogComparison.baselineOrigin === 'task_start' ? '对比任务开始时的正式库' : '历史任务：对比首次查看时的正式库' }} · {{ formatTaskTime(catalogComparison.baselineCapturedAt) }} · 每个目录独立去重计数</span>
+            <span>与当前正式目录对比 · {{ formatTaskTime(catalogComparison.currentComparedAt) }} · 每个目录独立去重计数</span>
             <el-button link type="primary" :icon="Refresh" :loading="catalogLoading" @click="loadCatalogComparison">刷新目录</el-button>
           </div>
-          <div class="review-catalog" v-loading="catalogLoading">
+          <div class="review-catalog catalog-grid" v-loading="catalogLoading">
             <section class="tree-pane">
-              <div class="pane-heading"><h4>本次抓取与旧目录</h4><span>点击目录筛选下方题目</span></div>
+              <div class="pane-heading"><h4>本次抓取</h4><span>点击目录筛选下方题目</span></div>
               <div class="tree-scroll">
                 <el-tree ref="fetchedTreeRef" :data="catalogComparison.fetchedTree" node-key="nodeKey" :props="treeProps" default-expand-all :expand-on-click-node="false" highlight-current @node-click="selectCatalogQuestions">
                   <template #default="{ data }">
@@ -112,10 +112,25 @@
                       <span class="node-label">{{ data.label }}</span>
                       <span class="review-node-count">{{ reviewNodeCount(data) }}</span>
                       <el-tag v-for="tag in data.reviewTags || []" :key="tag" size="small" :type="reviewTag(tag).type">{{ reviewTag(tag).label }}</el-tag>
+                      <el-button v-if="data.comparisonStatus !== 'new' && data.comparisonStatus !== 'missing'" link size="small" @click.stop="locateCurrentCatalog(data)">定位</el-button>
                     </span>
                   </template>
                 </el-tree>
                 <el-empty v-if="!catalogLoading && !catalogComparison.fetchedTree.length" :image-size="64" description="等待抓取目录" />
+              </div>
+            </section>
+            <section class="tree-pane">
+              <div class="pane-heading"><h4>当前正式目录</h4><span>刷新后读取最新正式库</span></div>
+              <div class="tree-scroll">
+                <el-tree ref="currentTreeRef" :data="catalogComparison.currentTree" node-key="nodeKey" :props="treeProps" default-expand-all :expand-on-click-node="false" highlight-current>
+                  <template #default="{ data }">
+                    <span class="catalog-node" :id="catalogDomId('current', data)">
+                      <span class="node-label">{{ data.label }}</span>
+                      <span class="review-node-count">{{ formatLiveCount(data.questionCount) }} 题</span>
+                    </span>
+                  </template>
+                </el-tree>
+                <el-empty v-if="!catalogLoading && !catalogComparison.currentTree.length" :image-size="64" description="正式库暂无该教材目录" />
               </div>
             </section>
           </div>
@@ -148,6 +163,7 @@
           <el-table v-loading="questionLoading" :data="questionRows" stripe size="small" row-key="key" class="question-table" @row-click="openQuestionDetail" @selection-change="selectedQuestions = $event">
             <el-table-column type="selection" width="42" />
             <el-table-column label="同步" width="82" align="center"><template #default="scope"><el-tag size="small" :type="scope.row.excluded ? 'info' : 'success'">{{ scope.row.excluded ? '已排除' : '待同步' }}</el-tag></template></el-table-column>
+            <el-table-column label="基础内容对比" width="118" align="center"><template #default="scope"><el-tag size="small" :type="scope.row.comparisonStatus === 'new' ? 'success' : scope.row.comparisonStatus === 'modified' ? 'warning' : 'info'">{{ scope.row.comparisonStatus === 'new' ? '新增' : scope.row.comparisonStatus === 'modified' ? '修改' : '基础内容相同' }}</el-tag></template></el-table-column>
             <el-table-column prop="externalQuestionId" label="外部题目 ID" min-width="145" show-overflow-tooltip />
             <el-table-column label="目录" min-width="130" show-overflow-tooltip><template #default="scope">{{ scope.row.catalogName || scope.row.catalogId || '—' }}</template></el-table-column>
             <el-table-column label="题型" width="110" show-overflow-tooltip><template #default="scope">{{ scope.row.questionType || '—' }}</template></el-table-column>
@@ -174,6 +190,8 @@
         </div>
         <div>
           <QuestionSnapshot title="本次抓取" :snapshot="questionDetail.fetched" />
+          <QuestionSnapshot v-if="questionDetail.current" title="当前正式题库" :snapshot="questionDetail.current" />
+          <el-empty v-else :image-size="46" description="正式题库尚无这道题" />
         </div>
       </template>
       <el-empty v-else description="未找到题目快照" />
@@ -272,6 +290,7 @@ const questionError = ref('')
 const questionRows = ref([])
 const questionPage = reactive({ total: 0 })
 const questionSummary = reactive({ captured: 0, excluded: 0, included: 0 })
+const reviewRevision = ref(null)
 const selectedQuestions = ref([])
 const remoteQuestionTypes = ref([])
 const questionFilters = reactive({ catalogId: '', questionType: '', keyword: '', selection: 'included', pageNum: 1, pageSize: 20 })
@@ -536,7 +555,9 @@ function selectDefaultScope() {
 async function ensureComparisonLoaded() {
   selectDefaultScope()
   if (!selectedScopeKey.value) return
-  loadedScopeKey = selectedScopeKey.value
+  const key = `${selectedScopeKey.value}:${task.value?.status || ''}`
+  if (key === loadedScopeKey && !isActiveSyncTask(task.value?.status)) return
+  loadedScopeKey = key
   await Promise.all([loadCatalogComparison(), loadQuestions()])
 }
 
@@ -549,7 +570,9 @@ async function loadTask(silent = false) {
     if (!result) throw new Error('未找到同步题库任务')
     task.value = result
     selectDefaultScope()
-    await ensureComparisonLoaded()
+    // The task and its saved logs can render before the larger comparison
+    // requests finish; each comparison section has its own loading/error UI.
+    void ensureComparisonLoaded()
   } catch (error) {
     requestError.value = syncTaskErrorMessage(error, '同步题库任务详情加载失败')
   } finally {
@@ -561,15 +584,13 @@ async function loadTask(silent = false) {
 async function refreshTask() { loadedScopeKey = ''; await loadTask() }
 
 async function handleScopeChange() {
-  // Keep the completed-snapshot loader armed while a scope is being viewed
-  // during collection.  Otherwise the first completed poll would see the
-  // same key and incorrectly skip loading the comparison workspace.
-  loadedScopeKey = task.value?.status === 'completed' ? selectedScopeKey.value : ''
+  loadedScopeKey = ''
   resetComparisonState()
-  await Promise.all([loadCatalogComparison(), loadQuestions()])
+  await ensureComparisonLoaded()
 }
 
 function resetComparisonState() {
+  reviewRevision.value = null
   Object.assign(catalogComparison, { fetchedTree: [], currentTree: [], summary: {}, sourceAvailable: undefined, sourceMessage: '' })
   questionRows.value = []
   questionPage.total = 0
@@ -583,22 +604,28 @@ async function handleTabChange(name) {
   if (name === 'question' && !questionRows.value.length && !questionLoading.value) await loadQuestions()
 }
 
+function comparisonRequestKey() {
+  return JSON.stringify([taskId.value, selectedScopeKey.value, task.value?.status,
+    selectedScope.value?.status, selectedScope.value?.collectorRunId])
+}
+
 async function loadCatalogComparison() {
   if (!selectedScope.value || catalogLoading.value) return
-  const requestedKey = `${taskId.value}:${selectedScopeKey.value}`
+  const requestedKey = comparisonRequestKey()
   catalogLoading.value = true
   catalogError.value = ''
   try {
     const result = normalizeCatalogComparison(await getQuestionSyncCatalogComparison(taskId.value, scopeQuery()))
-    if (requestedKey !== `${taskId.value}:${selectedScopeKey.value}`) return
+    if (!mounted || requestedKey !== comparisonRequestKey()) return
     Object.assign(catalogComparison, result)
     if (result.sourceAvailable === false) catalogError.value = result.sourceMessage || '该教材未生成可用的目录快照'
   } catch (error) {
+    if (!mounted || requestedKey !== comparisonRequestKey()) return
     Object.assign(catalogComparison, { fetchedTree: [], currentTree: [], summary: {} })
     catalogError.value = syncTaskErrorMessage(error, '目录快照对比加载失败')
   } finally {
     catalogLoading.value = false
-    if (mounted && requestedKey !== `${taskId.value}:${selectedScopeKey.value}`) loadCatalogComparison()
+    if (mounted && requestedKey !== comparisonRequestKey()) void loadCatalogComparison()
   }
 }
 
@@ -645,24 +672,27 @@ function questionQuery() {
 
 async function loadQuestions() {
   if (!selectedScope.value || questionLoading.value) return
-  const requestedKey = JSON.stringify([taskId.value, questionQuery()])
+  const requestedKey = JSON.stringify([comparisonRequestKey(), questionQuery()])
   questionLoading.value = true
   questionError.value = ''
   try {
     const response = await getQuestionSyncQuestionComparison(taskId.value, questionQuery())
-    if (requestedKey !== JSON.stringify([taskId.value, questionQuery()])) return
+    if (!mounted || requestedKey !== JSON.stringify([comparisonRequestKey(), questionQuery()])) return
     const page = normalizeQuestionComparisonPage(response)
+    reviewRevision.value = response.data?.revision ?? response.revision ?? null
     Object.assign(questionSummary, response.data?.summary || response.summary || {})
     questionRows.value = page.rows
     questionPage.total = page.total
     if (page.questionTypes.length) remoteQuestionTypes.value = page.questionTypes
   } catch (error) {
+    if (!mounted || requestedKey !== JSON.stringify([comparisonRequestKey(), questionQuery()])) return
+    reviewRevision.value = null
     questionRows.value = []
     questionPage.total = 0
     questionError.value = syncTaskErrorMessage(error, '题目快照对比加载失败')
   } finally {
     questionLoading.value = false
-    if (mounted && requestedKey !== JSON.stringify([taskId.value, questionQuery()])) loadQuestions()
+    if (mounted && requestedKey !== JSON.stringify([comparisonRequestKey(), questionQuery()])) void loadQuestions()
   }
 }
 
@@ -672,7 +702,7 @@ function resetQuestionFilters() { Object.assign(questionFilters, { catalogId: ''
 const reviewTags = {
   new: { label: '新增', type: 'success' }, structure: { label: '目录变更', type: 'warning' },
   increased: { label: '题数增加', type: 'success' }, decreased: { label: '题数减少', type: 'warning' },
-  existing: { label: '无变化', type: 'info' }, running: { label: '采集中', type: 'primary' },
+  existing: { label: '题数相同', type: 'info' }, running: { label: '采集中', type: 'primary' },
   incomplete: { label: '未完成', type: 'warning' }, missing: { label: '本次未发现', type: 'info' },
   pending: { label: '等待抓取', type: 'info' },
 }
@@ -769,6 +799,13 @@ async function retryTask() {
 
 async function applyTask() {
   if (!task.value || task.value.status !== 'completed' || !task.value.eligible || task.value.isCurrent) return
+  if (!Number.isInteger(reviewRevision.value)) {
+    ElMessage.warning('请先加载题目对比，再确认入库')
+    return
+  }
+  const expectedReviewRevision = reviewRevision.value
+  const targetTaskId = task.value.taskId
+  const expectedStateToken = questionApplyStateToken(task.value)
   const currentTaskId = questionApplyCurrentTaskId(task.value)
   const currentTask = currentFormalSummary.value
   const targetTask = `任务 ${task.value.taskNo || task.value.taskId}`
@@ -784,11 +821,11 @@ async function applyTask() {
       `${action}正式题库快照`,
       { type: 'warning', confirmButtonText: `确认${action}`, cancelButtonText: '取消' },
     )
+    if (task.value?.taskId !== targetTaskId) throw new Error('当前任务已变化，请重新确认入库')
     acting.value = true
     const response = await applyQuestionSyncTask(
-      task.value.taskId,
-      currentTaskId || null,
-      questionApplyStateToken(task.value),
+      targetTaskId,
+      { expectedCurrentTaskId: currentTaskId || null, expectedStateToken, expectedReviewRevision },
     )
     const result = response?.data || response
     applySuccess.value = `${action}成功。${formatQuestionApplyStats(result)}`

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Annotated
 from urllib.parse import quote
 
@@ -255,11 +256,15 @@ async def plan_export(
         for asset in ((item.get('question') or {}).get('assets') or [])
     }
     storage_paths: dict[tuple[int, str], str | None] = {}
+    snapshot_paths = await LessonService.snapshot_asset_paths(db, generation_id)
     for (question_id, asset_key), asset in assets.items():
         if not asset.get('available'):
             continue
-        row = await LessonService.asset_row(db, question_id, asset_key)
-        storage_paths[(question_id, asset_key)] = row.storage_path if row is not None else None
+        path = snapshot_paths.get((question_id, asset_key))
+        if path is None:
+            row = await LessonService.asset_row(db, question_id, asset_key)
+            path = row.storage_path if row is not None else None
+        storage_paths[(question_id, asset_key)] = path
 
     def resolver(question_id: int, asset_key: str):  # noqa: ANN202
         storage_path = storage_paths.get((question_id, asset_key))
@@ -270,7 +275,7 @@ async def plan_export(
         except Exception:
             return None
 
-    content = build_lesson_docx(detail, resolver)
+    content = await asyncio.to_thread(build_lesson_docx, detail, resolver)
     title = str((detail.get('lesson') or {}).get('title') or f'教案-{generation_id}')
     filename = quote(f'{title}.docx')
     return Response(
@@ -291,6 +296,7 @@ async def plan_asset_file(
     question_id: Annotated[int, Path(gt=0)],
     asset_key: Annotated[str, Path(min_length=1, max_length=100)],
     db: Annotated[AsyncSession, DBSessionDependency()],
+    generation_id: Annotated[int | None, Query(alias='generationId', gt=0)] = None,
 ) -> FileResponse:
-    path, media_type = await LessonService.asset_file(db, question_id, asset_key)
+    path, media_type = await LessonService.asset_file(db, question_id, asset_key, generation_id)
     return FileResponse(path, media_type=media_type, filename=path.name)

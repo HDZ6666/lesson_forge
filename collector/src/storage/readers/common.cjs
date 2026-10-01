@@ -462,6 +462,7 @@ function assertApplyableSnapshotRun(db, run) {
 
 function snapshotScopeIds(db, run) {
   const scopeIds = new Set(run.textbookExternalIds || []);
+  const available = tableNames(db);
   for (const table of [
     'sync_run_catalog_items',
     'sync_run_question_items',
@@ -469,11 +470,26 @@ function snapshotScopeIds(db, run) {
     'sync_run_question_tags',
     'sync_run_question_assets',
   ]) {
-    for (const row of db.prepare(`
-      SELECT DISTINCT textbook_external_id FROM "${table}"
+    if (!available.has(table)) continue;
+    // On a single-textbook run, DISTINCT would walk every tag/asset index
+    // entry just to return one ID. The two indexed endpoints prove whether
+    // this table contains one or several scopes without a full scan.
+    const edge = (direction) => db.prepare(`
+      SELECT textbook_external_id FROM "${table}"
       WHERE run_id = ? AND provider = ?
-    `).all(run.id, PROVIDER)) {
-      if (row.textbook_external_id != null) scopeIds.add(String(row.textbook_external_id));
+      ORDER BY textbook_external_id ${direction} LIMIT 1
+    `).get(run.id, PROVIDER)?.textbook_external_id;
+    const first = edge('ASC');
+    if (first == null) continue;
+    const last = edge('DESC');
+    scopeIds.add(String(first));
+    if (first !== last) {
+      for (const row of db.prepare(`
+        SELECT DISTINCT textbook_external_id FROM "${table}"
+        WHERE run_id = ? AND provider = ?
+      `).all(run.id, PROVIDER)) {
+        if (row.textbook_external_id != null) scopeIds.add(String(row.textbook_external_id));
+      }
     }
   }
   return scopeIds;

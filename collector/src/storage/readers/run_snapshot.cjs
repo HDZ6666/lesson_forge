@@ -93,21 +93,7 @@ function readRunSnapshot(dbPath, runId, options = {}) {
 
     let textbookExternalId = requestedTextbookId;
     if (!textbookExternalId) {
-      const ids = new Set(run.textbookExternalIds || []);
-      for (const table of [
-        'sync_run_catalog_items',
-        'sync_run_question_items',
-        'sync_run_question_catalogs',
-        'sync_run_question_tags',
-        'sync_run_question_assets',
-      ]) {
-        for (const row of db.prepare(`
-          SELECT DISTINCT textbook_external_id FROM "${table}"
-          WHERE run_id = ? AND provider = ?
-        `).all(run.id, PROVIDER)) {
-          if (row.textbook_external_id != null) ids.add(String(row.textbook_external_id));
-        }
-      }
+      const ids = snapshotScopeIds(db, run);
       if (ids.size !== 1) {
         throw httpError(
           `内容运行 ${run.id} 包含多个教材范围，必须指定 textbookExternalId`,
@@ -178,15 +164,7 @@ function readRunSnapshot(dbPath, runId, options = {}) {
     // multi-textbook run stores aggregate counters; compare that case with
     // aggregate immutable rows instead of silently replacing the declaration
     // with this response's array lengths.
-    const scopeIds = new Set(run.textbookExternalIds || []);
-    for (const table of tableNamesForSnapshot) {
-      for (const row of db.prepare(`
-        SELECT DISTINCT textbook_external_id FROM "${table}"
-        WHERE run_id = ? AND provider = ?
-      `).all(run.id, PROVIDER)) {
-        if (row.textbook_external_id != null) scopeIds.add(String(row.textbook_external_id));
-      }
-    }
+    const scopeIds = snapshotScopeIds(db, run);
     const wholeRunScope = scopeIds.size <= 1;
     const declaredCounts = {
       catalogItemCount: run.catalogItemCount,
@@ -292,21 +270,7 @@ function readRunSnapshotSummary(dbPath, runId, expectedTextbookExternalId = null
     // Scope is derived from the run declaration plus immutable rows.  A
     // summary with no explicit textbook is only safe when exactly one scope
     // exists; never silently aggregate a multi-textbook run.
-    const scopeIds = new Set(run.textbookExternalIds || []);
-    for (const table of [
-      'sync_run_catalog_items',
-      'sync_run_question_items',
-      'sync_run_question_catalogs',
-      'sync_run_question_tags',
-      'sync_run_question_assets',
-    ]) {
-      for (const row of db.prepare(`
-        SELECT DISTINCT textbook_external_id FROM "${table}"
-        WHERE run_id = ? AND provider = ?
-      `).all(run.id, PROVIDER)) {
-        if (row.textbook_external_id != null) scopeIds.add(String(row.textbook_external_id));
-      }
-    }
+    const scopeIds = snapshotScopeIds(db, run);
     let scopeId = textbookExternalId;
     if (!scopeId) {
       if (scopeIds.size !== 1) {

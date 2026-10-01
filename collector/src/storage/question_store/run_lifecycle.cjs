@@ -141,6 +141,12 @@ class RunLifecycleMethods {
       }
     }
     if (counts.catalogCount <= 0) scanReasons.push('运行快照缺少目录');
+    const incompleteContent = this.db.prepare(`
+      SELECT COUNT(*) AS n FROM sync_run_question_items
+      WHERE run_id = ? AND textbook_external_id = ?
+        AND content_source = 'list_api' AND COALESCE(content_complete, 0) <> 1
+    `).get(Number(runId), textbookId);
+    if (Number(incompleteContent?.n || 0) > 0) dataReasons.push('列表题干不完整');
     if (counts.questionCount > 0 && counts.questionCatalogCount <= 0) {
       dataReasons.push('运行快照缺少题目目录关系');
     }

@@ -13,6 +13,7 @@ const {
   ensureRunSnapshotSchema,
   TERMINAL_RUN_STATUSES,
 } = require('../lib/run_snapshots.cjs');
+const { resolveContentRun, snapshotScopeIds } = require('../src/storage/readers/common.cjs');
 const {
   readRunCatalogs,
   readMetadataSnapshot,
@@ -88,6 +89,25 @@ function seedRun(dbPath, {
   store.close();
   return runId;
 }
+
+test('summary scope check finds row scopes omitted from the run declaration', () => {
+  const { directory, dbPath } = temporaryDb('collector-scope-edges-');
+  try {
+    const runId = seedRun(dbPath, {
+      scope: { textbookId: 'tb1' },
+      textbookIds: ['tb1', 'tb2'],
+    });
+    const db = new DatabaseSync(dbPath, { readOnly: true });
+    try {
+      const run = resolveContentRun(db, runId);
+      assert.deepEqual([...snapshotScopeIds(db, run)].sort(), ['tb1', 'tb2']);
+    } finally {
+      db.close();
+    }
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
 
 function seedMetadata(dbPath, textbookIds = ['tb1', 'tb2']) {
   const store = new MetadataStore(dbPath);
@@ -313,6 +333,8 @@ test('运行快照 schema 可从旧库增量升级，重复升级安全且终态
     ensureRunSnapshotSchema(dbPath);
 
     const upgraded = new DatabaseSync(dbPath);
+    assert.equal(upgraded.prepare('PRAGMA user_version').get().user_version & 6, 6);
+    assert.ok(upgraded.prepare("SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_sync_run_question_items_preview_types'").get());
     const run = upgraded.prepare(
       'SELECT status, snapshot_locked_at FROM sync_runs WHERE id = 1',
     ).get();
@@ -401,6 +423,47 @@ test('interrupted 是不可变不完整终态，但明确 allowIncomplete 时只
     for (const arrayName of ['catalogs', 'questions', 'questionCatalogs', 'tags', 'assets']) {
       assert.equal(Object.hasOwn(partial, arrayName), false);
     }
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('采集中题目预览使用实时行数，不能复用尚未更新的运行汇总或缓存', () => {
+  const { directory, dbPath } = temporaryDb();
+  try {
+    const runId = seedChildRun(dbPath, 'tb1', 'success', { finish: false });
+    const db = new DatabaseSync(dbPath);
+    db.prepare('UPDATE sync_runs SET question_item_count = 1 WHERE id = ?').run(runId);
+    db.close();
+    const options = { textbookExternalId: 'tb1', selection: 'included' };
+    assert.equal(readRunQuestions(dbPath, runId, options).total, 1);
+    const store = new SyncStore(dbPath);
+    store.saveRunQuestion(runId, 'tb1', {
+      externalId: 'q-new', questionType: '填空题', plainText: '新题', contentHtml: '<p>新题</p>',
+    }, 'tb1-c1');
+    store.close();
+    const result = readRunQuestions(dbPath, runId, options);
+    assert.equal(result.total, 2);
+    assert.equal(result.summary.captured, 2);
+    assert.equal(result.rows.length, 2);
+    assert.equal(result.questionTypes.length, 2);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('完整快照缓存区分筛选和排除列表，删除与恢复后统计保持准确', () => {
+  const { directory, dbPath } = temporaryDb();
+  try {
+    const runId = seedRun(dbPath);
+    const options = { textbookExternalId: 'tb1', selection: 'included' };
+    assert.equal(readRunQuestions(dbPath, runId, options).total, 1);
+    const excluded = { ...options, excludedIds: ['tb1-q1'] };
+    assert.equal(readRunQuestions(dbPath, runId, excluded).total, 0);
+    assert.equal(readRunQuestions(dbPath, runId, { ...excluded, selection: 'excluded' }).total, 1);
+    assert.equal(readRunQuestions(dbPath, runId, { ...options, keyword: '不存在的题目' }).total, 0);
+    assert.equal(readRunQuestions(dbPath, runId, { ...options, questionType: '填空题' }).total, 0);
+    assert.equal(readRunQuestions(dbPath, runId, options).total, 1);
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }

@@ -2758,8 +2758,12 @@ async def _finish(  # noqa: PLR0913
             'current_textbook_name': None,
             'finished_at': datetime.now(),
             'error_message': final_error,
-            'log_tail': _tail_text(handle.log_lines),
         }
+        # Remote collector jobs already persisted their log tail while being
+        # polled.  The local handle is empty for those jobs, so writing its
+        # empty buffer here would erase the durable remote log at completion.
+        if handle.log_lines:
+            values['log_tail'] = _tail_text(handle.log_lines)
         if final_status == 'completed':
             values['progress_percent'] = Decimal('100')
         values.update(

@@ -67,10 +67,11 @@ export function exportGeneration(generationId) {
   })
 }
 
-export function getPlanAsset(questionId, assetKey) {
+export function getPlanAsset(questionId, assetKey, generationId) {
   return request({
     url: `${baseUrl}/asset/${encodeURIComponent(questionId)}/${encodeURIComponent(assetKey)}`,
     method: 'get',
+    params: { generationId },
     responseType: 'blob',
   })
 }

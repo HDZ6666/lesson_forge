@@ -336,7 +336,10 @@ function finalizeQuestion(question) {
     contentHtml: html || null,
     plainText: text || null,
     contentSource: item.contentSource || 'list_api',
-    contentComplete: Boolean(html && text),
+    contentComplete: Boolean(html || text)
+      && Boolean(text || /<img\b[^>]*\bdata-asset-key=/i.test(html || ''))
+      && normalizedContent.missingAssets.length === 0
+      && normalizedContent.errors.length === 0,
     contentHash: stable ? sha256(stable) : null,
     // Recompute after every asset/HTML rewrite. A formula fallback or a
     // skipped placeholder changes the canonical HTML and must change the

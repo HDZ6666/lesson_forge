@@ -1,5 +1,7 @@
 # 传输层加解密配置说明
 
+本页用于排查现有前后端加密策略和环境配置，不代表本轮业务重构必须启用该功能。2026-10-01 已按仓库配置更正部署入口，未检查当前线上环境或密钥。
+
 ## 模式说明
 
 `TRANSPORT_CRYPTO_MODE` 共有三种模式：
@@ -18,7 +20,7 @@
 
 ## 开发环境
 
-开发环境直接使用 `.env.dev` 中默认提供的可用密钥对即可。
+开发环境按 `service/.env.dev` 或外部环境变量配置。启用时需要有效且匹配的密钥对，不能仅凭文件中存在示例值判断可用。
 
 说明：
 
@@ -30,7 +32,7 @@
 
 ## 生产环境
 
-生产环境使用后端 `.env.prod` 中的密钥配置；仓库默认提供一套可用示例值，正式部署前请替换为正式密钥。
+生产环境应使用部署实际注入的配置。下例仅说明选择启用时的配置项，不表示仓库的生产 Compose 当前启用了该功能；环境变量优先级见下方 Docker 说明。
 
 推荐最小配置如下：
 
@@ -61,27 +63,11 @@ TRANSPORT_CRYPTO_MAX_GET_URL_LENGTH=4096
 
 ## Docker 环境
 
-当前项目的 Docker 部署使用：
+本项目生产入口为 [deploy/production/docker-compose.yml](../../deploy/production/docker-compose.yml)，后端镜像使用 [service.Dockerfile](../../deploy/production/service.Dockerfile) 的 `python app.py`，Compose 注入 `APP_ENV=prod`。
 
-- `docker-compose.my.yml` + `Dockerfile.my`
-- `docker-compose.pg.yml` + `Dockerfile.pg`
+当前仓库 Compose 显式设置 `TRANSPORT_CRYPTO_ENABLED=false`、`TRANSPORT_CRYPTO_MODE=off`。[环境加载代码](../config/env.py)优先采用外部环境变量，按 `APP_ENV`（或显式 `--env`）选择 `service/.env.<环境>`；因此只修改 `.env.prod` 不能覆盖 Compose 中已注入的关闭设置。调整时先确认实际部署文件及环境变量来源，再使容器使用更新后的配置。本段是仓库事实，不是线上运行核验。
 
-后端容器启动命令分别是：
-
-- `python app.py --env=dockermy`
-- `python app.py --env=dockerpg`
-
-所以 Docker 环境需要直接在以下文件中配置传输层密钥：
-
-- `ruoyi-fastapi-backend/.env.dockermy`
-- `ruoyi-fastapi-backend/.env.dockerpg`
-
-配置方式与生产环境相同；`.env.dockermy` / `.env.dockerpg` 里也已经默认提供一套可用示例值，正式部署前请替换为正式密钥。
-
-使用时只需要：
-
-1. 修改对应的 `.env.dockermy` 或 `.env.dockerpg`
-2. 重新构建并启动 Docker 服务
+[service/Dockerfile.my](../Dockerfile.my) 和 [service/Dockerfile.pg](../Dockerfile.pg) 是保留的框架 Dockerfile，分别使用 `ruoyi app run --env=dockermy/dockerpg`；仅使用这些模板时才对应 `.env.dockermy/.env.dockerpg`。本仓库没有原说明中的 `docker-compose.my.yml/docker-compose.pg.yml`，不要据此另建一套生产编排。
 
 ## 密钥生成
 

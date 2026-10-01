@@ -875,6 +875,33 @@ async def test_mark_interrupted_terminalizes_unfinished_scopes_with_parent() -> 
 
 
 @pytest.mark.asyncio
+async def test_finish_keeps_remote_log_when_local_handle_has_no_lines(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    saved = {'log_tail': '远程采集完成'}
+
+    async def update(
+        _run_id: int,
+        values: dict[str, object],
+        *,
+        expected_statuses: tuple[str, ...] | None = None,
+    ) -> bool:
+        saved.update(values)
+        return True
+
+    async def no_finalize(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(module, '_update_row', update)
+    monkeypatch.setattr(module, '_finalize_scopes', no_finalize)
+
+    await module._finish(1, module._WorkerHandle(token='remote'), 'completed', 'completed', None)
+
+    assert saved['status'] == 'completed'
+    assert saved['log_tail'] == '远程采集完成'
+
+
+@pytest.mark.asyncio
 async def test_finish_preserves_cancellation_that_wins_terminal_state_race(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

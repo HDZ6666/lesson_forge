@@ -180,6 +180,29 @@ def test_run_snapshot_rejects_page_count_mismatch(
         client.run_snapshot(RUN_ID, textbook_external_id=TEXTBOOK_ID)
 
 
+def test_bounded_page_accepts_large_total_without_enabling_full_aggregation(
+    monkeypatch: pytest.MonkeyPatch,
+    configured: None,
+) -> None:
+    client = collector_module.CollectorClient()
+    counts = _counts(questionCatalogs=150_000)
+    monkeypatch.setattr(client, '_request', lambda *_args, **_kwargs: _page(
+        'questionCatalogs', counts,
+        [{'questionExternalId': 'q-1', 'catalogExternalId': 'c-1'}], 0, 1,
+    ))
+    page = client.run_snapshot_page(RUN_ID, 'questionCatalogs', textbook_external_id=TEXTBOOK_ID,
+                                    page_size=1)
+    assert page['total'] == 150_000
+    monkeypatch.setattr(client, 'run_snapshot_summary', lambda *_args, **_kwargs: _summary(counts))
+    with pytest.raises(ServiceException, match='计数超过安全上限'):
+        client.run_snapshot(RUN_ID, textbook_external_id=TEXTBOOK_ID)
+
+
+def test_numeric_textbook_id_remains_a_scope_after_json_parsing() -> None:
+    assert collector_module.CollectorClient._scope_ids(['260617']) == {'260617'}
+    assert collector_module.CollectorClient._scope_ids({'textbookExternalIds': ['260617']}) == {'260617'}
+
+
 def test_asset_client_validates_digest_and_uses_scoped_route(
     monkeypatch: pytest.MonkeyPatch,
     configured: None,

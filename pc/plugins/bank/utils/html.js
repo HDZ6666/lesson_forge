@@ -41,7 +41,7 @@ function cleanNode(node, assetResolver) {
       result.setAttribute(name, key)
       if (node.tagName === 'IMG' && typeof assetResolver === 'function') {
         const resolved = assetResolver(key)
-        if (typeof resolved === 'string' && resolved.startsWith('/bank/question/')) {
+        if (typeof resolved === 'string' && resolved.startsWith('blob:')) {
           result.setAttribute('src', resolved)
         } else {
           const placeholder = document.createElement('span')
@@ -81,15 +81,4 @@ export function sanitizeHtml(value, assetResolver) {
   const wrapper = document.createElement('div')
   for (const child of Array.from(parsed.body.firstElementChild?.childNodes || [])) wrapper.append(cleanNode(child, assetResolver))
   return wrapper.innerHTML
-}
-
-export function buildAssetUrl(questionId, assetKey) {
-  if (questionId === undefined || questionId === null || !/^\d+$/.test(String(questionId)) || typeof assetKey !== 'string' || assetKey === '.' || assetKey === '..' || !/^[a-zA-Z0-9._:-]{1,160}$/.test(assetKey)) return ''
-  return `/bank/question/${encodeURIComponent(String(questionId))}/asset/${encodeURIComponent(assetKey)}`
-}
-
-export function resolveAssetUrl(asset, questionId) {
-  const status = String(asset?.downloadStatus || '').toLowerCase()
-  if (!asset?.storagePath || !['ready', 'downloaded'].includes(status)) return ''
-  return buildAssetUrl(questionId, asset?.assetKey)
 }

@@ -62,6 +62,7 @@ def test_bank_manifest_is_mysql_only_and_references_real_resources() -> None:
         'migrations/mysql/009_question_apply.py',
         'migrations/mysql/010_question_resume.py',
         'migrations/mysql/011_remove_local_collector_options.py',
+        'migrations/mysql/012_question_task_review.sql',
     ]
     assert plugin.manifest.backend.seeds == ['seeds/mysql/001_dict.sql']
     assert plugin.manifest.compatibility.databases == ['mysql']

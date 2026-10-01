@@ -43,6 +43,7 @@ from plugins.bank.entity.do.bank_do import (
     QbTextbook,
 )
 from plugins.bank.service.collector_client import CollectorClient
+from plugins.bank.service.snapshot_content import validate_list_content
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -305,7 +306,7 @@ def _path_inside(root: Path, candidate: Path) -> Path:
     return resolved
 
 
-def _valid_cached_asset(root: Path, digest: str, expected_size: int | None) -> Path | None:
+def _valid_cached_asset(root: Path, digest: str, expected_size: int | None, preferred_path: str | None = None) -> Path | None:
     """Find a previously downloaded file with the requested content hash."""
 
     try:
@@ -317,11 +318,17 @@ def _valid_cached_asset(root: Path, digest: str, expected_size: int | None) -> P
         return None
     if not directory.is_dir():
         return None
-    try:
-        candidates = sorted(directory.glob(f'{digest}.*'))
-    except OSError:
-        return None
-    for candidate in candidates:
+    def candidates() -> Any:
+        # Most assets already have their canonical extension. Avoid scanning
+        # the whole hash directory for every reference in a large snapshot.
+        if preferred_path:
+            yield root / preferred_path
+        try:
+            yield from sorted(directory.glob(f'{digest}.*'))
+        except OSError:
+            return
+
+    for candidate in candidates():
         try:
             resolved = _path_inside(root, candidate)
             if candidate.is_symlink() or not resolved.is_file():
@@ -426,7 +433,9 @@ async def _materialize_one_asset(
     expected_size: int | None,
 ) -> tuple[Path, str]:
     async with semaphore:
-        cached_path = await asyncio.to_thread(_valid_cached_asset, root, digest, expected_size)
+        cached_path = await asyncio.to_thread(
+            _valid_cached_asset, root, digest, expected_size, _asset_relative_path(digest, item),
+        )
         if cached_path is not None:
             return cached_path, _safe_storage_path(str(cached_path.relative_to(root))) or ''
         try:
@@ -510,29 +519,34 @@ async def _download_snapshot_assets(snapshot: dict[str, Any]) -> None:  # noqa: 
             raise ServiceException(message=f'素材 {digest} 大小声明不一致')
         grouped.append((digest, entries, next(iter(sizes), None)))
 
+    # One snapshot may reference more than 100,000 distinct files. Creating
+    # one coroutine per file would retain that many tasks even though the
+    # semaphore permits only eight downloads. Fixed workers keep the number
+    # of live coroutines independent of snapshot size.
     semaphore = asyncio.Semaphore(ASSET_DOWNLOAD_CONCURRENCY)
-    results = await asyncio.gather(
-        *(
-            _materialize_one_asset(
-                semaphore,
-                client,
-                method,
-                root,
-                run_id,
-                textbook_id,
-                digest,
-                entries[0][0],
-                expected_size,
-            )
-            for digest, entries, expected_size in grouped
-        ),
-        return_exceptions=True,
-    )
+    pending = iter(enumerate(grouped))
+    results: list[tuple[Path, str] | BaseException | None] = [None] * len(grouped)
+
+    async def worker() -> None:
+        for index, (digest, entries, expected_size) in pending:
+            try:
+                results[index] = await _materialize_one_asset(
+                    semaphore, client, method, root, run_id, textbook_id,
+                    digest, entries[0][0], expected_size,
+                )
+            except Exception as exc:
+                results[index] = exc
+                return
+
+    await asyncio.gather(*(worker() for _ in range(min(ASSET_DOWNLOAD_CONCURRENCY, len(grouped)))))
     for result in results:
         if isinstance(result, BaseException):
             raise result
+    if any(result is None for result in results):
+        raise ServiceException(message='素材准备未完整完成')
 
     for (digest, entries, _expected_size), result in zip(grouped, results, strict=True):
+        assert isinstance(result, tuple)
         target, relative = result
         if not relative:
             raise ServiceException(message=f'素材 {digest} 缓存路径不合法')
@@ -1181,6 +1195,11 @@ def _normalise_snapshot(raw: Mapping[str, Any], task_id: int, textbook_external_
             seen_parents.add(cursor)
             cursor = str(parent_by_catalog[cursor])
 
+    assets_by_question: dict[str, dict[str, dict[str, Any]]] = {}
+    for asset in rows['assets']:
+        owner = str(_pick(asset, 'question_external_id', 'questionExternalId', 'externalQuestionId', default='') or '')
+        key = str(_pick(asset, 'asset_key', 'assetKey', default='') or '')
+        assets_by_question.setdefault(owner, {})[key] = asset
     questions: list[dict[str, Any]] = []
     question_ids: set[str] = set()
     for row in rows['questions']:
@@ -1195,11 +1214,14 @@ def _normalise_snapshot(raw: Mapping[str, Any], task_id: int, textbook_external_
         if not str(content_html or '').strip() and not str(plain_text).strip():
             raise ServiceException(message=f'任务 {task_id} 教材 {textbook_external_id} 的题目 {external_id} 缺少题干')
         detail_marker = _pick(row, 'detail_fetched', 'detailFetched')
-        if detail_marker is None or not _as_bool(detail_marker):
-            raise ServiceException(message=f'任务 {task_id} 教材 {textbook_external_id} 的题目 {external_id} 详情未完整抓取')
-        detail_hash = _pick(row, 'detail_content_hash', 'detailContentHash')
-        if ('detail_content_hash' in row or 'detailContentHash' in row) and not str(detail_hash or '').strip():
-            raise ServiceException(message=f'任务 {task_id} 教材 {textbook_external_id} 的题目 {external_id} 缺少详情摘要')
+        if _pick(row, 'content_source', 'contentSource') == 'list_api' and not _as_bool(detail_marker):
+            validate_list_content(row, assets_by_question.get(external_id, {}))
+        else:
+            if detail_marker is None or not _as_bool(detail_marker):
+                raise ServiceException(message=f'任务 {task_id} 教材 {textbook_external_id} 的题目 {external_id} 详情未完整抓取')
+            detail_hash = _pick(row, 'detail_content_hash', 'detailContentHash')
+            if ('detail_content_hash' in row or 'detailContentHash' in row) and not str(detail_hash or '').strip():
+                raise ServiceException(message=f'任务 {task_id} 教材 {textbook_external_id} 的题目 {external_id} 缺少详情摘要')
         question_ids.add(external_id)
         content_hash = _pick(row, 'content_hash', 'contentHash', 'detail_content_hash', 'detailContentHash')
         if not content_hash:
@@ -1307,6 +1329,7 @@ def _normalise_snapshot(raw: Mapping[str, Any], task_id: int, textbook_external_
 
     tags: list[dict[str, Any]] = []
     tag_keys: set[tuple[str, str, str, str, str]] = set()
+    tag_observations: dict[tuple[str, str, str, str, str], tuple[str, set[str], dict[str, Any]]] = {}
     for row in rows['tags']:
         question_id = str(_pick(row, 'question_external_id', 'questionExternalId', 'externalQuestionId', default='') or '').strip()
         dimension = str(_pick(row, 'dimension', 'tag_type', 'tagType', default='') or '').strip()
@@ -1319,9 +1342,22 @@ def _normalise_snapshot(raw: Mapping[str, Any], task_id: int, textbook_external_
             raise ServiceException(message=f'任务 {task_id} 教材 {textbook_external_id} 的标签证据类型无效')
         if not relation_type or len(relation_type) > MAX_TAG_RELATION_LENGTH:
             raise ServiceException(message=f'任务 {task_id} 教材 {textbook_external_id} 的标签关系类型无效')
-        key = (question_id, dimension[:30], tag_name[:100], evidence, relation_type[:120])
+        if len(dimension) > 30 or len(tag_name) > 100:
+            raise ServiceException(message=f'题目 {question_id} 的标签长度超过正式表上限')
+        key = (question_id, dimension, tag_name, evidence, relation_type)
+        external_tag_id = str(_pick(row, 'tag_external_id', 'tagExternalId', default='') or '')
+        fingerprint = str(_pick(row, 'query_fingerprint', 'queryFingerprint', default='') or '')
+        observed_at = _coerce_datetime(_pick(row, 'observed_at', 'observedAt', 'captured_at', 'capturedAt'))
         if key in tag_keys:
-            raise ServiceException(message=f'任务 {task_id} 教材 {textbook_external_id} 的标签重复')
+            original_id, fingerprints, original = tag_observations[key]
+            if not fingerprint or '' in fingerprints or fingerprint in fingerprints or original_id != external_tag_id:
+                raise ServiceException(message=f'任务 {task_id} 教材 {textbook_external_id} 的标签重复或来源 ID 冲突')
+            if original['sort_order'] != row_int(row, 'sort_order', 'sortOrder'):
+                raise ServiceException(message=f'题目 {question_id} 的重复标签排序冲突')
+            fingerprints.add(fingerprint)
+            if observed_at and (not original['last_seen_at'] or observed_at > original['last_seen_at']):
+                original['last_seen_at'] = observed_at
+            continue
         tag_keys.add(key)
         tags.append(
             {
@@ -1331,9 +1367,10 @@ def _normalise_snapshot(raw: Mapping[str, Any], task_id: int, textbook_external_
                 'evidence_type': evidence,
                 'relation_type': relation_type[:120],
                 'sort_order': row_int(row, 'sort_order', 'sortOrder'),
-                'last_seen_at': _coerce_datetime(_pick(row, 'observed_at', 'observedAt', 'captured_at', 'capturedAt')),
+                'last_seen_at': observed_at,
             }
         )
+        tag_observations[key] = (external_tag_id, {fingerprint}, tags[-1])
 
     assets: list[dict[str, Any]] = []
     asset_keys: set[tuple[str, str]] = set()
@@ -1549,12 +1586,14 @@ async def _load_task_and_scopes(
     return task, scopes
 
 
-async def _validate_task_snapshots(db: AsyncSession, task_id: int) -> tuple[QbSyncJob, list[QbSyncJobScope], list[dict[str, Any]]]:
+async def _validate_task_snapshots(db: AsyncSession, task_id: int, expected_review_revision: int | None = None) -> tuple[QbSyncJob, list[QbSyncJobScope], list[dict[str, Any]]]:
     task, scopes = await _load_task_and_scopes(db, task_id)
     from plugins.bank.entity.do.bank_do import QbQuestionTaskReview
     review = await db.get(QbQuestionTaskReview, task_id)
     excluded_ids = set(review.excluded_json) if review else set()
     review_revision = review.revision if review else 0
+    if expected_review_revision is not None and review_revision != expected_review_revision:
+        raise ServiceException(message='审核选择版本已变化，请刷新题目对比后重新确认入库')
     initial_signature = _task_scope_signature(task, scopes)
     if str(_task_value(task, 'status', default='') or '').strip().lower() != 'completed':
         raise ServiceException(message='只有已成功完成的同步题库任务才能应用正式表')
@@ -1800,57 +1839,38 @@ class QuestionApplyService:
                 'isCurrent': bool(current_id is not None and task_id is not None and int(current_id) == int(task_id)),
                 'affectedTextbooks': [textbook_id] if textbook_id else [],
             }
-            if eligible:
-                try:
-                    run_id = int(_task_value(scope, 'collector_run_id', 'collectorRunId'))
-                    summary = await _read_snapshot_summary(run_id, textbook_id)
-                    item['eligible'] = bool(summary)
-                    summary_counts = summary.get('counts') or {}
-                    item.update(
-                        {
-                            'catalogCount': int(
-                                _task_value(summary_counts, 'catalogs', 'catalogItemCount', default=0) or 0
-                            ),
-                            'questionCount': int(
-                                _task_value(summary_counts, 'questions', 'questionItemCount', default=0) or 0
-                            ),
-                            'questionCatalogCount': int(
-                                _task_value(
-                                    summary_counts,
-                                    'questionCatalogs',
-                                    'questionCatalogCount',
-                                    default=0,
-                                )
-                                or 0
-                            ),
-                            'questionTagCount': int(
-                                _task_value(summary_counts, 'tags', 'questionTagCount', default=0) or 0
-                            ),
-                            'questionAssetCount': int(
-                                _task_value(summary_counts, 'assets', 'questionAssetCount', default=0) or 0
-                            ),
-                            'snapshotComplete': True,
-                            'snapshotLockedAt': _task_value(
-                                summary.get('run') or {},
-                                'snapshot_locked_at',
-                                'snapshotLockedAt',
-                                'locked',
-                            ),
-                        }
-                    )
-                    item['isCurrent'] = bool(
-                        current_id is not None
-                        and task_id is not None
-                        and int(current_id) == int(task_id)
-                        and int(current_run or 0) == int(summary['collector_run_id'] or 0)
-                        and (
-                            not summary.get('snapshot_hash')
-                            or str(_task_value(state, 'snapshot_hash') or '') == str(summary['snapshot_hash'])
-                        ),
-                    )
-                except Exception as exc:  # status endpoints expose a reason rather than failing the whole task detail
-                    eligible = False
-                    reason = str(getattr(exc, 'message', None) or exc)
+            if task_completed:
+                # Completion already verified this Collector run and persisted
+                # its five counts and lock marker. The immutable snapshot is
+                # read and checked again by apply(), where it actually matters.
+                run_id = _positive_run_id(_task_value(scope, 'collector_run_id', 'collectorRunId'))
+                item['eligible'] = bool(
+                    textbook_id
+                    and str(_task_value(scope, 'source_provider', 'sourceProvider', default='') or '') == PROVIDER
+                    and str(_task_value(scope, 'status', default='') or '').lower() == 'completed'
+                    and run_id is not None
+                    and item['snapshotComplete']
+                    and item['snapshotLockedAt']
+                )
+                for collection, count_key in (
+                    ('catalogs', 'catalogCount'),
+                    ('questions', 'questionCount'),
+                    ('questionCatalogs', 'questionCatalogCount'),
+                    ('tags', 'questionTagCount'),
+                    ('assets', 'questionAssetCount'),
+                ):
+                    if item[count_key] > MAX_SNAPSHOT_ROWS:
+                        item['eligible'] = False
+                        if reason is None:
+                            reason = (
+                                f'教材 {textbook_id} 的 {collection} 有 {item[count_key]} 行，'
+                                f'超过当前入库上限 {MAX_SNAPSHOT_ROWS}；需要分批入库'
+                            )
+                item['isCurrent'] = bool(
+                    item['isCurrent'] and run_id is not None and int(current_run or 0) == run_id
+                )
+                if not item['eligible'] and reason is None:
+                    reason = f'教材 {textbook_id} 缺少已验证的完整快照，请检查采集任务'
             scope_statuses.append(item)
 
         current_ids = {item['currentTaskId'] for item in scope_statuses}
@@ -1894,7 +1914,7 @@ class QuestionApplyService:
             'stateTokens': token_map or None,
             'action': action,
             'suggestedAction': action,
-            'eligibilityMessage': reason,
+            'eligibilityMessage': None if all_current else reason,
             'scopes': scope_statuses,
             'affectedTextbooks': affected,
         }
@@ -1936,10 +1956,14 @@ class QuestionApplyService:
         expected_current_task_id: int | None = None,
         operator: str | None = None,
         expected_state_token: str | Mapping[str, str] | None = None,
+        expected_review_revision: int | None = None,
     ) -> dict[str, Any]:
         try:
             target_task_id = int(task_id)
-            _task, _scopes, snapshots = await _validate_task_snapshots(db, target_task_id)
+            if expected_review_revision is None:
+                _task, _scopes, snapshots = await _validate_task_snapshots(db, target_task_id)
+            else:
+                _task, _scopes, snapshots = await _validate_task_snapshots(db, target_task_id, expected_review_revision)
             keys = sorted({(str(_pick(snapshot['run'], 'provider', 'sourceProvider', default=PROVIDER)), snapshot['textbook_external_id']) for snapshot in snapshots})
             states: dict[str, QbQuestionApplyState] = {}
             scopes_by_textbook = {snapshot['textbook_external_id']: snapshot.get('scope') for snapshot in snapshots}

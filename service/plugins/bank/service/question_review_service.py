@@ -10,6 +10,31 @@ from exceptions.exception import ServiceException
 from plugins.bank.entity.do.bank_do import QbCatalogNode, QbQuestion, QbQuestionCatalog, QbQuestionTaskReview, QbSyncJob
 from plugins.bank.service.collector_client import CollectorClient
 
+PREVIEW_HTML_LIMIT = 4000
+
+
+def _question_diff_fields(fetched: dict, current: dict) -> list[str]:
+    # The list preview truncates HTML and plain text. The complete content
+    # digest is authoritative when both sides have one; comparing truncated
+    # text with the full formal row would mark a long unchanged question as
+    # modified forever.
+    if fetched.get('contentHash') and current.get('contentHash'):
+        changed = ['contentHash'] if fetched['contentHash'] != current['contentHash'] else []
+    else:
+        changed = [name for name in ('contentHtml', 'plainText')
+                   if (fetched.get(name) or '') != (current.get(name) or '')]
+    changed.extend(name for name in ('questionType', 'difficulty', 'sourceUrl')
+                   if (fetched.get(name) or '') != (current.get(name) or ''))
+    # An uncollected answer is not evidence that a known formal answer should
+    # be erased. The apply path preserves that answer too.
+    if fetched.get('answerStatus') not in ('unknown', 'not_collected'):
+        changed.extend(name for name in ('answerStatus', 'answerHtml', 'analysisHtml')
+                       if name in fetched and fetched.get(name) != current.get(name)
+                       and (name == 'answerStatus' or len(str(fetched.get(name) or '')) < PREVIEW_HTML_LIMIT))
+    if current.get('status') != '0':
+        changed.append('status')
+    return changed
+
 
 async def capture_review(db, task_id, scopes, *, origin='task_start'):
     local_ids = [int(scope.local_textbook_id) for scope in scopes if scope.local_textbook_id]
@@ -18,7 +43,8 @@ async def capture_review(db, task_id, scopes, *, origin='task_start'):
     ids = [node.catalog_id for node in catalogs]
     counts = dict((await db.execute(select(QbQuestionCatalog.catalog_id, func.count(func.distinct(QbQuestionCatalog.question_id)))
         .join(QbQuestion, QbQuestion.question_id == QbQuestionCatalog.question_id)
-        .where(QbQuestionCatalog.catalog_id.in_(ids), QbQuestionCatalog.relation_type == 'query_catalog', QbQuestion.status == '0')
+        .where(QbQuestionCatalog.catalog_id.in_(ids), QbQuestionCatalog.relation_type == 'query_catalog',
+               QbQuestion.source_provider == 'zujuan', QbQuestion.status == '0')
         .group_by(QbQuestionCatalog.catalog_id))).all()) if ids else {}
     parents = {node.catalog_id: node.external_node_id for node in catalogs}
     baseline = [{
@@ -56,6 +82,40 @@ def validate_preview(payload, run_id, textbook_id):
         raise ServiceException(message='采集预览教材范围不一致')
 
 
+async def _current_catalogs(db, scope):
+    """Read the formal catalog at comparison time, not the task-start baseline."""
+    if scope.local_textbook_id is None:
+        return []
+    nodes = list((await db.execute(select(QbCatalogNode).where(
+        QbCatalogNode.textbook_id == int(scope.local_textbook_id),
+        QbCatalogNode.source_provider == 'zujuan',
+    ))).scalars().all())
+    if not nodes:
+        return []
+    ids = [node.catalog_id for node in nodes]
+    counts = dict((await db.execute(
+        select(QbQuestionCatalog.catalog_id, func.count(func.distinct(QbQuestionCatalog.question_id)))
+        .join(QbQuestion, QbQuestion.question_id == QbQuestionCatalog.question_id)
+        .where(QbQuestionCatalog.catalog_id.in_(ids),
+               QbQuestionCatalog.relation_type == 'query_catalog',
+               QbQuestion.source_provider == 'zujuan', QbQuestion.status == '0')
+        .group_by(QbQuestionCatalog.catalog_id)
+    )).all())
+    external_by_id = {node.catalog_id: node.external_node_id for node in nodes}
+    return [{
+        'sourceProvider': node.source_provider,
+        'externalTextbookId': str(scope.external_textbook_id),
+        'externalCatalogId': str(node.external_node_id),
+        'nodeName': node.node_name,
+        'parentExternalId': external_by_id.get(node.parent_id),
+        'nodeType': node.node_type,
+        'sourceUrl': node.source_url,
+        'sortOrder': node.sort_order,
+        'status': node.status,
+        'questionCount': counts.get(node.catalog_id, 0),
+    } for node in nodes if node.external_node_id]
+
+
 class QuestionReviewService:
     @staticmethod
     async def context(db, task_id, query):
@@ -72,8 +132,8 @@ class QuestionReviewService:
         from plugins.bank.service.task_service import _catalog_tree, _normalise_catalog
         job, scope, review = await cls.context(db, task_id, query)
         textbook = str(scope.external_textbook_id)
-        old = [row for row in review.baseline_json['rows'] if row['externalTextbookId'] == textbook]
-        baseline = {row['externalCatalogId']: row for row in old}
+        current_rows = await _current_catalogs(db, scope)
+        current = {row['externalCatalogId']: row for row in current_rows}
         fetched = []
         client = CollectorClient()
         if scope.collector_run_id:
@@ -101,14 +161,17 @@ class QuestionReviewService:
         for node in fetched:
             key = node['externalCatalogId']
             seen.add(key)
-            previous = baseline.get(key)
+            previous = current.get(key)
             live_node = progress.get(key, {})
             complete = bool(node.get('scanComplete') or live_node.get('scanComplete')) or scope.status == 'completed'
             count = node.get('uniqueQuestionCount', live_node.get('uniqueQuestionCount', node['questionCount']))
             tags = []
             if previous is None:
                 tags.append('new')
-            elif any(str(node.get(field) or '') != str(previous.get(field) or '') for field in ('nodeName', 'parentExternalId', 'nodeType')):
+            elif str(previous.get('status') or '0') != '0' or any(
+                str(node.get(field) or '') != str(previous.get(field) or '')
+                for field in ('nodeName', 'parentExternalId', 'nodeType', 'sortOrder')
+            ):
                 tags.append('structure')
             if not complete:
                 tags.append('running' if scope.status in ('running', 'starting', 'queued') else 'incomplete')
@@ -118,14 +181,14 @@ class QuestionReviewService:
                          'reviewTags': tags, 'comparisonStatus': tags[0], 'scanComplete': complete})
         rows.extend({**node, 'oldQuestionCount': node['questionCount'], 'questionCount': None,
                      'reviewTags': ['missing' if scope.status == 'completed' else 'pending'], 'comparisonStatus': 'missing'}
-                    for node in old if node['externalCatalogId'] not in seen)
-        return {'fetchedTree': _catalog_tree(rows, 'fetched'), 'currentTree': [], 'rows': rows,
+                    for node in current_rows if node['externalCatalogId'] not in seen)
+        return {'fetchedTree': _catalog_tree(rows, 'fetched'), 'currentTree': _catalog_tree(current_rows, 'current'), 'rows': rows,
                 'baselineOrigin': review.baseline_json['origin'], 'baselineCapturedAt': review.captured_at.isoformat(),
-                'sourceAvailable': True}
+                'currentComparedAt': datetime.now().isoformat(), 'sourceAvailable': True}
 
     @classmethod
     async def questions(cls, db, task_id, query):
-        from plugins.bank.service.task_service import _normalise_question
+        from plugins.bank.service.task_service import _formal_question_value, _normalise_question
         _, scope, review = await cls.context(db, task_id, query)
         if not scope.collector_run_id:
             return {'rows': [], 'total': 0, 'summary': {'captured': 0, 'excluded': 0, 'included': 0}}
@@ -135,12 +198,33 @@ class QuestionReviewService:
             excludedIds=review.excluded_json, selection=query.selection)
         validate_preview(payload, scope.collector_run_id, scope.external_textbook_id)
         excluded = set(review.excluded_json)
-        rows = [{**value, 'catalogName': row.get('catalogName'), 'excluded': value['externalQuestionId'] in excluded} for row in payload['rows'] if (value := _normalise_question(row))]
+        fetched = [(value, row) for row in payload['rows'] if (value := _normalise_question(row))]
+        ids = [value['externalQuestionId'] for value, _row in fetched]
+        formal_rows = (
+            (await db.execute(select(QbQuestion).where(
+                QbQuestion.source_provider == 'zujuan', QbQuestion.external_question_id.in_(ids)
+            ))).scalars().all() if ids else []
+        )
+        formal = {str(row.external_question_id): row for row in formal_rows}
+        rows = []
+        for value, row in fetched:
+            current_row = formal.get(value['externalQuestionId'])
+            current = _formal_question_value(current_row) if current_row else None
+            if current is not None:
+                current['status'] = str(current_row.status or '0')
+            changed = _question_diff_fields(value, current) if current is not None else []
+            rows.append({
+                **value, 'catalogName': row.get('catalogName'),
+                'excluded': value['externalQuestionId'] in excluded,
+                'current': current,
+                'comparisonStatus': 'new' if current is None else 'modified' if changed else 'unchanged',
+                'diffFields': changed,
+            })
         return {**payload, 'rows': rows, 'revision': review.revision}
 
     @classmethod
     async def detail(cls, db, task_id, external_id, query):
-        from plugins.bank.service.task_service import _normalise_question
+        from plugins.bank.service.task_service import _formal_question_value, _normalise_question
         _, scope, _ = await cls.context(db, task_id, query)
         if not scope.collector_run_id:
             raise ServiceException(message='该教材尚未开始抓取')
@@ -150,7 +234,18 @@ class QuestionReviewService:
         item = _normalise_question(payload['item'])
         if not item or item['externalQuestionId'] != external_id:
             raise ServiceException(message='题目预览 ID 不一致')
-        return {**item, 'fetched': item}
+        current_row = (await db.execute(select(QbQuestion).where(
+            QbQuestion.source_provider == 'zujuan', QbQuestion.external_question_id == external_id
+        ))).scalars().first()
+        current = _formal_question_value(current_row) if current_row else None
+        if current is not None:
+            current['status'] = str(current_row.status or '0')
+        changed = _question_diff_fields(item, current) if current is not None else []
+        return {
+            **item, 'fetched': item, 'current': current,
+            'comparisonStatus': 'new' if current is None else 'modified' if changed else 'unchanged',
+            'diffFields': changed,
+        }
 
     @classmethod
     async def select_questions(cls, db, task_id, request, query):

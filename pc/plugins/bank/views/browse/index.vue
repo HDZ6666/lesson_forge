@@ -217,11 +217,12 @@
 </template>
 
 <script setup>
-import { computed, getCurrentInstance, nextTick, onMounted, reactive, ref } from 'vue'
+import { computed, getCurrentInstance, nextTick, onMounted, reactive, ref, watch } from 'vue'
 import { ArrowDown, Collection, Document, Refresh, Search, View } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
-import { getQuestion, listCatalog, listQuestionAssets, listQuestions, listTextbooks, listVersions } from '../../api/bank'
-import { resolveAssetUrl, sanitizeHtml } from '../../utils/html'
+import { getQuestion, getQuestionAsset, listCatalog, listQuestionAssets, listQuestions, listTextbooks, listVersions } from '../../api/bank'
+import { sanitizeHtml } from '../../utils/html'
+import { useQuestionAssetStore } from '../../utils/assets'
 import { unwrapList, unwrapPage, unwrapResponse, unwrapTree } from '../../utils/response'
 import {
   applyBrowseSort,
@@ -260,6 +261,7 @@ const loadingDetail = ref(false)
 const detailVisible = ref(false)
 const detail = ref(null)
 const assets = ref([])
+const assetStore = useQuestionAssetStore(getQuestionAsset)
 const errorMessage = ref('')
 const detailError = ref('')
 const moreOpen = ref(false)
@@ -436,12 +438,12 @@ function safeListHtml(row) {
 function safeDetailHtml(value) {
   return sanitizeHtml(value, (key) => {
     const asset = assets.value.find((item) => String(item.assetKey || '') === String(key))
-    return resolveAssetUrl(asset, detail.value?.questionId)
+    return assetStore.resolve(asset)
   })
 }
 
 function resolveAsset(asset) {
-  return resolveAssetUrl(asset, detail.value?.questionId)
+  return assetStore.resolve(asset)
 }
 
 function questionTags(row) {
@@ -463,11 +465,13 @@ async function openDetail(row) {
   detailError.value = ''
   detail.value = null
   assets.value = []
+  assetStore.reset()
   try {
     const [questionResult, assetResult] = await Promise.all([getQuestion(questionId), listQuestionAssets(questionId)])
     if (requestId !== detailRequestId.value) return
     detail.value = entityFromResponse(questionResult)
     assets.value = unwrapList(assetResult)
+    void assetStore.load(questionId, assets.value)
   } catch (error) {
     if (requestId !== detailRequestId.value) return
     detailError.value = error?.message || '题目详情加载失败'
@@ -477,6 +481,9 @@ async function openDetail(row) {
   }
 }
 
+watch(detailVisible, (visible) => {
+  if (!visible) { detailRequestId.value += 1; assetStore.reset() }
+})
 onMounted(loadVersions)
 </script>
 
