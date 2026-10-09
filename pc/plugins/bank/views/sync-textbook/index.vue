@@ -1,18 +1,19 @@
 <template>
-  <div class="app-container sync-task-list-page">
+  <div class="app-container sync-center-page sync-task-list-page">
     <header class="page-heading">
       <div>
         <h2>教材发现任务</h2>
-        <p>每个任务抓取来源中的全部版本与教材，任务完成后再查看不可变快照对比。</p>
+        <p>先更新版本与教材清单，再同步具体教材的题目。新增与改名会自动登记，冲突单独提示。</p>
       </div>
       <div class="heading-actions">
         <el-button :icon="Refresh" :loading="loading" @click="loadTasks">刷新</el-button>
         <el-button v-hasPermi="['bank:sync:textbook:add', 'bank:sync:run']" type="primary" :icon="Plus" @click="openCreate">新增教材发现任务</el-button>
       </div>
     </header>
+    <SyncCenterNav active="discovery"/>
 
     <el-alert class="state-alert" type="info" :closable="false" show-icon>
-      新发现任务完成后自动登记正常新增与改名；本次缺席只保留观察，人工启停保持不变。历史任务保留旧快照应用方式。
+      这里只更新教材清单，不采集题目。发现完成后，可前往“同步任务”选择教材，或在“自动计划”中安排循环同步。
     </el-alert>
     <el-alert v-if="errorMessage" class="state-alert" type="error" :closable="false" show-icon>{{ errorMessage }}</el-alert>
 
@@ -43,7 +44,7 @@
         </el-form-item>
       </el-form>
 
-      <div class="batch-toolbar">
+      <div v-if="selectedRows.length" class="batch-toolbar">
         <span class="selection-hint">{{ selectedRows.length ? `已选 ${selectedRows.length} 个终态任务` : '仅可选择已完成、失败、阻断或已停止的任务' }}</span>
         <el-button
           v-hasPermi="['bank:sync:textbook:remove', 'bank:sync:run']"
@@ -62,7 +63,6 @@
         :data="tasks"
         :row-key="(row) => String(row.taskId)"
         stripe
-        size="small"
         class="task-table"
         @selection-change="handleSelectionChange"
       >
@@ -73,14 +73,10 @@
         <el-table-column label="状态" width="112" align="center">
           <template #default="scope"><el-tag size="small" :type="syncTaskStatusMeta(scope.row.status).type">{{ syncTaskStatusMeta(scope.row.status).label }}</el-tag></template>
         </el-table-column>
-        <el-table-column prop="fetchedVersionCount" label="抓取版本" width="96" align="right" />
-        <el-table-column prop="fetchedTextbookCount" label="抓取教材" width="96" align="right" />
-        <el-table-column prop="newVersionCount" label="新增版本" width="96" align="right" />
-        <el-table-column prop="newTextbookCount" label="新增教材" width="96" align="right" />
+        <el-table-column label="发现清单" min-width="150"><template #default="{row}"><span class="cell-main">{{ row.fetchedTextbookCount || 0 }} 本教材</span><span class="cell-sub">{{ row.fetchedVersionCount || 0 }} 个版本</span></template></el-table-column>
+        <el-table-column label="本次新增" min-width="145"><template #default="{row}"><span>{{ row.newTextbookCount || 0 }} 本教材</span><span class="cell-sub">{{ row.newVersionCount || 0 }} 个版本</span></template></el-table-column>
         <el-table-column label="登记结果" min-width="170"><template #default="{row}">{{ row.discoveryMode ? (row.discoveryResult ? '已登记观察结果' : row.discoveryError ? '登记需处理' : '等待自动登记') : '历史快照' }}</template></el-table-column>
-        <el-table-column label="创建人" min-width="110" show-overflow-tooltip><template #default="scope">{{ scope.row.createdBy || '—' }}</template></el-table-column>
         <el-table-column label="创建时间" min-width="166" show-overflow-tooltip><template #default="scope">{{ formatTaskTime(scope.row.createTime) }}</template></el-table-column>
-        <el-table-column label="完成时间" min-width="166" show-overflow-tooltip><template #default="scope">{{ formatTaskTime(scope.row.completedAt) }}</template></el-table-column>
         <el-table-column label="操作" width="210" fixed="right" align="center">
           <template #default="scope">
             <el-button v-hasPermi="['bank:sync:textbook:query', 'bank:sync:textbook:list', 'bank:sync:center:list']" link type="primary" :icon="View" @click="openDetail(scope.row)">查看详情</el-button>
@@ -113,8 +109,8 @@
             >删除</el-button>
           </template>
         </el-table-column>
+        <template #empty><el-empty :image-size="64" description="暂无教材发现任务"><p class="empty-copy">{{ total ? '当前页没有数据，请调整筛选条件。' : '可以调整筛选，或创建一个新任务开始同步。' }}</p><el-button v-hasPermi="['bank:sync:textbook:add', 'bank:sync:run']" type="primary" plain @click="openCreate">发现版本与教材</el-button></el-empty></template>
       </el-table>
-      <el-empty v-if="!loading && !tasks.length" :image-size="72" description="暂无教材发现任务" />
       <footer class="table-footer">
         <span>共 {{ total }} 个任务</span>
         <el-pagination
@@ -130,13 +126,13 @@
       </footer>
     </section>
 
-    <el-dialog v-model="createVisible" title="新增教材发现任务" width="600px" append-to-body @closed="resetCreate">
+    <el-dialog class="sync-center-dialog" v-model="createVisible" title="新增教材发现任务" width="600px" append-to-body @closed="resetCreate">
       <el-alert type="warning" :closable="false" show-icon>本任务会访问已配置的第三方来源，请先确认授权和采集规则。</el-alert>
       <ul class="create-rules">
         <li>本次抓取来源中的全部版本和教材。</li>
         <li>不抓取目录和题目。</li>
         <li>正常新增和改名自动登记，归属冲突单独待人工核对。</li>
-        <li>采集成功后保留本次任务绑定的 metadataRunId 快照。</li>
+        <li>每次保留独立的发现记录，方便回看本次变化。</li>
       </ul>
       <el-checkbox v-model="acknowledged">我已确认来源授权、站点规则和内容使用边界</el-checkbox>
       <template #footer>
@@ -148,6 +144,8 @@
 </template>
 
 <script setup>
+import SyncCenterNav from '../../components/SyncCenterNav.vue'
+import '../../styles/sync-center.scss'
 import { onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { Delete, Plus, Refresh, RefreshLeft, RefreshRight, Search, VideoPause, View } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'

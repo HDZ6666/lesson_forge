@@ -1,60 +1,101 @@
 <template>
-  <div class="app-container">
-    <div class="heading"><h2>同步总览</h2><SubjectSelect v-model="subjectId" @change="load" /><el-button :loading="loading" @click="load">刷新</el-button></div>
-    <el-alert v-if="error" :title="error" type="error" :closable="false" />
-    <div class="stats">
-      <el-card v-for="stat in stats" :key="stat.name"><span>{{ stat.name }}</span><strong>{{ stat.value }}</strong></el-card>
+  <div class="app-container sync-center-page">
+    <header class="page-heading">
+      <div><h2>同步中心</h2><p>逐本建立题库，查看采集进度，集中处理需要你关注的问题。</p></div>
+      <div class="heading-actions"><SubjectSelect v-model="subjectId" @change="load" /><el-button :icon="Refresh" :loading="loading" @click="load">刷新</el-button></div>
+    </header>
+    <SyncCenterNav active="overview" />
+    <el-alert v-if="error" :title="error" type="error" :closable="false" show-icon />
+    <section v-if="!loading && !error && !summary.textbooks" class="welcome sync-panel">
+      <div class="welcome-icon"><el-icon><Collection /></el-icon></div>
+      <div class="welcome-copy"><span class="eyebrow">从这里开始</span><h3>先发现教材，再同步题目</h3><p>更新来源中的版本和教材清单后，选择一本教材试跑，或设置自动计划逐本采集。</p></div>
+      <el-button type="primary" @click="router.push('/sync-center/discovery')">开始教材发现 <el-icon class="el-icon--right"><ArrowRight /></el-icon></el-button>
+    </section>
+    <div class="sync-stat-grid" v-loading="loading">
+      <div class="sync-stat"><span>当前教材</span><strong>{{ number(summary.textbooks) }}</strong><small>{{ number(summary.textbooksWithoutQuestions) }} 本尚无可用题</small></div>
+      <div class="sync-stat accent"><span>有可用题的教材</span><strong>{{ number(summary.textbooksWithQuestions) }}</strong><small>题干和必要素材已检查</small></div>
+      <div class="sync-stat"><span>待补齐教材</span><strong>{{ number(summary.textbooksNeedingRefill) }}</strong><small>后续循环继续补齐</small></div>
+      <div class="sync-stat" :class="{ warning: summary.openIssueCount > 0 }"><span>待处理问题</span><strong>{{ number(summary.openIssueCount) }}</strong><el-button link type="primary" @click="openIssues">查看问题 <el-icon><ArrowRight /></el-icon></el-button></div>
     </div>
-    <p class="note">有可用题表示正式题库已通过题干和必要素材检查；完成范围扫描是另一项指标。</p>
-    <div class="actions"><el-button @click="router.push('/sync-center/plans')">自动同步计划</el-button><el-button @click="router.push('/sync-center/discovery')">教材发现</el-button><el-button type="primary" @click="router.push('/sync-center/tasks')">同步任务</el-button></div>
-    <el-alert v-if="summary.control?.paused" :title="summary.control.reason || '同步已紧急暂停'" type="warning" :closable="false"/>
-    <el-button v-hasPermi="['bank:sync:control']" :loading="controlling" @click="toggleControl">{{ summary.control?.paused ? '恢复同步' : '紧急暂停同步' }}</el-button>
-    <p>当前任务：{{ summary.currentTask?.taskId || '暂无' }}；下一项到期待办：{{ summary.nextTask?.taskId || '暂无' }}<span v-if="summary.nextTask?.textbookName"> · {{summary.nextTask.textbookName}}</span><span v-if="summary.nextTask?.reason"> · {{summary.nextTask.reason}}</span></p>
-    <p class="note">待办按任务号排序，排除未到期、计划暂停及教材停用的任务；实际派发还须通过来源、资源与入库检查。</p>
-    <p v-if="summary.deferredTask">暂缓待办 {{summary.deferredTask.taskId}} {{summary.deferredTask.textbookName}}：{{summary.deferredTask.reason}}<span v-if="summary.deferredTask.notBefore"> · 最早 {{new Date(summary.deferredTask.notBefore).toLocaleString()}}</span></p>
-    <p v-if="control.serviceResources">后端可用内存 {{control.serviceResources.availableMemoryMiB}} MiB · 题库存储可用 {{control.serviceResources.freeDiskMiB}} MiB<span v-if="control.serviceResources.reason"> · {{control.serviceResources.reason}}</span></p>
-    <p v-if="summary.storage">教材素材（按摘要去重）{{summary.storage.uniqueAssetCount}} 份<span v-if="summary.storage.databaseBytes!=null"> · 数据库占用 {{(summary.storage.databaseBytes/1048576).toFixed(1)}} MiB</span></p>
-    <el-alert v-if="control.collectorError" :title="`采集器：${control.collectorError}`" type="warning" :closable="false"/>
-    <el-alert v-if="control.source?.paused" :title="control.source.reason || '来源已暂停'" type="warning" :closable="false"/>
-    <el-alert v-if="control.collector?.resources?.reason" :title="control.collector.resources.reason" type="warning" :closable="false"/>
-    <p v-if="control.collector?.sourceBudget">今日主动请求 {{control.collector.sourceBudget.usage.requests}} · 启动教材 {{control.collector.sourceBudget.usage.bookStarts}} · 占用 {{Math.ceil(control.collector.sourceBudget.usage.activeMilliseconds/1000)}} 秒 · 下载 {{(control.collector.sourceBudget.usage.downloadBytes/1048576).toFixed(1)}} MiB</p>
-    <p v-if="control.collector?.resources">采集器可用内存 {{Math.floor(control.collector.resources.memoryMiB)}} MiB<span v-for="disk in control.collector.resources.disks" :key="disk.kind"> · {{disk.kind}} 可用 {{Math.floor(disk.freeMiB)}} MiB</span></p>
-    <h3>最近任务</h3>
-    <el-table v-loading="loading" :data="summary.recentTasks || []">
-      <el-table-column prop="taskId" label="任务" width="100" />
-      <el-table-column label="类型"><template #default="{row}">{{ row.taskModule === 'textbook' ? '教材发现' : row.taskModule === 'question' ? '教材内容' : '历史同步' }}</template></el-table-column>
-      <el-table-column label="状态"><template #default="{row}">{{ labels[row.status] || row.status }}</template></el-table-column>
-      <el-table-column prop="createTime" label="创建时间" />
-      <el-table-column prop="error" label="需关注的信息" show-overflow-tooltip />
-      <el-table-column label="操作"><template #default="{row}"><el-button link type="primary" @click="open(row)">查看任务</el-button></template></el-table-column>
-    </el-table>
-    <SyncIssues :subject-id="subjectId"/>
+    <div class="overview-grid">
+      <section class="sync-panel">
+        <div class="section-heading"><h3>运行状态</h3><el-tag :type="runtime.type" effect="light" round>{{ runtime.label }}</el-tag></div>
+        <el-alert v-if="runtime.reason" :title="runtime.reason" :type="runtime.type === 'danger' ? 'error' : 'warning'" :closable="false" show-icon />
+        <div class="task-slot"><span class="slot-label">正在执行</span><template v-if="summary.currentTask"><strong>{{ summary.currentTask.textbookName || `任务 #${summary.currentTask.taskId}` }}</strong><el-button link type="primary" @click="open(summary.currentTask)">查看进度</el-button></template><template v-else><strong>暂无执行中的任务</strong><span class="sync-muted">新任务会在后台依次执行，可随时离开页面。</span></template></div>
+        <div class="queue-line"><span>下一项到期待办</span><el-button v-if="summary.nextTask" link type="primary" @click="open(summary.nextTask)">{{ summary.nextTask.textbookName || `任务 #${summary.nextTask.taskId}` }}</el-button><span v-else>暂无</span></div>
+        <p v-if="summary.deferredTask" class="sync-muted">暂缓：{{ summary.deferredTask.textbookName || `任务 #${summary.deferredTask.taskId}` }} · {{ summary.deferredTask.reason }}<template v-if="summary.deferredTask.notBefore"> · 最早 {{ formatTaskTime(summary.deferredTask.notBefore) }}</template></p>
+        <div class="panel-actions"><el-button type="primary" plain @click="router.push('/sync-center/tasks')">管理同步任务</el-button><el-button v-hasPermi="['bank:sync:control']" :type="summary.control?.paused ? 'primary' : 'danger'" link :disabled="loading || !!error" :loading="controlling" @click="toggleControl">{{ summary.control?.paused ? '恢复同步' : '紧急暂停' }}</el-button></div>
+      </section>
+      <section class="sync-panel">
+        <div class="section-heading"><h3>本轮覆盖进度</h3><el-button link type="primary" @click="router.push('/sync-center/plans')">管理自动计划 <el-icon><ArrowRight /></el-icon></el-button></div>
+        <div class="cycle-number"><strong>{{ number(summary.cycleAttemptedCount) }}</strong><span>/ {{ number(summary.cycleTargetCount) }} 本已尝试</span></div>
+        <el-progress :percentage="cyclePercent" :show-text="false" :stroke-width="8" />
+        <p class="sync-muted">{{ summary.cycleTargetCount ? '每本教材先获得一次采集机会，再按结果安排补齐或刷新。' : '尚未开始自动循环，可先手动同步一本教材。' }}</p>
+        <div class="mini-stats"><div><strong>{{ activeCount }}</strong><span>执行中任务</span></div><div><strong>{{ number(summary.taskCounts?.queued) }}</strong><span>排队中</span></div><div><strong>{{ number(summary.retryIssueCount) }}</strong><span>自动重试问题</span></div></div>
+        <p v-if="control.automaticReason" class="plan-note"><el-icon><InfoFilled /></el-icon>{{ control.automaticReason }}</p>
+      </section>
+    </div>
+    <section class="sync-panel">
+      <div class="section-heading"><div><h3>最近任务</h3><p>采集完成后，合格题目会在后台分批入库。</p></div><el-button link type="primary" @click="router.push('/sync-center/tasks')">全部任务 <el-icon><ArrowRight /></el-icon></el-button></div>
+      <el-table v-loading="loading" :data="summary.recentTasks || []">
+        <el-table-column label="任务" min-width="150"><template #default="{row}"><el-button link type="primary" @click="open(row)">#{{ row.taskId }} · {{ row.taskModule === 'textbook' ? '教材发现' : row.taskModule === 'question' ? '教材同步' : '历史同步' }}</el-button></template></el-table-column>
+        <el-table-column label="状态" width="115"><template #default="{row}"><el-tag :type="syncTaskStatusMeta(row.status).type" effect="light">{{ syncTaskStatusMeta(row.status).label }}</el-tag></template></el-table-column>
+        <el-table-column label="创建时间" min-width="170"><template #default="{row}">{{ formatTaskTime(row.createTime) }}</template></el-table-column>
+        <el-table-column label="需关注的信息" min-width="220" show-overflow-tooltip><template #default="{row}">{{ row.error || '—' }}</template></el-table-column>
+        <el-table-column label="操作" width="100" fixed="right"><template #default="{row}"><el-button link type="primary" @click="open(row)">查看详情</el-button></template></el-table-column>
+        <template #empty><el-empty :image-size="64" description="还没有同步任务"><el-button type="primary" plain @click="router.push('/sync-center/discovery')">先发现教材</el-button></el-empty></template>
+      </el-table>
+    </section>
+    <section class="sync-panel resource-panel">
+      <details><summary>运行环境与今日用量 <span class="sync-muted">查看服务资源、存储及请求统计</span></summary>
+        <div class="resource-grid">
+          <div><h4>后端服务</h4><p>可用内存 <strong>{{ mib(control.serviceResources?.availableMemoryMiB) }}</strong></p><p>可用磁盘 <strong>{{ mib(control.serviceResources?.freeDiskMiB) }}</strong></p><p>数据库 <strong>{{ mib(summary.storage?.databaseBytes == null ? null : summary.storage.databaseBytes / 1048576) }}</strong></p></div>
+          <div><h4>采集器</h4><p>可用内存 <strong>{{ mib(control.collector?.resources?.memoryMiB) }}</strong></p><p v-for="disk in control.collector?.resources?.disks || []" :key="disk.kind">{{ diskLabels[disk.kind] || disk.kind }} <strong>{{ mib(disk.freeMiB) }}</strong></p></div>
+          <div><h4>今日采集</h4><p>主动请求 <strong>{{ number(control.collector?.sourceBudget?.usage?.requests) }} 次</strong></p><p>启动教材 <strong>{{ number(control.collector?.sourceBudget?.usage?.bookStarts) }} 本</strong></p><p>运行时长 <strong>{{ Math.ceil((control.collector?.sourceBudget?.usage?.activeMilliseconds || 0) / 60000) }} 分钟</strong></p></div>
+          <div><h4>素材</h4><p>今日下载 <strong>{{ mib((control.collector?.sourceBudget?.usage?.downloadBytes || 0) / 1048576) }}</strong></p><p>去重素材 <strong>{{ number(summary.storage?.uniqueAssetCount) }} 份</strong></p></div>
+        </div>
+      </details>
+    </section>
   </div>
 </template>
 <script setup>
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
+import { Refresh, Collection, ArrowRight, InfoFilled } from '@element-plus/icons-vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import request from '@/utils/request'
 import SubjectSelect from '../../components/SubjectSelect.vue'
-import SyncIssues from '../../components/SyncIssues.vue'
+import SyncCenterNav from '../../components/SyncCenterNav.vue'
+import { formatTaskTime, syncTaskStatusMeta } from '../../utils/sync-task'
+import '../../styles/sync-center.scss'
 const router = useRouter(), subjectId = ref(), summary = ref({}), loading = ref(false), error = ref('')
 const controlling = ref(false), control = ref({})
-async function toggleControl(){controlling.value=true;try{await request({url:'/bank/sync/control',method:'post',data:{paused:!summary.value.control?.paused,expectedRevision:summary.value.control?.revision || 1}});await load()}catch(e){error.value=e.message}finally{controlling.value=false}}
+const number = value => Number(value || 0).toLocaleString('zh-CN')
+const mib = value => value == null ? '—' : value >= 1024 ? `${(value / 1024).toFixed(1)} GB` : `${Number(value).toFixed(0)} MB`
+const diskLabels = { database:'快照磁盘', data:'素材磁盘', profile:'浏览器磁盘' }
+const activeCount = computed(() => ['starting','running','cancelling'].reduce((n,s) => n + (summary.value.taskCounts?.[s] || 0), 0))
+const cyclePercent = computed(() => summary.value.cycleTargetCount ? Math.min(100, Math.round(summary.value.cycleAttemptedCount / summary.value.cycleTargetCount * 100)) : 0)
+const runtime = computed(() => {
+  if (loading.value || controlLoading.value) return {label:'读取状态',type:'info'}
+  if (error.value || control.value.collectorError) return {label:'状态需检查',type:'danger',reason:error.value || control.value.collectorError}
+  const reason = summary.value.control?.paused ? summary.value.control.reason || '同步已紧急暂停' : control.value.source?.paused ? control.value.source.reason || '来源暂停中' : control.value.serviceResources?.reason || control.value.collector?.resources?.reason || control.value.collector?.sourceBudget?.reason
+  return reason ? {label:'等待处理',type:'warning',reason} : {label:summary.value.currentTask ? '正在同步' : '就绪',type:'success'}
+})
+const controlLoading = ref(false)
+async function toggleControl() {
+  if (!summary.value.control?.paused) {
+    try { await ElMessageBox.confirm('暂停调度并停止当前采集，已取得的成果会保留。', '紧急暂停同步', {confirmButtonText:'暂停同步',cancelButtonText:'取消',type:'warning'}) } catch { return }
+  }
+  controlling.value=true
+  try { await request({url:'/bank/sync/control',method:'post',data:{paused:!summary.value.control?.paused,expectedRevision:summary.value.control?.revision || 1}});ElMessage.success('同步状态已更新');await load() }
+  catch(e){error.value=e.message} finally{controlling.value=false}
+}
 let requestId = 0
-const labels = { queued: '待执行', starting: '启动中', running: '采集中', cancelling: '取消中', completed: '采集完成', failed: '失败', blocked: '阻断', cancelled: '已取消', interrupted: '已中断' }
-const stats = computed(() => [
-  { name: '当前教材', value: summary.value.textbooks || 0 },
-  { name: '有可用题的教材', value: summary.value.textbooksWithQuestions || 0 },
-  { name: '尚无可用题的教材', value: summary.value.textbooksWithoutQuestions || 0 },
-  { name: '本轮固定目标', value: summary.value.cycleTargetCount || 0 },
-  { name: '本轮已尝试', value: summary.value.cycleAttemptedCount || 0 },
-  { name: '待补齐教材', value: summary.value.textbooksNeedingRefill || 0 },
-  { name: '待处理问题', value: summary.value.openIssueCount || 0 },
-  { name: '执行中任务', value: ['starting','running','cancelling'].reduce((n,s) => n + (summary.value.taskCounts?.[s] || 0), 0) },
-])
 async function loadControl(id) {
+  controlLoading.value=true
   try { const result = await request({url:'/bank/sync/control'}); if(id===requestId) control.value=result.data || result }
   catch(e) { if(id===requestId) control.value={collectorError:e?.message || '控制状态加载失败'} }
+  finally { if(id===requestId) controlLoading.value=false }
 }
 async function load() {
   const id = ++requestId; loading.value = true; error.value = ''; void loadControl(id)
@@ -62,11 +103,12 @@ async function load() {
   catch (e) { if (id === requestId) { summary.value = {}; error.value = e?.message || '总览加载失败' } }
   finally { if (id === requestId) loading.value = false }
 }
+function openIssues(){router.push({path:'/sync-center/tasks',query:{tab:'issues',...(subjectId.value ? {subjectId:subjectId.value} : {})}})}
 function open(row) { router.push(row.taskModule === 'textbook' ? `/bank/sync-textbook/${row.taskId}` : row.taskModule === 'question' ? `/bank/sync-question/${row.taskId}` : '/bank/sync') }
 onMounted(load)
 </script>
 <style scoped>
-.heading { display:flex; align-items:center; gap:16px; margin-bottom:20px; } h2 { margin:0; font-size:20px; flex:1; }
-.stats { display:grid; grid-template-columns:repeat(4,1fr); gap:16px; }.stats strong { display:block; font-size:28px; margin-top:12px; }.note { color:var(--el-text-color-secondary); }.actions { margin:20px 0; }
-@media (max-width:760px) { .stats { grid-template-columns:repeat(2,1fr); }.heading { flex-wrap:wrap; } }
+.welcome{display:flex;align-items:center;gap:20px;background:linear-gradient(110deg,var(--el-color-primary-light-9),var(--el-bg-color));border-color:var(--el-color-primary-light-7)}.welcome-icon{display:grid;place-items:center;width:58px;height:58px;background:var(--el-color-primary-light-8);color:var(--el-color-primary);font-size:28px;border-radius:14px;flex-shrink:0}.welcome-copy{flex:1}.eyebrow{font-size:12px;color:var(--el-color-primary);font-weight:600}.welcome h3{margin:6px 0;font-size:19px}.welcome p{margin:0;color:var(--el-text-color-secondary);font-size:13px;line-height:1.8}
+.overview-grid{display:grid;grid-template-columns:1.15fr 1fr;gap:18px}.task-slot{display:flex;flex-wrap:wrap;align-items:center;gap:12px;padding:16px;background:var(--el-fill-color-extra-light);border-radius:8px}.task-slot strong{font-size:15px;flex:1}.slot-label{width:100%;font-size:12px;color:var(--el-text-color-secondary)}.task-slot>.sync-muted{width:100%}.queue-line{display:flex;justify-content:space-between;align-items:center;margin:20px 0;font-size:13px;color:var(--el-text-color-secondary)}.panel-actions{display:flex;justify-content:space-between;gap:12px;align-items:center;padding-top:14px;border-top:1px solid var(--el-border-color-lighter)}.cycle-number{display:flex;align-items:baseline;gap:10px;margin-bottom:18px}.cycle-number strong{font-size:32px}.cycle-number span{font-size:13px;color:var(--el-text-color-secondary)}.mini-stats{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:22px}.mini-stats strong{display:block;font-size:20px}.mini-stats span{display:block;color:var(--el-text-color-secondary);font-size:12px;margin-top:6px}.plan-note{display:flex;gap:8px;align-items:flex-start;font-size:12px;color:var(--el-text-color-secondary);line-height:1.7}.plan-note .el-icon{margin-top:3px;flex-shrink:0}.resource-panel summary{cursor:pointer;font-size:14px;font-weight:500}.resource-panel summary span{margin-left:16px;font-weight:400}.resource-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:24px;margin-top:20px}.resource-grid h4{font-size:13px}.resource-grid p{display:flex;justify-content:space-between;gap:8px;color:var(--el-text-color-secondary);font-size:12px}.resource-grid strong{font-weight:500;color:var(--el-text-color-primary)}
+@media(max-width:1000px){.overview-grid{grid-template-columns:1fr}.resource-grid{grid-template-columns:repeat(2,1fr)}}@media(max-width:600px){.welcome{flex-wrap:wrap}.welcome-icon{display:none}.welcome-copy{flex-basis:100%}.resource-panel summary span{display:block;margin:8px 0 0}.resource-grid{gap:16px}.task-slot strong{flex-basis:75%}}
 </style>

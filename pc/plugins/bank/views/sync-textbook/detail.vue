@@ -1,10 +1,10 @@
 <template>
-  <div class="app-container textbook-task-detail">
+  <div class="app-container sync-center-page textbook-task-detail">
     <header class="page-heading">
       <div class="heading-copy">
         <el-button link type="primary" :icon="ArrowLeft" @click="goBack">返回任务列表</el-button>
         <h2>教材发现详情</h2>
-        <p>详情始终读取该任务绑定的 metadataRunId 快照，不会随后续采集任务变化。</p>
+        <p>查看本次发现的教材和登记结果；记录独立保存，方便回看变化。</p>
       </div>
       <div class="heading-actions">
         <el-button :icon="Refresh" :loading="loading" @click="refreshTask">刷新状态</el-button>
@@ -37,6 +37,7 @@
         >重试任务</el-button>
       </div>
     </header>
+    <SyncCenterNav active="discovery"/>
 
     <section v-if="task?.discoveryMode" class="panel">
       <h3>{{ task.discoveryResult ? '发现登记结果' : '等待自动登记' }}</h3>
@@ -44,12 +45,13 @@
       <el-alert v-if="task.discoveryError" :title="task.discoveryError" type="error" :closable="false"/>
       <el-button v-if="task.discoveryError" v-hasPermi="['bank:sync:textbook:apply']" :loading="acting" @click="retryDiscovery">重试登记当前快照</el-button>
       <template v-if="task.discoveryResult"><p v-if="task.discoveryResult.action==='superseded'">已有更新的发现任务 {{task.discoveryResult.supersededBy}}，本次仅保留历史。</p>
-        <div v-for="(label,key) in discoveryLabels" :key="key"><h4>{{label}}（{{task.discoveryResult.changes?.[key]?.length || 0}}）</h4>
+        <details v-for="(label,key) in discoveryLabels" :key="key" class="sync-disclosure"><summary>{{label}} · {{task.discoveryResult.changes?.[key]?.length || 0}} 项</summary>
           <el-table v-if="task.discoveryResult.changes?.[key]?.length" :data="task.discoveryResult.changes[key]"><el-table-column prop="externalId" label="来源ID"/><el-table-column prop="oldName" label="原名称"/><el-table-column prop="name" label="名称"/><el-table-column v-if="key==='conflicts'" prop="observedVersionId" label="来源版本ID"/><el-table-column prop="reason" label="说明"/></el-table>
-        </div>
+          <p v-if="!task.discoveryResult.changes?.[key]?.length" class="sync-muted">本次没有此类变化。</p>
+        </details>
       </template>
     </section>
-    <SyncIssues v-if="task?.discoveryMode" :task-id="task.taskId" :subject-id="task.subjectId"/>
+    <section v-if="task?.discoveryMode" class="sync-panel"><SyncIssues :task-id="task.taskId" :subject-id="task.subjectId"/></section>
     <el-alert v-if="requestError" class="state-alert" type="error" :closable="false" show-icon>{{ requestError }}</el-alert>
     <el-alert
       v-if="applySuccess"
@@ -82,7 +84,7 @@
         description="左侧是该任务抓取的完整版本与教材，右侧是当前正式数据。点击左侧已有数据可定位右侧对应项。"
       />
     </section>
-    <section v-else-if="task && task.status !== 'completed'" class="waiting-panel panel">
+    <section v-else-if="task && !task.discoveryMode && task.status !== 'completed'" class="waiting-panel panel">
       <el-empty :image-size="76" :description="comparisonWaitingText" />
     </section>
 
@@ -95,7 +97,8 @@
         <span class="progress-copy">{{ Math.round(task.progress) }}%</span>
       </div>
       <el-progress :percentage="task.progress" :status="progressStatus" :stroke-width="10" />
-      <el-descriptions :column="4" border size="small" class="task-descriptions">
+      <details class="sync-disclosure"><summary>任务信息与采集统计</summary>
+      <el-descriptions :column="2" border size="small" class="task-descriptions">
         <el-descriptions-item label="Service taskId">{{ task.taskId }}</el-descriptions-item>
         <el-descriptions-item label="当前阶段">{{ task.phase || '—' }}</el-descriptions-item>
         <el-descriptions-item label="Collector job">{{ task.collectorJobId || '—' }}</el-descriptions-item>
@@ -112,19 +115,21 @@
         <el-descriptions-item label="任务含义">{{ textbookTaskMeaning(task) }}</el-descriptions-item>
         <el-descriptions-item v-if="!task.discoveryMode" label="正式版本">{{ task.isCurrent ? `任务 ${task.taskNo || task.taskId}` : (task.currentTaskId ? `任务 ${task.currentTaskId}` : '尚未应用') }}</el-descriptions-item>
         <el-descriptions-item v-if="!task.discoveryMode" label="最近应用时间">{{ formatTaskTime(task.appliedAt) }}</el-descriptions-item>
-      </el-descriptions>
+      </el-descriptions></details>
       <el-alert v-if="task.errorMessage" class="inner-alert" type="error" :closable="false" show-icon>{{ task.errorMessage }}</el-alert>
-      <section class="log-panel">
-        <div class="section-heading"><h3>运行日志</h3><span>自动刷新最后 100 条</span></div>
+      <details class="log-panel sync-disclosure">
+        <summary>运行日志 · 自动刷新最后 100 条</summary>
         <pre v-if="task.logs.length">{{ task.logs.join('\n') }}</pre>
         <el-empty v-else :image-size="54" description="暂无运行日志" />
-      </section>
+      </details>
     </section>
 
   </div>
 </template>
 
 <script setup>
+import SyncCenterNav from '../../components/SyncCenterNav.vue'
+import '../../styles/sync-center.scss'
 import request from '@/utils/request'
 const discoveryLabels={newVersions:'新增版本',renamedVersions:'版本改名',missingVersions:'本次未发现版本',newTextbooks:'新增教材',renamedTextbooks:'教材改名',missingTextbooks:'本次未发现教材',conflicts:'归属冲突'}
 
@@ -187,7 +192,7 @@ const completedStateMessage = computed(() => {
 })
 
 function goBack() {
-  router.push('/bank/sync-textbook')
+  router.push('/sync-center/discovery')
 }
 
 function clearPoll() {

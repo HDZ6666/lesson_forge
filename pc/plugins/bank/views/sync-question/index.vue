@@ -1,20 +1,21 @@
 <template>
-  <div class="app-container sync-question-list-page">
+  <div class="app-container sync-center-page sync-question-list-page">
     <header class="page-heading">
       <div>
         <h2>同步题库任务</h2>
-        <p>从当前正式数据中选择一本教材，单独采集目录与题目；历史多本任务仍可查看。</p>
+        <p>每次同步一本教材。查看后台进度，继续未完成的采集，处理需要人工判断的问题。</p>
       </div>
       <div class="heading-actions">
-        <el-button :icon="Refresh" :loading="loading" @click="loadTasks">刷新</el-button>
+        <el-button v-if="activeTab==='tasks'" :icon="Refresh" :loading="loading" @click="loadTasks">刷新</el-button>
         <el-button v-hasPermi="['bank:sync:question:add', 'bank:sync:run']" type="primary" :icon="Plus" @click="openCreate">新增同步题库任务</el-button>
       </div>
     </header>
+    <SyncCenterNav active="tasks"/>
 
-    <el-alert class="state-alert" type="info" :closable="false" show-icon>
+    <el-alert v-if="activeTab==='tasks'" class="state-alert" type="info" :closable="false" show-icon>
       采集完成表示本次抓取结束；题目是否已可用，请查看任务中的入库结果。
     </el-alert>
-    <el-alert v-if="hasInterruptedTasks" class="state-alert" type="warning" :closable="false" show-icon>
+    <el-alert v-if="activeTab==='tasks' && hasInterruptedTasks" class="state-alert" type="warning" :closable="false" show-icon>
       采集中断任务的已有快照和断点保留，可断点续采；也可重试从头创建新任务。
     </el-alert>
     <el-alert v-if="errorMessage" class="state-alert" type="error" :closable="false" show-icon>{{ errorMessage }}</el-alert>
@@ -29,14 +30,14 @@
             <el-option v-for="item in syncTaskStatusOptions" :key="item.value" :label="item.label" :value="item.value" />
           </el-select>
         </el-form-item>
-        <el-form-item label="版本"><el-input v-model="filters.versionName" clearable placeholder="版本名称" @keyup.enter="searchTasks" /></el-form-item>
-        <el-form-item label="创建时间">
+        <el-form-item v-show="advancedFilters" label="版本"><el-input v-model="filters.versionName" clearable placeholder="版本名称" @keyup.enter="searchTasks" /></el-form-item>
+        <el-form-item v-show="advancedFilters" label="创建时间">
           <el-date-picker v-model="filters.createTimeRange" type="daterange" value-format="YYYY-MM-DD" range-separator="至" start-placeholder="开始日期" end-placeholder="结束日期" clearable />
         </el-form-item>
-        <el-form-item><el-button type="primary" :icon="Search" @click="searchTasks">查询</el-button><el-button :icon="RefreshLeft" @click="resetFilters">重置</el-button></el-form-item>
+        <el-form-item><el-button type="primary" :icon="Search" @click="searchTasks">查询</el-button><el-button :icon="RefreshLeft" @click="resetFilters">重置</el-button><el-button link @click="advancedFilters = !advancedFilters">{{ advancedFilters ? '收起筛选' : '更多筛选' }}</el-button></el-form-item>
       </el-form>
 
-      <div class="batch-toolbar">
+      <div v-if="selectedRows.length" class="batch-toolbar">
         <span class="selection-hint">{{ selectedRows.length ? `已选 ${selectedRows.length} 个终态任务` : '仅可选择已完成、失败、阻断、采集中断或已停止的任务' }}</span>
         <el-button
           v-hasPermi="['bank:sync:question:remove', 'bank:sync:run']"
@@ -55,7 +56,6 @@
         :data="tasks"
         :row-key="(row) => String(row.taskId)"
         stripe
-        size="small"
         class="task-table"
         @selection-change="handleSelectionChange"
       >
@@ -64,17 +64,11 @@
           <template #default="scope"><el-link type="primary" :underline="false" @click="openDetail(scope.row)">{{ scope.row.taskNo || scope.row.taskId }}</el-link></template>
         </el-table-column>
         <el-table-column label="状态" width="112" align="center"><template #default="scope"><el-tag size="small" :type="syncTaskStatusMeta(scope.row.status).type">{{ syncTaskStatusMeta(scope.row.status).label }}</el-tag></template></el-table-column>
-        <el-table-column label="排队说明" min-width="180" show-overflow-tooltip><template #default="scope">{{ scope.row.queueReason || (scope.row.queueState === 'waiting' ? '等待后台派发' : '—') }}</template></el-table-column>
-        <el-table-column label="选择版本" min-width="140" show-overflow-tooltip><template #default="scope">{{ scope.row.versionName || '—' }}</template></el-table-column>
-        <el-table-column label="教材范围" min-width="210" show-overflow-tooltip><template #default="scope">{{ textbookSummary(scope.row) }}</template></el-table-column>
-        <el-table-column prop="catalogCount" label="抓取目录" width="96" align="right" />
-        <el-table-column prop="questionCount" label="抓取题目" width="96" align="right" />
-        <el-table-column prop="newQuestionCount" label="新增题目" width="96" align="right" />
-        <el-table-column prop="changedQuestionCount" label="变化题目" width="96" align="right" />
-        <el-table-column label="创建人" min-width="105" show-overflow-tooltip><template #default="scope">{{ scope.row.createdBy || '—' }}</template></el-table-column>
+        <el-table-column label="教材" min-width="200"><template #default="{row}"><span class="cell-main">{{ textbookSummary(row) }}</span><span class="cell-sub">{{ row.versionName || '—' }}</span><span v-if="row.queueReason || row.queueState==='waiting'" class="cell-sub">{{ row.queueReason || '等待后台派发' }}</span></template></el-table-column>
+        <el-table-column label="本次采集" min-width="140"><template #default="{row}"><span class="cell-main">{{ Number(row.questionCount || 0).toLocaleString() }} 道题</span><span class="cell-sub">{{ row.catalogCount || 0 }} 个目录</span></template></el-table-column>
+        <el-table-column label="题目变化" min-width="135"><template #default="{row}"><span>新增 {{ row.newQuestionCount || 0 }}</span><span class="cell-sub">变化 {{ row.changedQuestionCount || 0 }}</span></template></el-table-column>
         <el-table-column label="创建时间" min-width="166" show-overflow-tooltip><template #default="scope">{{ formatTaskTime(scope.row.createTime) }}</template></el-table-column>
-        <el-table-column label="完成时间" min-width="166" show-overflow-tooltip><template #default="scope">{{ formatTaskTime(scope.row.completedAt) }}</template></el-table-column>
-        <el-table-column label="操作" width="280" fixed="right" align="center">
+        <el-table-column label="操作" width="260" fixed="right" align="center">
           <template #default="scope">
             <el-button v-hasPermi="['bank:sync:question:query', 'bank:sync:question:list', 'bank:sync:center:list']" link type="primary" :icon="View" @click="openDetail(scope.row)">查看详情</el-button>
             <el-button v-if="canCancelSyncTask(scope.row.status)" v-hasPermi="['bank:sync:question:cancel', 'bank:sync:run']" link type="danger" :icon="VideoPause" :loading="actionId === scope.row.taskId" @click="stopTask(scope.row)">停止</el-button>
@@ -83,17 +77,18 @@
             <el-button v-if="canDeleteSyncTask(scope.row.status)" v-hasPermi="['bank:sync:question:remove', 'bank:sync:run']" link type="danger" :icon="Delete" :loading="actionId === scope.row.taskId" @click="deleteTask(scope.row)">删除</el-button>
           </template>
         </el-table-column>
+        <template #empty><el-empty :image-size="64" description="暂无同步题库任务"><p class="empty-copy">{{ total ? '当前页没有数据，请调整筛选条件。' : '可以调整筛选，或创建一个新任务开始同步。' }}</p><el-button v-hasPermi="['bank:sync:question:add', 'bank:sync:run']" type="primary" plain @click="openCreate">选择一本教材</el-button></el-empty></template>
       </el-table>
-      <el-empty v-if="!loading && !tasks.length" :image-size="72" description="暂无同步题库任务" />
       <footer class="table-footer">
         <span>共 {{ total }} 个任务</span>
         <el-pagination v-model:current-page="filters.pageNum" v-model:page-size="filters.pageSize" :total="total" :page-sizes="[10, 20, 50]" layout="sizes, prev, pager, next, total" background @size-change="loadTasks" @current-change="loadTasks" />
       </footer>
     </section>
 
-    <template v-if="activeTab==='issues'"><SubjectSelect v-model="filters.subjectId"/><SyncIssues :subject-id="filters.subjectId"/></template>
-    <el-dialog v-model="createVisible" title="新增同步题库任务" width="720px" append-to-body @closed="resetCreate">
+    <section v-if="activeTab==='issues'" class="sync-panel"><div class="section-heading"><h3>按学科查看问题</h3><SubjectSelect v-model="filters.subjectId"/></div><SyncIssues :subject-id="filters.subjectId"/></section>
+    <el-dialog class="sync-center-dialog" v-model="createVisible" title="新增同步题库任务" width="720px" append-to-body @closed="resetCreate">
       <el-alert v-if="optionError" class="dialog-alert" type="error" :closable="false" show-icon>{{ optionError }}</el-alert>
+      <el-alert v-if="!optionsLoading && !visibleOptionVersions.length && !optionError" type="info" :closable="false">该学科还没有可选版本。<el-button link type="primary" @click="createVisible=false;router.push('/sync-center/discovery')">先去发现教材</el-button></el-alert>
       <el-form label-width="96px" v-loading="optionsLoading">
         <el-form-item label="学科"><SubjectSelect v-model="createForm.subjectId" :clearable="false" sync-only @change="resetBookSelection" /></el-form-item>
         <el-form-item label="选择版本" required>
@@ -145,12 +140,14 @@
 </template>
 
 <script setup>
+import SyncCenterNav from '../../components/SyncCenterNav.vue'
+import '../../styles/sync-center.scss'
 import SyncIssues from "../../components/SyncIssues.vue"
 import SubjectSelect from "../../components/SubjectSelect.vue"
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { Delete, Plus, Refresh, RefreshLeft, RefreshRight, Search, VideoPause, View } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import {
   cancelQuestionSyncTask,
   createQuestionSyncTask,
@@ -175,7 +172,9 @@ import {
   unwrapSyncTaskPage,
 } from '../../utils/sync-task'
 
-const activeTab = ref('tasks')
+const route = useRoute()
+const activeTab = ref(route.query.tab === 'issues' ? 'issues' : 'tasks')
+const advancedFilters = ref(false)
 const router = useRouter()
 const tasks = ref([])
 const tableRef = ref()
@@ -192,7 +191,8 @@ const optionError = ref('')
 const optionVersions = ref([])
 const acknowledged = ref(false)
 const createForm = reactive({ subjectId: 1, versionId: '', textbookId: undefined, limitTo1000Pages: false })
-const filters = reactive({ subjectId: undefined, taskNo: '', status: undefined, versionName: '', createTimeRange: [], pageNum: 1, pageSize: 10 })
+const filters = reactive({ subjectId: Number(route.query.subjectId) || undefined, taskNo: '', status: undefined, versionName: '', createTimeRange: [], pageNum: 1, pageSize: 10 })
+watch(() => [route.query.tab, route.query.subjectId], () => { activeTab.value = route.query.tab === 'issues' ? 'issues' : 'tasks'; filters.subjectId = Number(route.query.subjectId) || undefined; searchTasks() })
 let taskListRevision = 0
 let refreshTimer = null
 let mounted = false

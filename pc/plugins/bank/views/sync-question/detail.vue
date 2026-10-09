@@ -1,5 +1,5 @@
 <template>
-  <div class="app-container question-task-detail">
+  <div class="app-container sync-center-page question-task-detail">
     <header class="page-heading">
       <div class="heading-copy">
         <el-button link type="primary" :icon="ArrowLeft" @click="goBack">返回任务列表</el-button>
@@ -34,6 +34,7 @@
         <el-button v-if="task && canRetrySyncTask(task.status)" v-hasPermi="['bank:sync:question:retry', 'bank:sync:question:add', 'bank:sync:run']" type="warning" plain :icon="RefreshRight" :loading="acting" @click="retryTask">重试任务</el-button>
       </div>
     </header>
+    <SyncCenterNav active="tasks"/>
 
     <el-alert v-if="requestError" class="state-alert" type="error" :closable="false" show-icon>{{ requestError }}</el-alert>
     <el-alert v-if="task?.progressStale" class="state-alert" type="warning" :closable="false" show-icon>
@@ -91,11 +92,11 @@
         <span>结束时间：{{ summaryFinishedAt }}</span>
       </div>
       <el-alert v-if="task.errorMessage" class="inner-alert" type="error" :closable="false" show-icon>{{ task.errorMessage }}</el-alert>
-      <section class="log-panel">
-        <div class="section-heading"><h3>运行日志</h3><span>自动刷新最后 100 条</span></div>
+      <details class="log-panel sync-disclosure">
+        <summary>运行日志 · 自动刷新最后 100 条</summary>
         <pre v-if="task.logs.length">{{ task.logs.join('\n') }}</pre>
         <el-empty v-else :image-size="54" description="暂无运行日志" />
-      </section>
+      </details>
     </section>
 
     <el-alert v-if="task?.queueState === 'waiting' || (task?.status === 'queued' && task?.queueReason)" type="info" :closable="false" show-icon>
@@ -240,6 +241,8 @@
 </template>
 
 <script setup>
+import SyncCenterNav from '../../components/SyncCenterNav.vue'
+import '../../styles/sync-center.scss'
 import { computed, defineComponent, h, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ArrowLeft, Refresh, RefreshLeft, RefreshRight, Search, Upload, VideoPause, View } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
