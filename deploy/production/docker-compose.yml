@@ -50,7 +50,9 @@ services:
     build:
       context: ../../collector
       dockerfile: ../deploy/production/collector.Dockerfile
-    image: lesson-forge-collector:production
+      args:
+        SOURCE_REVISION: ${SOURCE_REVISION:-uncommitted}
+    image: lesson-forge-collector:${SOURCE_REVISION:-production}
     container_name: lesson-forge-collector
     init: true
     stop_grace_period: 90s
@@ -63,12 +65,17 @@ services:
       COLLECTOR_DATA_DIR: /data/zujuan
       COLLECTOR_PROFILE_DIR: /profile
       COLLECTOR_HEADFUL: "false"
-      # 采集节奏（2026-09-07 隔离实例实测 5.2 页/秒，48 页短测无风控信号；见 collector/README.md）。
-      # 列表并发 12 是对来源站的真实加压，若出现 429/验证请先回到 8。
-      COLLECTOR_LIST_CONCURRENCY: "12"
-      COLLECTOR_ASSET_CONCURRENCY: "32"
-      COLLECTOR_DELAY_MIN_MS: "1500"
-      COLLECTOR_DELAY_MAX_MS: "2500"
+      # 初期单本低负载；实际额度由部署配置决定。
+      COLLECTOR_LIST_CONCURRENCY: ${COLLECTOR_LIST_CONCURRENCY:-1}
+      COLLECTOR_ASSET_CONCURRENCY: ${COLLECTOR_ASSET_CONCURRENCY:-2}
+      COLLECTOR_DELAY_MIN_MS: ${COLLECTOR_DELAY_MIN_MS:-4000}
+      COLLECTOR_DELAY_MAX_MS: ${COLLECTOR_DELAY_MAX_MS:-6000}
+      COLLECTOR_SOURCE_DAILY_REQUEST_LIMIT: ${COLLECTOR_SOURCE_DAILY_REQUEST_LIMIT:-0}
+      COLLECTOR_SOURCE_DAILY_BOOK_LIMIT: ${COLLECTOR_SOURCE_DAILY_BOOK_LIMIT:-0}
+      COLLECTOR_SOURCE_DAILY_ACTIVE_SECONDS: ${COLLECTOR_SOURCE_DAILY_ACTIVE_SECONDS:-0}
+      COLLECTOR_SOURCE_DAILY_DOWNLOAD_MIB: ${COLLECTOR_SOURCE_DAILY_DOWNLOAD_MIB:-0}
+      COLLECTOR_MIN_DISK_FREE_MIB: ${COLLECTOR_MIN_DISK_FREE_MIB:-0}
+      COLLECTOR_MIN_MEMORY_FREE_MIB: ${COLLECTOR_MIN_MEMORY_FREE_MIB:-0}
       # 采集子进程内存上限（MB）：超过即停止并封存为可续采，避免再次拖垮 3.7GB 的宿主机（COL-015）。
       COLLECTOR_CHILD_MAX_RSS_MB: "1536"
       TZ: Asia/Shanghai
@@ -89,7 +96,9 @@ services:
     build:
       context: ../../service
       dockerfile: ../deploy/production/service.Dockerfile
-    image: lesson-forge-service:production
+      args:
+        SOURCE_REVISION: ${SOURCE_REVISION:-uncommitted}
+    image: lesson-forge-service:${SOURCE_REVISION:-production}
     container_name: lesson-forge-service
     restart: unless-stopped
     environment:
@@ -128,6 +137,11 @@ services:
       BANK_COLLECTOR_TOKEN: ${COLLECTOR_API_TOKEN}
       BANK_COLLECTOR_TIMEOUT_SECONDS: 30
       BANK_ASSET_ROOT: /app/runtime/bank
+      BANK_AUTOMATIC_SYNC_ENABLED: ${BANK_AUTOMATIC_SYNC_ENABLED:-0}
+      LESSON_UNDO_MINUTES: ${LESSON_UNDO_MINUTES:-30}
+      BANK_MIN_DISK_FREE_MIB: ${BANK_MIN_DISK_FREE_MIB:-0}
+      BANK_MIN_MEMORY_FREE_MIB: ${BANK_MIN_MEMORY_FREE_MIB:-0}
+      BANK_SYNC_MAX_PENDING_IMPORTS: ${BANK_SYNC_MAX_PENDING_IMPORTS:-0}
       TRANSPORT_CRYPTO_ENABLED: "false"
       TRANSPORT_CRYPTO_MODE: off
       TZ: Asia/Shanghai

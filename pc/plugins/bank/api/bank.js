@@ -1,5 +1,10 @@
 import request from "@/utils/request";
 
+export const listSubjects = (query) => request({ url: '/bank/subject/list', method: 'get', params: query });
+export const listSourceProfiles = () => request({ url: '/bank/subject/profiles', method: 'get' });
+export const addSubject = (data) => request({ url: '/bank/subject', method: 'post', data });
+export const updateSubject = (data) => request({ url: '/bank/subject', method: 'put', data });
+
 // 题库接口。数组参数由 request 拦截器按重复键编码，兼容 FastAPI list 字段。
 export function listVersions(query) {
   return request({
@@ -363,8 +368,11 @@ export function getQuestionSyncOptions() {
 
 export function createQuestionSyncTask(data) {
   const textbookIds = Array.isArray(data?.textbookIds)
-    ? [...new Set(data.textbookIds)]
-    : [];
+    ? data.textbookIds
+    : [data?.textbookId];
+  if (textbookIds.length !== 1 || !Number.isSafeInteger(Number(textbookIds[0])) || Number(textbookIds[0]) <= 0) {
+    return Promise.reject(new Error('一次同步任务请选择一本教材'));
+  }
   const requestConfig = {
     url: questionSyncTaskBaseUrl,
     method: "post",
@@ -373,7 +381,7 @@ export function createQuestionSyncTask(data) {
     // collector runs from formal data.
     data: {
       versionId: data?.versionId,
-      textbookIds,
+      textbookId: Number(textbookIds[0]),
     },
   };
   if (data?.limitTo1000Pages === true) requestConfig.data.limitTo1000Pages = true;
@@ -393,6 +401,26 @@ export function getQuestionSyncTask(taskId) {
     url: `${questionSyncTaskBaseUrl}/${encodeURIComponent(taskId)}`,
     method: "get",
   });
+}
+
+export function requestQuestionIncrementalImport(taskId) {
+  return request({ url: `${questionSyncTaskBaseUrl}/${encodeURIComponent(taskId)}/import`, method: 'post' });
+}
+
+export function retryQuestionImportIntake(taskId) {
+  return request({ url: `${questionSyncTaskBaseUrl}/${encodeURIComponent(taskId)}/import-intake/retry`, method: 'post' });
+}
+
+export function listQuestionImports(taskId, params) {
+  return request({ url: `${questionSyncTaskBaseUrl}/${encodeURIComponent(taskId)}/imports`, method: 'get', params });
+}
+
+export function listQuestionImportBatches(taskId, importId, params) {
+  return request({ url: `${questionSyncTaskBaseUrl}/${encodeURIComponent(taskId)}/imports/${encodeURIComponent(importId)}/batches`, method: 'get', params });
+}
+
+export function listQuestionImportIssues(taskId, importId, params) {
+  return request({ url: `${questionSyncTaskBaseUrl}/${encodeURIComponent(taskId)}/imports/${encodeURIComponent(importId)}/issues`, method: 'get', params });
 }
 
 // Apply the immutable question snapshot to the formal question-bank tables.

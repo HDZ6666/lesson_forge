@@ -380,6 +380,9 @@ async def test_create_question_carries_page_policy_into_task_options(
         captured.append(kwargs)
         return {'runId': len(captured)}
 
+    from plugins.bank.service.subject_service import SubjectService
+    from unittest.mock import AsyncMock
+    monkeypatch.setattr(SubjectService, 'require', AsyncMock(return_value=SimpleNamespace(source_profile='zujuan_czsx')))
     monkeypatch.setattr(task_service.BankDao, 'get_version', get_version)
     monkeypatch.setattr(task_service.BankDao, 'get_textbook', get_textbook)
     monkeypatch.setattr(sync_run_service.SyncRunService, '_create_job', create_job)

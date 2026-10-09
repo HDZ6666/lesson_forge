@@ -11,6 +11,7 @@ import asyncio
 import hashlib
 import secrets
 import sqlite3
+from contextlib import AsyncExitStack
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -40,7 +41,9 @@ from plugins.bank.service.question_apply_service import (
     _load_task_and_scopes,
     _rollback_read_transaction,
     _task_scope_signature,
+    _uses_incremental_workflow,
 )
+from plugins.bank.service.source_write_lock import source_write_lock
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -75,6 +78,8 @@ def _prepared_assets(path: Path, expected_hash: str, expected_count: int) -> dic
 
 async def _capture_task(db: AsyncSession, task_id: int, run_id: int, textbook_id: str) -> tuple[Any, int, set[str]]:
     task, scopes = await _load_task_and_scopes(db, task_id)
+    if _uses_incremental_workflow(task):
+        raise ServiceException(message='新版任务不能使用旧版首次整批入库，请使用分批增量流程')
     if str(task.status) != 'completed' or len(scopes) != 1:
         raise ServiceException(message='大快照首批入库只支持一个已完成的教材任务')
     scope = scopes[0]
@@ -125,7 +130,9 @@ async def apply_initial_large(  # noqa: PLR0912, PLR0915
     })
     stats = _empty_stats()
     now = datetime.now()
+    write_stack = AsyncExitStack()
     try:
+        await write_stack.enter_async_context(source_write_lock(db))
         task, scopes = await _load_task_and_scopes(db, task_id, for_update=True)
         if _task_scope_signature(task, scopes) != signature:
             raise ServiceException(message='任务或教材范围已变化，请重新校验快照')
@@ -146,7 +153,7 @@ async def apply_initial_large(  # noqa: PLR0912, PLR0915
         await _empty_provider(db)
         scope = scopes[0]
         textbook = await db.scalar(select(QbTextbook).where(
-            QbTextbook.source_provider == PROVIDER,
+            QbTextbook.subject_id == 1, QbTextbook.source_provider == PROVIDER,
             QbTextbook.external_textbook_id == textbook_id,
         ))
         if textbook is None or int(textbook.textbook_id) != int(scope.local_textbook_id or 0):
@@ -172,7 +179,7 @@ async def apply_initial_large(  # noqa: PLR0912, PLR0915
         catalog_map = dict((await db.execute(select(
             QbCatalogNode.external_node_id, QbCatalogNode.catalog_id,
         ).where(
-            QbCatalogNode.source_provider == PROVIDER,
+            QbCatalogNode.subject_id == 1, QbCatalogNode.source_provider == PROVIDER,
             QbCatalogNode.textbook_id == textbook.textbook_id,
         ))).all())
         if len(catalog_map) != reader.counts['catalogs']:
@@ -207,7 +214,7 @@ async def apply_initial_large(  # noqa: PLR0912, PLR0915
                 question_map = dict((await db.execute(select(
                     QbQuestion.external_question_id, QbQuestion.question_id,
                 ).where(
-                    QbQuestion.source_provider == PROVIDER,
+                    QbQuestion.subject_id == 1, QbQuestion.source_provider == PROVIDER,
                     QbQuestion.external_question_id.in_(external_ids),
                 ))).all())
                 if len(question_map) != len(questions):
@@ -294,9 +301,11 @@ async def apply_initial_large(  # noqa: PLR0912, PLR0915
             create_time=now, update_time=now,
         ))
         await db.commit()
-    except Exception:
+    except BaseException:
         await db.rollback()
         raise
+    finally:
+        await write_stack.aclose()
     return {'taskId': task_id, 'collectorRunId': run_id, 'textbookExternalId': textbook_id,
             'snapshotHash': snapshot_hash, 'stateToken': token, 'stats': stats, 'alreadyApplied': False}
 

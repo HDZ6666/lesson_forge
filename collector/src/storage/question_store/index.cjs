@@ -18,6 +18,7 @@ const { CatalogRepoMethods } = require('./catalog_repo.cjs');
 const { PageRepoMethods } = require('./page_repo.cjs');
 const { ProgressProjectionMethods } = require('./progress_projection.cjs');
 const { ErrorLogMethods } = require('./error_log.cjs');
+const { assertMathSource } = require('../../sources/registry.cjs');
 
 class QuestionSyncStore {
   constructor(dbPath, { dataDir = null } = {}) {
@@ -30,14 +31,16 @@ class QuestionSyncStore {
   }
 
   _scopeObject(scope) {
-    if (!scope || typeof scope !== 'object' || Array.isArray(scope)) return {};
-    return scope;
+    const value = scope && typeof scope === 'object' && !Array.isArray(scope) ? scope : {};
+    const { sealedCoverageEvidence: _ignored, ...unsealed } = value;
+    return { ...unsealed, sourceNamespace: assertMathSource(value) };
   }
 
   _scopeIdentity(scope) {
     const value = this._scopeObject(scope);
     return JSON.stringify({
       provider: PROVIDER,
+      sourceNamespace: value.sourceNamespace,
       bankId: String(value.bankId ?? DEFAULT_BANK_ID),
       bankPath: String(value.bankPath ?? DEFAULT_BANK_PATH),
       textbookId: String(value.textbookId ?? ''),
@@ -54,8 +57,10 @@ class QuestionSyncStore {
 
   _latestRun(scope, statuses) {
     const rows = this.db.prepare(`
-      SELECT * FROM sync_runs WHERE provider = ? ORDER BY id DESC LIMIT 50
-    `).all(PROVIDER);
+      SELECT * FROM sync_runs WHERE provider = ?
+        AND CAST(json_extract(scope_json, '$.textbookId') AS TEXT) = ?
+      ORDER BY id DESC LIMIT 50
+    `).all(PROVIDER, String(scope.textbookId ?? ''));
     const identity = this._scopeIdentity(scope);
     return rows.find((row) => {
       if (!statuses.includes(String(row.status || ''))) return false;

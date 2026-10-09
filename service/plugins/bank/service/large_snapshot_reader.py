@@ -72,13 +72,16 @@ class LargeSnapshotReader:
         summary: Mapping[str, Any],
         task_id: int,
         textbook_id: str,
+        *,
+        sealed_for_import: bool = False,
     ) -> None:
-        self.db = sqlite3.connect(f'file:{path}?mode=ro', uri=True)
-        self.db.row_factory = sqlite3.Row
         self.task_id = task_id
         self.textbook_id = textbook_id
-        self.summary = _normalise_snapshot_summary(summary, task_id, textbook_id)
+        self.sealed_for_import = sealed_for_import
+        self.summary = _normalise_snapshot_summary(summary, task_id, textbook_id, sealed_for_import=sealed_for_import)
         self.counts = self.summary['counts']
+        self.db = sqlite3.connect(f'file:{path}?mode=ro', uri=True)
+        self.db.row_factory = sqlite3.Row
         identity_row = self.db.execute("SELECT value FROM metadata WHERE key='identity'").fetchone()
         complete_row = self.db.execute("SELECT value FROM metadata WHERE key='complete'").fetchone()
         if not identity_row or not complete_row or complete_row[0] != b'1':
@@ -92,6 +95,7 @@ class LargeSnapshotReader:
             or identity.get('textbookExternalId') != textbook_id
             or identity.get('snapshotLockedAt') != locked_at
             or identity.get('counts') != self.counts
+            or (sealed_for_import and (identity.get('policy') != 'sealed-incremental-v2' or identity.get('snapshotComplete') != self.summary['snapshot_complete']))
         ):
             self.close()
             raise ServiceException(message='题库快照暂存与当前 Collector 运行信息不一致')
@@ -176,11 +180,11 @@ class LargeSnapshotReader:
                 'questionAssetCount': len(children['assets']),
             }
             raw = {
-                'available': True, 'immutable': True, 'snapshotComplete': True,
+                'available': True, 'immutable': True, 'snapshotComplete': self.summary['snapshot_complete'],
                 'run': self.run, 'counts': counts, 'catalogs': catalogs, 'questions': questions,
                 **children,
             }
-            normalized = _normalise_snapshot(raw, self.task_id, self.textbook_id)
+            normalized = _normalise_snapshot(raw, self.task_id, self.textbook_id, sealed_for_import=self.sealed_for_import)
             normalized['chunk_start'] = cursor
             yield normalized
             cursor += len(questions)

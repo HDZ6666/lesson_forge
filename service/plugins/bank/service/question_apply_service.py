@@ -20,6 +20,7 @@ import secrets
 import tempfile
 import urllib.parse
 from collections.abc import Mapping
+from contextlib import AsyncExitStack
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -44,6 +45,7 @@ from plugins.bank.entity.do.bank_do import (
 )
 from plugins.bank.service.collector_client import CollectorClient
 from plugins.bank.service.snapshot_content import validate_list_content
+from plugins.bank.service.source_write_lock import source_write_lock
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -459,7 +461,7 @@ async def _materialize_one_asset(
             raise ServiceException(message=f'素材 {digest} 落盘失败') from exc
 
 
-async def _download_snapshot_assets(snapshot: dict[str, Any]) -> None:  # noqa: PLR0912
+async def _download_snapshot_assets(snapshot: dict[str, Any], *, sealed_for_import: bool = False) -> None:  # noqa: PLR0912
     """Materialize declared assets with bounded, service-owned concurrency."""
 
     assets = snapshot.get('assets')
@@ -484,6 +486,9 @@ async def _download_snapshot_assets(snapshot: dict[str, Any]) -> None:  # noqa: 
     method = getattr(client, 'run_asset_bytes', None) or getattr(client, 'asset_bytes', None)
     if not callable(method):
         raise ServiceException(message='collector 客户端不支持素材下载')
+    if sealed_for_import:
+        from functools import partial
+        method = partial(method, sealed_for_import=True)
 
     # Group by content address before any I/O.  A run can reference the same
     # binary from multiple questions or HTML fields; one worker then serves
@@ -598,7 +603,7 @@ def _array_value(raw: Mapping[str, Any], aliases: tuple[str, ...], *, label: str
     return value
 
 
-def _snapshot_header(raw: Mapping[str, Any], textbook_external_id: str) -> tuple[dict[str, Any], dict[str, Any]]:  # noqa: PLR0912
+def _snapshot_header(raw: Mapping[str, Any], textbook_external_id: str, *, sealed_for_import: bool = False) -> tuple[dict[str, Any], dict[str, Any]]:  # noqa: PLR0912
     """Validate and return the stable run/header portions of a snapshot."""
 
     payload: Mapping[str, Any] = raw
@@ -618,7 +623,7 @@ def _snapshot_header(raw: Mapping[str, Any], textbook_external_id: str) -> tuple
             break
     if payload.get('available') is not True:
         raise ServiceException(message=str(payload.get('message') or 'collector 没有可用的题库快照'))
-    for marker in ('partial', 'isPartial', 'truncated', 'hasMore', 'has_more'):
+    for marker in (('truncated', 'hasMore', 'has_more') if sealed_for_import else ('partial', 'isPartial', 'truncated', 'hasMore', 'has_more')):
         if marker in payload and _as_bool(payload[marker]):
             raise ServiceException(message=f'教材 {textbook_external_id} 的题库快照仍为分页或部分结果')
     # A complete endpoint may expose page metadata for observability, but a
@@ -632,6 +637,9 @@ def _snapshot_header(raw: Mapping[str, Any], textbook_external_id: str) -> tuple
     run = payload.get('run')
     if not isinstance(run, Mapping):
         raise ServiceException(message=f'教材 {textbook_external_id} 的题库快照缺少运行信息')
+    if sealed_for_import:
+        _normalise_snapshot_summary(payload, 0, textbook_external_id, sealed_for_import=True)
+        return dict(payload), dict(run)
     # ``snapshot_complete`` is intentionally mandatory.  A terminal status or
     # lock timestamp alone cannot prove that every page/detail/material row
     # was persisted.
@@ -851,6 +859,8 @@ def _normalise_snapshot_summary(  # noqa: PLR0912, PLR0915
     task_id: int,
     textbook_external_id: str,
     allow_incomplete: bool = False,
+    *,
+    sealed_for_import: bool = False,
 ) -> dict[str, Any]:
     """Validate a bounded immutable content-run summary.
 
@@ -860,6 +870,8 @@ def _normalise_snapshot_summary(  # noqa: PLR0912, PLR0915
     validation.
     """
 
+    if allow_incomplete and sealed_for_import:
+        raise ValueError('resume and incremental-import policies are distinct')
     if not isinstance(raw, Mapping):
         raise ServiceException(message='collector API 题库快照摘要结构不正确')
     payload = _summary_payload(raw)
@@ -877,7 +889,9 @@ def _normalise_snapshot_summary(  # noqa: PLR0912, PLR0915
         if name in source and source[name] is not None
     ]
     complete = bool(complete_values) and all(_as_bool(value) for value in complete_values)
-    if not complete_values or (not complete and not allow_incomplete):
+    if sealed_for_import and complete_values and any(_as_bool(value) for value in complete_values) != complete:
+        raise ServiceException(message=f'教材 {textbook_external_id} 的完整标记互相矛盾')
+    if not complete_values or (not complete and not (allow_incomplete or sealed_for_import)):
         raise ServiceException(message=f'教材 {textbook_external_id} 的题库快照摘要未完成')
     if allow_incomplete and complete:
         raise ServiceException(message=f'教材 {textbook_external_id} 的题库快照已完整，不能作为中断断点')
@@ -911,7 +925,7 @@ def _normalise_snapshot_summary(  # noqa: PLR0912, PLR0915
     status = str(_pick(run, 'status', default=_pick(payload, 'status', default='')) or '').strip().lower()
     accepted_statuses = (
         {'success', 'completed'}
-        | ({'interrupted', 'failed', 'blocked'} if allow_incomplete else set())
+        | ({'interrupted', 'failed', 'blocked'} if allow_incomplete or sealed_for_import else set())
     )
     if status not in accepted_statuses:
         raise ServiceException(message=f'collector 运行 {run_id or ""} 未成功完成')
@@ -926,7 +940,7 @@ def _normalise_snapshot_summary(  # noqa: PLR0912, PLR0915
     if error_count is None:
         raise ServiceException(message=f'collector 运行 {run_id or ""} 包含采集错误或缺少错误计数')
     parsed_error_count = int(_as_int(error_count, field='error_count') or 0)
-    if not allow_incomplete and parsed_error_count != 0:
+    if not (allow_incomplete or sealed_for_import) and parsed_error_count != 0:
         raise ServiceException(message=f'collector 运行 {run_id or ""} 包含采集错误或缺少错误计数')
     if not _pick(run, 'finished_at', 'finishedAt', default=_pick(payload, 'finished_at', 'finishedAt')):
         raise ServiceException(message=f'collector 运行 {run_id or ""} 缺少完成时间')
@@ -964,6 +978,16 @@ def _normalise_snapshot_summary(  # noqa: PLR0912, PLR0915
         )
     if isinstance(scope, list):
         scope = {'textbookExternalIds': scope}
+    scope_identity = scope
+    if isinstance(scope_identity, str):
+        try:
+            scope_identity = json.loads(scope_identity)
+        except (TypeError, ValueError):
+            scope_identity = {}
+    if isinstance(scope_identity, Mapping):
+        namespace = _pick(scope_identity, 'sourceNamespace', 'source_namespace', default='zujuan:junior:math')
+        if namespace != 'zujuan:junior:math' or str(scope_identity.get('bankPath', 'czsx')) != 'czsx' or str(scope_identity.get('bankId', 2)) != '2':
+            raise ServiceException(message='Collector 快照的学科来源不受支持')
     if isinstance(scope, Mapping):
         # The summary route commonly exposes ``externalTextbookId`` at the
         # top level while keeping the run scope object broad.  Include that
@@ -1006,16 +1030,30 @@ def _normalise_snapshot_summary(  # noqa: PLR0912, PLR0915
         raise ServiceException(message=f'任务 {task_id} 教材 {textbook_external_id} 的 collector 运行 ID 无效') from exc
     if normalized_run_id <= 0:
         raise ServiceException(message=f'任务 {task_id} 教材 {textbook_external_id} 的 collector 运行 ID 无效')
+    from plugins.bank.service.run_coverage import normalise_run_coverage
+
+    sealed_evidence = (
+        scope_identity.get('sealedCoverageEvidence') if isinstance(scope_identity, Mapping) else None
+    )
+    coverage = normalise_run_coverage(
+        payload.get('coverage', sealed_evidence), normalized_run_id, str(textbook_external_id), _coerce_datetime(locked),
+    )
+    if sealed_evidence is not None and coverage != normalise_run_coverage(
+        sealed_evidence, normalized_run_id, str(textbook_external_id), _coerce_datetime(locked),
+    ):
+        raise ServiceException(message='Collector 返回的覆盖摘要与封存记录不一致')
     return {
         'run': run,
         'immutable': True,
-        'partial': allow_incomplete and not complete,
+        'partial': not complete,
         'incomplete': not complete,
         'snapshot_complete': complete,
         'snapshotComplete': complete,
         'counts': counts,
         'collector_run_id': normalized_run_id,
+        'snapshot_locked_at': _coerce_datetime(locked),
         'textbook_external_id': str(textbook_external_id),
+        'run_coverage': coverage,
         # Keep an optional server-provided hash for status projections, but
         # never derive one from an omitted/full row array.
         'snapshot_hash': _pick(
@@ -1040,10 +1078,91 @@ async def _read_snapshot_summary(run_id: int, textbook_external_id: str) -> dict
     return normalized
 
 
-def _normalise_snapshot(raw: Mapping[str, Any], task_id: int, textbook_external_id: str) -> dict[str, Any]:  # noqa: PLR0912, PLR0915
+def _normalise_catalog_rows(rows: list[Mapping[str, Any]], task_id: int, textbook_external_id: str) -> list[dict[str, Any]]:
+    """Validate a whole source tree once; callers may then use ancestor subsets."""
+    def row_scope(row: Mapping[str, Any]) -> str:
+        value = _pick(
+            row,
+            'textbook_external_id',
+            'textbookExternalId',
+            'externalTextbookId',
+            'textbook_id',
+            'textbookId',
+            default=textbook_external_id,
+        )
+        return str(value or '').strip()
+
+    def has_scope_field(row: Mapping[str, Any]) -> bool:
+        return any(
+            name in row
+            for name in (
+                'textbook_external_id',
+                'textbookExternalId',
+                'externalTextbookId',
+                'textbook_id',
+                'textbookId',
+            )
+        )
+
+    def row_provider(row: Mapping[str, Any]) -> str:
+        return str(_pick(row, 'provider', 'sourceProvider', 'source_provider', default='') or '').strip()
+
+    def row_int(row: Mapping[str, Any], *aliases: str, default: int = 0) -> int:
+        value = _pick(row, *aliases, default=default)
+        try:
+            return int(value or 0)
+        except (TypeError, ValueError) as exc:
+            raise ServiceException(message=f'任务 {task_id} 教材 {textbook_external_id} 快照数字字段无效') from exc
+
+    catalogs: list[dict[str, Any]] = []
+    catalog_ids: set[str] = set()
+    for row in rows:
+        external_id = str(_pick(row, 'catalog_external_id', 'catalogExternalId', 'externalNodeId', 'externalId', default='') or '').strip()
+        name = str(_pick(row, 'name', 'nodeName', 'node_name', 'catalogName', default='') or '').strip()
+        if not has_scope_field(row) or row_provider(row) != PROVIDER or row_scope(row) != str(textbook_external_id) or not _safe_external_id(external_id) or not name or external_id in catalog_ids:
+            raise ServiceException(message=f'任务 {task_id} 教材 {textbook_external_id} 包含无效或重复目录 ID')
+        catalog_ids.add(external_id)
+        parent = _pick(row, 'parent_external_id', 'parentExternalId', 'parentExternalNodeId')
+        parent = str(parent).strip() if parent not in (None, '') else None
+        if parent and (not _safe_external_id(parent) or parent == external_id):
+            raise ServiceException(message=f'任务 {task_id} 教材 {textbook_external_id} 的目录父 ID 不安全')
+        catalogs.append(
+            {
+                'external_id': external_id,
+                'parent_external_id': parent,
+                'node_level': _pick(row, 'node_level', 'nodeLevel', 'catalogLevel'),
+                'node_type': str(_pick(row, 'node_type', 'nodeType', default='other') or 'other')[:20],
+                'node_name': name[:300],
+                'source_url': _pick(row, 'source_url', 'sourceUrl'),
+                'sort_order': row_int(row, 'sort_order', 'sortOrder'),
+                'last_seen_at': _coerce_datetime(_pick(row, 'captured_at', 'capturedAt', 'observed_at', 'observedAt')),
+            }
+        )
+    for row in catalogs:
+        if row['parent_external_id'] and row['parent_external_id'] not in catalog_ids:
+            raise ServiceException(message=f'任务 {task_id} 教材 {textbook_external_id} 的目录父节点不在同一快照')
+    # Guard against a cyclic source tree.  Merely checking that each parent
+    # exists is insufficient and would make the formal tree impossible to
+    # traverse safely.
+    parent_by_catalog = {row['external_id']: row['parent_external_id'] for row in catalogs}
+    checked_parents: set[str] = set()
+    for catalog_id in parent_by_catalog:
+        seen_parents: set[str] = set()
+        cursor = catalog_id
+        while cursor and cursor not in checked_parents:
+            if cursor in seen_parents:
+                raise ServiceException(message=f'任务 {task_id} 教材 {textbook_external_id} 的目录树存在循环')
+            seen_parents.add(cursor)
+            cursor = parent_by_catalog.get(cursor)
+        checked_parents.update(seen_parents)
+
+    return catalogs
+
+
+def _normalise_snapshot(raw: Mapping[str, Any], task_id: int, textbook_external_id: str, *, sealed_for_import: bool = False) -> dict[str, Any]:  # noqa: PLR0912, PLR0915
     """Validate and normalize the collector's complete five-table snapshot."""
 
-    payload, run = _snapshot_header(raw, str(textbook_external_id))
+    payload, run = _snapshot_header(raw, str(textbook_external_id), sealed_for_import=sealed_for_import)
     run_id = _pick(run, 'id', 'runId', 'collectorRunId')
     if run_id is None:
         raise ServiceException(message=f'任务 {task_id} 教材 {textbook_external_id} 缺少 collector 运行 ID')
@@ -1155,45 +1274,8 @@ def _normalise_snapshot(raw: Mapping[str, Any], task_id: int, textbook_external_
         except (TypeError, ValueError) as exc:
             raise ServiceException(message=f'任务 {task_id} 教材 {textbook_external_id} 快照数字字段无效') from exc
 
-    catalogs: list[dict[str, Any]] = []
-    catalog_ids: set[str] = set()
-    for row in rows['catalogs']:
-        external_id = str(_pick(row, 'catalog_external_id', 'catalogExternalId', 'externalNodeId', 'externalId', default='') or '').strip()
-        name = str(_pick(row, 'name', 'nodeName', 'node_name', 'catalogName', default='') or '').strip()
-        if not has_scope_field(row) or row_provider(row) != PROVIDER or row_scope(row) != str(textbook_external_id) or not _safe_external_id(external_id) or not name or external_id in catalog_ids:
-            raise ServiceException(message=f'任务 {task_id} 教材 {textbook_external_id} 包含无效或重复目录 ID')
-        catalog_ids.add(external_id)
-        parent = _pick(row, 'parent_external_id', 'parentExternalId', 'parentExternalNodeId')
-        parent = str(parent).strip() if parent not in (None, '') else None
-        if parent and (not _safe_external_id(parent) or parent == external_id):
-            raise ServiceException(message=f'任务 {task_id} 教材 {textbook_external_id} 的目录父 ID 不安全')
-        catalogs.append(
-            {
-                'external_id': external_id,
-                'parent_external_id': parent,
-                'node_level': _pick(row, 'node_level', 'nodeLevel', 'catalogLevel'),
-                'node_type': str(_pick(row, 'node_type', 'nodeType', default='other') or 'other')[:20],
-                'node_name': name[:300],
-                'source_url': _pick(row, 'source_url', 'sourceUrl'),
-                'sort_order': row_int(row, 'sort_order', 'sortOrder'),
-                'last_seen_at': _coerce_datetime(_pick(row, 'captured_at', 'capturedAt', 'observed_at', 'observedAt')),
-            }
-        )
-    for row in catalogs:
-        if row['parent_external_id'] and row['parent_external_id'] not in catalog_ids:
-            raise ServiceException(message=f'任务 {task_id} 教材 {textbook_external_id} 的目录父节点不在同一快照')
-    # Guard against a cyclic source tree.  Merely checking that each parent
-    # exists is insufficient and would make the formal tree impossible to
-    # traverse safely.
-    parent_by_catalog = {row['external_id']: row['parent_external_id'] for row in catalogs}
-    for catalog_id in parent_by_catalog:
-        seen_parents: set[str] = set()
-        cursor = catalog_id
-        while parent_by_catalog.get(cursor):
-            if cursor in seen_parents:
-                raise ServiceException(message=f'任务 {task_id} 教材 {textbook_external_id} 的目录树存在循环')
-            seen_parents.add(cursor)
-            cursor = str(parent_by_catalog[cursor])
+    catalogs = _normalise_catalog_rows(rows['catalogs'], task_id, textbook_external_id)
+    catalog_ids = {row['external_id'] for row in catalogs}
 
     assets_by_question: dict[str, dict[str, dict[str, Any]]] = {}
     for asset in rows['assets']:
@@ -1441,11 +1523,29 @@ def _normalise_snapshot(raw: Mapping[str, Any], task_id: int, textbook_external_
         'counts': expected,
         'collector_run_id': normalized_run_id,
         'textbook_external_id': str(textbook_external_id),
+        'snapshot_complete': not sealed_for_import or _normalise_snapshot_summary(payload, task_id, textbook_external_id, sealed_for_import=True)['snapshot_complete'],
     }
 
 
 def _task_value(row: object, *names: str, default: Any = None) -> Any:
     return _pick(row, *names, default=default)
+
+
+def _uses_incremental_workflow(task: object) -> bool:
+    options = _task_value(task, 'options_json', 'optionsJson', default={})
+    if isinstance(options, str):
+        try:
+            options = json.loads(options)
+        except (TypeError, ValueError) as exc:
+            raise ServiceException(message='任务流程标记损坏，不能选择入库方式') from exc
+    if options is None:
+        return False
+    if not isinstance(options, Mapping):
+        raise ServiceException(message='任务流程标记损坏，不能选择入库方式')
+    version = options.get('workflowVersion', 1)
+    if isinstance(version, bool) or version not in (1, 2):
+        raise ServiceException(message='任务流程版本不受支持')
+    return version == 2
 
 
 def _positive_run_id(value: Any) -> int | None:
@@ -1586,8 +1686,10 @@ async def _load_task_and_scopes(
     return task, scopes
 
 
-async def _validate_task_snapshots(db: AsyncSession, task_id: int, expected_review_revision: int | None = None) -> tuple[QbSyncJob, list[QbSyncJobScope], list[dict[str, Any]]]:
+async def _validate_task_snapshots(db: AsyncSession, task_id: int, expected_review_revision: int | None = None, *, write_stack: AsyncExitStack | None = None) -> tuple[QbSyncJob, list[QbSyncJobScope], list[dict[str, Any]]]:
     task, scopes = await _load_task_and_scopes(db, task_id)
+    if _uses_incremental_workflow(task):
+        raise ServiceException(message='新版任务使用分批增量入库，不能执行旧版整批应用；增量入库正在重构中')
     from plugins.bank.entity.do.bank_do import QbQuestionTaskReview
     review = await db.get(QbQuestionTaskReview, task_id)
     excluded_ids = set(review.excluded_json) if review else set()
@@ -1637,6 +1739,8 @@ async def _validate_task_snapshots(db: AsyncSession, task_id: int, expected_revi
     # Re-read and lock both the task and every scope only after all remote and
     # asset work has completed. Any status, scope membership, identity or run
     # change during the unlocked phase fails closed before formal writes.
+    if write_stack is not None:
+        await write_stack.enter_async_context(source_write_lock(db))
     locked_task, locked_scopes = await _load_task_and_scopes(db, task_id, for_update=True)
     locked_review = await db.get(QbQuestionTaskReview, task_id, populate_existing=True)
     if (locked_review.revision if locked_review else 0) != review_revision:
@@ -1918,6 +2022,11 @@ class QuestionApplyService:
             'scopes': scope_statuses,
             'affectedTextbooks': affected,
         }
+        if _uses_incremental_workflow(task):
+            status.update(eligible=False, isCurrent=False, action='incremental', suggestedAction='incremental',
+                          eligibilityMessage='新版任务使用分批增量入库，增量入库正在重构中')
+            for item in scope_statuses:
+                item.update(eligible=False, isCurrent=False)
         # Return the nested projection too.  ``task_payload`` keeps unknown
         # fields, so this is backwards-compatible with clients that consumed
         # the former top-level fields.
@@ -1958,12 +2067,13 @@ class QuestionApplyService:
         expected_state_token: str | Mapping[str, str] | None = None,
         expected_review_revision: int | None = None,
     ) -> dict[str, Any]:
+        write_stack = AsyncExitStack()
         try:
             target_task_id = int(task_id)
             if expected_review_revision is None:
-                _task, _scopes, snapshots = await _validate_task_snapshots(db, target_task_id)
+                _task, _scopes, snapshots = await _validate_task_snapshots(db, target_task_id, write_stack=write_stack)
             else:
-                _task, _scopes, snapshots = await _validate_task_snapshots(db, target_task_id, expected_review_revision)
+                _task, _scopes, snapshots = await _validate_task_snapshots(db, target_task_id, expected_review_revision, write_stack=write_stack)
             keys = sorted({(str(_pick(snapshot['run'], 'provider', 'sourceProvider', default=PROVIDER)), snapshot['textbook_external_id']) for snapshot in snapshots})
             states: dict[str, QbQuestionApplyState] = {}
             scopes_by_textbook = {snapshot['textbook_external_id']: snapshot.get('scope') for snapshot in snapshots}
@@ -2130,9 +2240,11 @@ class QuestionApplyService:
                 'currentStateToken': response_token,
                 'stateTokens': response_token_map or None,
             }
-        except Exception:
+        except BaseException:
             await db.rollback()
             raise
+        finally:
+            await write_stack.aclose()
 
     @classmethod
     async def _apply_scope(cls, db: AsyncSession, snapshot: Mapping[str, Any], now: datetime) -> dict[str, dict[str, int]]:  # noqa: PLR0912, PLR0915
@@ -2140,7 +2252,7 @@ class QuestionApplyService:
         scope = snapshot['scope']
         local_textbook_id = _task_value(scope, 'local_textbook_id', 'localTextbookId', 'textbook_id', 'textbookId')
         textbook_query = select(QbTextbook).where(
-            QbTextbook.source_provider == PROVIDER,
+            QbTextbook.subject_id == 1, QbTextbook.source_provider == PROVIDER,
             QbTextbook.external_textbook_id == textbook_external_id,
         )
         textbook = (await db.execute(textbook_query)).scalars().first()
@@ -2151,7 +2263,7 @@ class QuestionApplyService:
         local_textbook_id = int(textbook.textbook_id)
         stats = _empty_stats()
 
-        catalog_rows = list((await db.execute(select(QbCatalogNode).where(QbCatalogNode.source_provider == PROVIDER))).scalars().all())
+        catalog_rows = list((await db.execute(select(QbCatalogNode).where(QbCatalogNode.subject_id == 1, QbCatalogNode.source_provider == PROVIDER))).scalars().all())
         catalogs_by_external = {str(row.external_node_id): row for row in catalog_rows if row.external_node_id}
         old_scope_catalogs = [row for row in catalog_rows if int(row.textbook_id) == local_textbook_id]
         target_catalogs = snapshot['catalogs']
@@ -2224,7 +2336,7 @@ class QuestionApplyService:
         scope_catalog_rows = [row for row in catalogs_by_external.values() if int(row.textbook_id) == local_textbook_id]
         scope_catalog_ids = {int(row.catalog_id) for row in scope_catalog_rows}
 
-        formal_questions = list((await db.execute(select(QbQuestion).where(QbQuestion.source_provider == PROVIDER))).scalars().all())
+        formal_questions = list((await db.execute(select(QbQuestion).where(QbQuestion.subject_id == 1, QbQuestion.source_provider == PROVIDER))).scalars().all())
         questions_by_external = {str(row.external_question_id): row for row in formal_questions if row.external_question_id}
         question_map: dict[str, QbQuestion] = {}
         question_fields = (

@@ -89,9 +89,8 @@ export function canDeleteSyncTask(value) {
 }
 
 /**
- * A resume always continues the task in place.  Interrupted tasks may expose
- * their normal checkpoint; blocked tasks require an explicit server-projected
- * resumeAvailable=true so a real challenge is never retried blindly.
+ * V2 refill creates a linked task from sealed partial observations. Legacy
+ * recovery retains its task ID; blocked recovery needs server confirmation.
  */
 export function canResumeSyncTask(taskOrStatus) {
   const status = normalizeSyncTaskStatus(
@@ -100,6 +99,9 @@ export function canResumeSyncTask(taskOrStatus) {
       : taskOrStatus,
     '',
   )
+  if (taskOrStatus?.workflowVersion === 2) {
+    return canDeleteSyncTask(status) && booleanValue(taskOrStatus.resumeAvailable, false)
+  }
   if (!['interrupted', 'blocked'].includes(status)) return false
   if (!taskOrStatus || typeof taskOrStatus !== 'object') return status === 'interrupted'
   const explicit = firstTaskField(taskOrStatus, ['resumeAvailable', 'resume_available'], undefined)
@@ -140,11 +142,36 @@ export function questionApplyVerb(task = {}) {
 }
 
 export function questionTaskMeaning(task = {}) {
+  if (task.workflowVersion === 2) return incrementalImportMeta(task).message
   if (normalizeSyncTaskStatus(task.status, '') === 'blocked' && task.resumeAvailable) return '已保留完整页断点，确认风控已解除后可续采'
   if (normalizeSyncTaskStatus(task.status, '') === 'interrupted') return '已有快照和断点保留，可断点续采；也可重试从头创建新任务'
   if (task.isCurrent || task.suggestedAction === 'alreadyApplied') return '已应用，当前正式题库'
   if (normalizeSyncTaskStatus(task.status, '') === 'completed') return '采集已完成，当前未作为正式题库'
   return '只抓取，未应用'
+}
+
+export function incrementalImportMeta(task = {}) {
+  const status = task.incrementalImport?.status
+  if (status === 'queued') return { type: 'info', label: '等待入库', message: '后台将准备本次封存成果，页面可以关闭。' }
+  if (status === 'preparing') return { type: 'warning', label: '入库准备中', message: '后台正在读取封存成果并检查题目，尚未检查完成的题目不会写入正式题库。' }
+  if (status === 'running') return { type: 'warning', label: '分批入库中', message: '合格批次逐步合并，已提交的成果会保留。' }
+  if (status === 'completed') return { type: 'success', label: '本次入库完成', message: '本次合格成果已处理完毕；这不表示已覆盖网站全部题目。' }
+  if (status === 'partial') return { type: 'warning', label: '部分成果已保留', message: '本次成果处理完毕，合格部分已保留；仍有采集缺口或暂缓题目。' }
+  if (status === 'failed') return { type: 'danger', label: '入库中断', message: '已提交的批次保留，剩余题目尚未入库。' }
+  const intake = task.importIntake?.status
+  if (intake === 'probing') return { type: 'warning', label: '封存核验中', message: '后台正在核对本次运行身份和题目数量，核验通过后自动分批入库。' }
+  if (intake === 'retry') return { type: 'warning', label: '核验等待重试', message: '本次核验未通过，后台将在预约时间再次检查。' }
+  if (['blocked', 'discarded'].includes(intake)) return { type: 'danger', label: '核验待处理', message: '本次成果暂未提交入库，请根据下面的原因检查后重试核验。' }
+  if (intake === 'pending' || task.awaitingImportIntake) return { type: 'info', label: '等待封存核验', message: '采集已结束，后台将核验本次成果并自动提交入库，页面可以关闭。' }
+  return { type: 'info', label: '尚未入库', message: '采集结束后，后台自动核验并将合格成果分批入库。' }
+}
+
+export function isActiveIncrementalImport(task = {}) {
+  return ['queued', 'preparing', 'running'].includes(task.incrementalImport?.status)
+}
+
+export function isActiveImportIntake(task = {}) {
+  return task.awaitingImportIntake === true || ['pending', 'probing', 'retry'].includes(task.importIntake?.status)
 }
 
 const normalizeApplyScope = (item, index = 0) => {
@@ -802,4 +829,16 @@ export function syncTaskErrorMessage(error, fallback = '任务请求失败，请
 export function formatTaskTime(value) {
   if (!hasValue(value)) return '—'
   return String(value).replace('T', ' ').replace(/\.\d+([+-]\d\d:\d\d|Z)?$/, '')
+}
+
+export function formatImportTime(value) {
+  if (!hasValue(value)) return '—'
+  const text = String(value)
+  // Import/intake API dates carry a timezone. Keep legacy task-local dates
+  // on their established display path rather than guessing their timezone.
+  if (!/(Z|[+-]\d{2}:\d{2})$/.test(text)) return formatTaskTime(value)
+  const parsed = new Date(text)
+  if (Number.isNaN(parsed.getTime())) return '—'
+  const pad = number => String(number).padStart(2, '0')
+  return `${parsed.getFullYear()}-${pad(parsed.getMonth() + 1)}-${pad(parsed.getDate())} ${pad(parsed.getHours())}:${pad(parsed.getMinutes())}:${pad(parsed.getSeconds())}`
 }

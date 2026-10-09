@@ -174,7 +174,7 @@ function readRunAsset(dbPath, runId, contentSha256, options = {}) {
   try {
     const run = resolveContentRun(db, runId);
     assertSnapshotTables(db, { all: true });
-    assertApplyableSnapshotRun(db, run);
+    assertApplyableSnapshotRun(db, run, { sealedForImport: options.sealedForImport === true });
     const { textbookExternalId } = resolveSnapshotTextbook(db, run, requestedTextbookId);
     const hashValues = digest === digest.toUpperCase()
       ? [digest]

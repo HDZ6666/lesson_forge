@@ -15,6 +15,8 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from plugins.bank.source_write_contract import SOURCE_WRITE_LOCK_NAME
+
 MAX_MYSQL_BIGINT = 9_223_372_036_854_775_807
 MAX_BATCH_NO_LENGTH = 128
 ZIP_FILE_TYPE_MASK = 0o170000
@@ -479,9 +481,13 @@ def verify_package(package: str | os.PathLike[str]) -> VerifiedPackage:
 @dataclass
 class PublisherConfig:
     asset_root: Path = Path(os.environ.get('BANK_ASSET_ROOT') or 'data/bank')
-    lock_name: str = 'ruoyi:bank:dataset-publish'
+    lock_name: str = SOURCE_WRITE_LOCK_NAME
     lock_timeout: int = 30
     stale_after_seconds: int = 24 * 3600
+
+    def __post_init__(self) -> None:
+        if self.lock_name != SOURCE_WRITE_LOCK_NAME:
+            raise PackageError('离线发布必须使用统一题库写入锁，不能指定其他锁名')
 
 
 class MySQLPublisher:
@@ -529,14 +535,14 @@ class MySQLPublisher:
             pass
 
     def acquire_lock(self) -> None:
-        row = self._fetchone('SELECT GET_LOCK(%s, %s) AS acquired', (self.config.lock_name, self.config.lock_timeout))
+        row = self._fetchone('SELECT GET_LOCK(%s, %s) AS acquired', (SOURCE_WRITE_LOCK_NAME, self.config.lock_timeout))
         value = next(iter(row.values())) if row else 0
         if int(value or 0) != 1:
             raise PackageError('无法取得题库发布锁')
 
     def release_lock(self) -> None:
         try:
-            self._execute('SELECT RELEASE_LOCK(%s)', (self.config.lock_name,))
+            self._execute('SELECT RELEASE_LOCK(%s)', (SOURCE_WRITE_LOCK_NAME,))
         except Exception:
             pass
 
@@ -667,6 +673,7 @@ class MySQLPublisher:
                 (outgoing or None, bid),
             )
             self._commit()
+            self._reset_candidate_readiness(_next_name("qb_question", bid))
             sql = build_rename_sql(outgoing, bid)
             self._execute(sql)
             self._commit()
@@ -715,6 +722,7 @@ class MySQLPublisher:
                     (request_id, current),
                 )
                 self._commit()
+                self._reset_candidate_readiness(_old_name("qb_question", target))
                 self._execute(build_rename_sql(current, request_id, rollback_from_old=target))
                 self._commit()
             else:
@@ -736,6 +744,7 @@ class MySQLPublisher:
                     self._commit()
                 finally:
                     shutil.rmtree(verified.root, ignore_errors=True)
+                self._reset_candidate_readiness(_next_name("qb_question", request_id))
                 self._execute(build_rename_sql(current, request_id))
                 self._commit()
             current_meta = self._current_meta()
@@ -948,6 +957,20 @@ class MySQLPublisher:
     def _table_exists(self, name: str) -> bool:
         return bool(self._fetchone('SHOW TABLES LIKE %s', (name,)))
 
+    def _reset_candidate_readiness(self, table: str) -> None:
+        # Derived facts stay outside the atomic dataset table group. Reset
+        # revisions BEFORE RENAME, including pre-migration rollback tables,
+        # so reused IDs cannot inherit facts from another dataset.
+        if not re.fullmatch(r'qb_question_(?:next|old)_[0-9]+', table):
+            raise PackageError('无效的题干检查候选表')
+        if not self._table_exists('qb_question_readiness'):
+            return  # Compatibility with the pre-readiness standalone schema.
+        columns = self._fetchall(f'SHOW COLUMNS FROM {_qi(table)}')
+        if not any(row.get('Field') == 'readiness_revision' for row in columns):
+            self._execute(f'ALTER TABLE {_qi(table)} ADD COLUMN readiness_revision CHAR(32) NULL')
+        self._execute(f'UPDATE {_qi(table)} SET readiness_revision=NULL')
+        self._commit()
+
     def _build_candidate(self, bid: int, package: VerifiedPackage) -> dict[str, Any]:
         next_names = {base: _next_name(base, bid) for base in DATASET_TABLES}
         for name in next_names.values():
@@ -975,24 +998,24 @@ class MySQLPublisher:
             # data imported by other providers stay visible in the candidate.
             self._deactivate_provider_rows(names, provider)
             for row in self._fetchall(
-                f'SELECT source_provider,external_version_id,version_id FROM {_qi(names["qb_textbook_version"])}'
+                f'SELECT source_provider,external_version_id,version_id FROM {_qi(names["qb_textbook_version"])} WHERE subject_id=1'
             ):
                 if row['external_version_id'] is not None:
                     maps['version'][f'{row["source_provider"]}\0{row["external_version_id"]}'] = int(row['version_id'])
             for row in self._fetchall(
-                f'SELECT source_provider,external_textbook_id,textbook_id FROM {_qi(names["qb_textbook"])}'
+                f'SELECT source_provider,external_textbook_id,textbook_id FROM {_qi(names["qb_textbook"])} WHERE subject_id=1'
             ):
                 if row['external_textbook_id'] is not None:
                     maps['textbook'][f'{row["source_provider"]}\0{row["external_textbook_id"]}'] = int(
                         row['textbook_id']
                     )
             for row in self._fetchall(
-                f'SELECT source_provider,external_node_id,catalog_id FROM {_qi(names["qb_catalog_node"])}'
+                f'SELECT source_provider,external_node_id,catalog_id FROM {_qi(names["qb_catalog_node"])} WHERE subject_id=1'
             ):
                 if row['external_node_id'] is not None:
                     maps['catalog'][f'{row["source_provider"]}\0{row["external_node_id"]}'] = int(row['catalog_id'])
             for row in self._fetchall(
-                f'SELECT source_provider,external_question_id,question_id FROM {_qi(names["qb_question"])}'
+                f'SELECT source_provider,external_question_id,question_id FROM {_qi(names["qb_question"])} WHERE subject_id=1'
             ):
                 if row['external_question_id'] is not None:
                     maps['question'][f'{row["source_provider"]}\0{row["external_question_id"]}'] = int(
@@ -1130,7 +1153,7 @@ class MySQLPublisher:
         """Deactivate missing identity rows without touching other providers."""
         for target in ('qb_textbook_version', 'qb_textbook', 'qb_catalog_node', 'qb_question'):
             self._execute(
-                f"UPDATE {_qi(names[target])} SET status='1' WHERE source_provider=%s",
+                f"UPDATE {_qi(names[target])} SET status='1' WHERE source_provider=%s AND subject_id=1",
                 (provider,),
             )
 
@@ -1139,7 +1162,7 @@ class MySQLPublisher:
         for relation in ('qb_question_catalog', 'qb_question_tag', 'qb_question_asset'):
             self._execute(
                 f'INSERT INTO {_qi(names[relation])} SELECT r.* FROM {_qi(relation)} r '
-                f'JOIN {_qi("qb_question")} q ON q.question_id=r.question_id WHERE q.source_provider<>%s',
+                f'JOIN {_qi("qb_question")} q ON q.question_id=r.question_id WHERE (q.source_provider<>%s OR q.subject_id<>1)',
                 (provider,),
             )
 
@@ -1354,7 +1377,7 @@ class MySQLPublisher:
         provider = str(manifest['sourceProvider'])
         for base in SNAPSHOT_TABLES:
             active_clause = (
-                f" WHERE {_qi('status')}='0' AND {_qi('source_provider')}=%s"
+                f" WHERE {_qi('status')}='0' AND {_qi('source_provider')}=%s AND subject_id=1"
                 if base in {'qb_textbook_version', 'qb_textbook', 'qb_catalog_node', 'qb_question'}
                 else ''
             )
@@ -1362,7 +1385,7 @@ class MySQLPublisher:
             if base in {'qb_question_catalog', 'qb_question_tag', 'qb_question_asset'}:
                 count_sql = (
                     f'SELECT COUNT(*) AS n FROM {_qi(names[base])} r JOIN {_qi(names["qb_question"])} q '
-                    f"ON q.question_id=r.question_id WHERE q.source_provider=%s AND q.status='0'"
+                    f"ON q.question_id=r.question_id WHERE q.source_provider=%s AND q.subject_id=1 AND q.status='0'"
                 )
                 row = self._fetchone(count_sql, (provider,))
             else:
@@ -1373,19 +1396,19 @@ class MySQLPublisher:
                 report['blocking'].append(f'count:{base}')
         checks = (
             (
-                f'SELECT 1 FROM {_qi(names["qb_textbook_version"])} WHERE {_qi("external_version_id")} IS NOT NULL GROUP BY {_qi("source_provider")},{_qi("external_version_id")} HAVING COUNT(*)>1 LIMIT 1',
+                f'SELECT 1 FROM {_qi(names["qb_textbook_version"])} WHERE {_qi("external_version_id")} IS NOT NULL GROUP BY subject_id,{_qi("source_provider")},{_qi("external_version_id")} HAVING COUNT(*)>1 LIMIT 1',
                 'duplicate:version',
             ),
             (
-                f'SELECT 1 FROM {_qi(names["qb_textbook"])} WHERE {_qi("external_textbook_id")} IS NOT NULL GROUP BY {_qi("source_provider")},{_qi("external_textbook_id")} HAVING COUNT(*)>1 LIMIT 1',
+                f'SELECT 1 FROM {_qi(names["qb_textbook"])} WHERE {_qi("external_textbook_id")} IS NOT NULL GROUP BY subject_id,{_qi("source_provider")},{_qi("external_textbook_id")} HAVING COUNT(*)>1 LIMIT 1',
                 'duplicate:textbook',
             ),
             (
-                f'SELECT 1 FROM {_qi(names["qb_catalog_node"])} WHERE {_qi("external_node_id")} IS NOT NULL GROUP BY {_qi("source_provider")},{_qi("external_node_id")} HAVING COUNT(*)>1 LIMIT 1',
+                f'SELECT 1 FROM {_qi(names["qb_catalog_node"])} WHERE {_qi("external_node_id")} IS NOT NULL GROUP BY subject_id,{_qi("source_provider")},{_qi("external_node_id")} HAVING COUNT(*)>1 LIMIT 1',
                 'duplicate:catalog',
             ),
             (
-                f'SELECT 1 FROM {_qi(names["qb_question"])} WHERE {_qi("external_question_id")} IS NOT NULL GROUP BY {_qi("source_provider")},{_qi("external_question_id")} HAVING COUNT(*)>1 LIMIT 1',
+                f'SELECT 1 FROM {_qi(names["qb_question"])} WHERE {_qi("external_question_id")} IS NOT NULL GROUP BY subject_id,{_qi("source_provider")},{_qi("external_question_id")} HAVING COUNT(*)>1 LIMIT 1',
                 'duplicate:question',
             ),
             (

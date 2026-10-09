@@ -2,13 +2,14 @@
   <div class="app-container browse-page">
     <div class="browse-header">
       <h2>教材浏览</h2>
-      <el-button link type="primary" :icon="Refresh" :loading="loadingQuestions" @click="loadQuestions">刷新</el-button>
+      <el-button link type="primary" :icon="Refresh" :loading="loadingQuestions || loadingCatalog" @click="refreshBrowse">刷新</el-button>
     </div>
 
     <el-alert v-if="errorMessage" class="state-alert" type="error" :closable="false" show-icon>{{ errorMessage }}</el-alert>
 
     <div class="workspace">
       <aside class="catalog-panel" :class="{ 'is-mobile-collapsed': mobileCatalogCollapsed }" aria-label="教材目录">
+        <SubjectSelect v-model="selectedSubjectId" :include-disabled="false" @change="handleSubjectChange" />
         <div class="book-selectors">
           <el-select
             v-model="selectedVersionId"
@@ -73,7 +74,7 @@
             <template #default="{ data }">
               <div class="catalog-node" :title="data.nodeName">
                 <span class="catalog-node-name">{{ data.nodeName }}</span>
-                <span v-if="data.descendantQuestionCount || data.directQuestionCount" class="catalog-node-count">{{ data.descendantQuestionCount || data.directQuestionCount }}</span>
+                <span v-if="data.descendantUsableQuestionCount" class="catalog-node-count">{{ data.descendantUsableQuestionCount }}</span>
               </div>
             </template>
           </el-tree>
@@ -87,6 +88,11 @@
           <button class="main-tab is-disabled" type="button" disabled title="上好课功能尚未接入">上好课</button>
         </nav>
 
+        <el-alert v-if="selectedTextbook && (selectedTextbook.uncheckedQuestionCount || selectedTextbook.unusableQuestionCount)"
+          class="state-alert" type="info" :closable="false" show-icon>
+          仅展示已检查可用题目；当前教材还有 {{ selectedTextbook.uncheckedQuestionCount ?? 0 }} 道待检查、
+          {{ selectedTextbook.unusableQuestionCount ?? 0 }} 道检查不通过。后台检查后点击“刷新”查看。
+        </el-alert>
         <section class="filter-surface" aria-label="题目筛选">
           <div class="filter-row">
             <span class="filter-label">场景：</span>
@@ -210,17 +216,18 @@
         <section v-if="detail.answerHtml" class="detail-section"><h3>答案</h3><div class="rich-text" v-html="safeDetailHtml(detail.answerHtml)" /></section>
         <section v-if="detail.analysisHtml" class="detail-section"><h3>解析</h3><div class="rich-text" v-html="safeDetailHtml(detail.analysisHtml)" /></section>
         <section class="detail-section"><h3>引用试卷</h3><el-empty v-if="!references.length" :image-size="48" description="暂无引用记录" /><ul v-else class="reference-list"><li v-for="(paper, index) in references" :key="paper.id || paper.paperId || index">{{ paper.paperName || paper.name || paper.title || paper }}</li></ul></section>
-        <section class="detail-section"><h3>素材</h3><el-empty v-if="!assets.length" :image-size="48" description="暂无素材" /><div v-else class="asset-list"><div v-for="asset in assets" :key="asset.assetKey" class="asset-item"><el-icon><Document /></el-icon><a v-if="resolveAsset(asset)" :href="resolveAsset(asset)" target="_blank" rel="noopener noreferrer">{{ asset.fileName || asset.assetKey }}</a><span v-else>{{ asset.fileName || asset.assetKey }}</span><small>{{ resolveAsset(asset) ? (asset.assetType || asset.mimeType || '素材') : '未下载' }}</small></div></div></section>
+        <section class="detail-section"><h3>素材</h3><el-empty v-if="!assets.length" :image-size="48" description="暂无素材" /><div v-else class="asset-list"><div v-for="asset in assets" :key="asset.assetKey" class="asset-item"><el-icon><Document /></el-icon><a v-if="resolveAsset(asset)" :href="resolveAsset(asset)" target="_blank" rel="noopener noreferrer">{{ asset.fileName || asset.assetKey }}</a><span v-else>{{ asset.fileName || asset.assetKey }}</span><small>{{ assetStore.label(asset) }}</small><el-button v-if="assetStore.state(asset).status === 'failed'" link type="primary" @click="assetStore.retry(asset)">重试加载</el-button></div></div></section>
       </div>
     </el-drawer>
   </div>
 </template>
 
 <script setup>
+import SubjectSelect from "../../components/SubjectSelect.vue"
 import { computed, getCurrentInstance, nextTick, onMounted, reactive, ref, watch } from 'vue'
 import { ArrowDown, Collection, Document, Refresh, Search, View } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
-import { getQuestion, getQuestionAsset, listCatalog, listQuestionAssets, listQuestions, listTextbooks, listVersions } from '../../api/bank'
+import { getQuestion, getQuestionAsset, getTextbook, listCatalog, listQuestionAssets, listQuestions, listTextbooks, listVersions } from '../../api/bank'
 import { sanitizeHtml } from '../../utils/html'
 import { useQuestionAssetStore } from '../../utils/assets'
 import { unwrapList, unwrapPage, unwrapResponse, unwrapTree } from '../../utils/response'
@@ -249,11 +256,15 @@ const {
   qb_term,
 } = proxy.useDict('qb_category', 'qb_difficulty', 'qb_exam_method', 'qb_grade', 'qb_question_type', 'qb_scene', 'qb_term')
 
+let versionsReadRevision = 0
+let textbooksReadRevision = 0
+let catalogsReadRevision = 0
 const versions = ref([])
 const textbooks = ref([])
 const catalogTree = ref([])
 const questions = ref([])
 const total = ref(0)
+const selectedSubjectId = ref(undefined)
 const selectedVersionId = ref(undefined)
 const loadingCatalog = ref(false)
 const loadingQuestions = ref(false)
@@ -319,68 +330,92 @@ function runFilterChange() {
   loadQuestions()
 }
 
+async function handleSubjectChange() {
+  versionsReadRevision += 1
+  versions.value = []
+  await handleVersionChange(undefined)
+  await loadVersions()
+}
+
 async function loadVersions() {
+  const revision = ++versionsReadRevision
   loadingQuestions.value = true
   try {
-    const result = await listVersions({ pageNum: 1, pageSize: 100, status: '0' })
+    const result = await listVersions({ subjectId: selectedSubjectId.value, pageNum: 1, pageSize: 100, status: '0' })
+    if (revision !== versionsReadRevision) return
     versions.value = unwrapList(result)
-    if (versions.value.length) {
-      selectedVersionId.value = idOf(versions.value[0], 'versionId')
-      await handleVersionChange(selectedVersionId.value)
-    }
+    if (versions.value.length) await handleVersionChange(idOf(versions.value[0], 'versionId'))
   } catch (error) {
-    setError(error, '版本加载失败，请稍后重试')
+    if (revision === versionsReadRevision) setError(error, '版本加载失败，请稍后重试')
   } finally {
-    loadingQuestions.value = false
+    if (revision === versionsReadRevision) loadingQuestions.value = false
   }
 }
 
 async function handleVersionChange(versionId) {
+  const revision = ++textbooksReadRevision
+  catalogsReadRevision += 1; questionRequestId.value += 1
+  loadingCatalog.value = false; loadingQuestions.value = false
   selectedVersionId.value = versionId || undefined
-  query.textbookId = undefined
-  resetBrowseFilters(query)
-  query.textbookId = undefined
-  textbooks.value = []
-  catalogTree.value = []
-  expandedCatalogKeys.value = []
-  questions.value = []
-  total.value = 0
+  resetBrowseFilters(query); query.textbookId = undefined
+  textbooks.value = []; catalogTree.value = []; expandedCatalogKeys.value = []
+  questions.value = []; total.value = 0
   if (!versionId) return
   try {
     const result = await listTextbooks({ versionId, pageNum: 1, pageSize: 100, status: '0' })
+    if (revision !== textbooksReadRevision) return
     textbooks.value = unwrapList(result)
-    if (textbooks.value.length) {
-      await handleTextbookChange(idOf(textbooks.value[0], 'textbookId'))
-    }
+    if (textbooks.value.length) await handleTextbookChange(idOf(textbooks.value[0], 'textbookId'))
   } catch (error) {
-    setError(error, '教材加载失败，请稍后重试')
+    if (revision === textbooksReadRevision) setError(error, '教材加载失败，请稍后重试')
   }
 }
 
-async function handleTextbookChange(textbookId) {
-  resetBrowseFilters(query)
-  query.textbookId = textbookId || undefined
-  catalogTree.value = []
-  expandedCatalogKeys.value = []
-  questions.value = []
-  total.value = 0
-  if (!textbookId) return
+async function refreshBrowse() {
+  const textbookId = query.textbookId
+  if (!textbookId) return loadQuestions()
+  const revision = ++catalogsReadRevision
   loadingCatalog.value = true
-  errorMessage.value = ''
+  const reloadCoverage = async () => {
+    try {
+      const [bookResult, treeResult] = await Promise.all([getTextbook(textbookId), listCatalog({ textbookId })])
+      if (revision !== catalogsReadRevision || query.textbookId !== textbookId) return
+      const book = unwrapResponse(bookResult)
+      textbooks.value = textbooks.value.map((item) => String(idOf(item, 'textbookId')) === String(textbookId) ? book : item)
+      catalogTree.value = unwrapTree(treeResult)
+    } catch (error) {
+      if (revision === catalogsReadRevision) setError(error, '教材覆盖刷新失败，请稍后重试')
+    } finally {
+      if (revision === catalogsReadRevision) loadingCatalog.value = false
+    }
+  }
+  await Promise.all([reloadCoverage(), loadQuestions()])
+}
+
+async function handleTextbookChange(textbookId) {
+  const revision = ++catalogsReadRevision
+  questionRequestId.value += 1; loadingQuestions.value = false
+  resetBrowseFilters(query); query.textbookId = textbookId || undefined
+  catalogTree.value = []; expandedCatalogKeys.value = []; questions.value = []; total.value = 0
+  if (!textbookId) { loadingCatalog.value = false; return }
+  loadingCatalog.value = true; errorMessage.value = ''
   try {
     const result = await listCatalog({ textbookId })
+    if (revision !== catalogsReadRevision) return
     catalogTree.value = unwrapTree(result)
     const rootId = firstCatalogId(catalogTree.value)
     expandedCatalogKeys.value = rootId === undefined ? [] : [rootId]
     query.catalogId = undefined
     await nextTick()
+    if (revision !== catalogsReadRevision) return
     catalogRef.value?.setCurrentKey(undefined)
   } catch (error) {
+    if (revision !== catalogsReadRevision) return
     setError(error, '目录加载失败，请稍后重试')
   } finally {
-    loadingCatalog.value = false
+    if (revision === catalogsReadRevision) loadingCatalog.value = false
   }
-  await loadQuestions()
+  if (revision === catalogsReadRevision) await loadQuestions()
 }
 
 function handleCatalogChange(node) {

@@ -28,6 +28,7 @@ __pycache__/
 *$py.class
 .Python
 .venv/
+.venv
 venv/
 ENV/
 env.bak/
@@ -71,6 +72,7 @@ cython_debug/
 
 # Node, bundler, and package-manager caches (lockfiles stay tracked)
 node_modules/
+node_modules
 .npm/
 .yarn/
 .pnp.*

@@ -8,6 +8,7 @@
  */
 
 const process = require('node:process');
+const path = require('node:path');
 
 const { StopCrawlError } = require('../shared/errors.cjs');
 const {
@@ -57,6 +58,10 @@ const {
 } = require('../storage/metadata_store.cjs');
 const { saveRawHtml } = require('../storage/raw_pages.cjs');
 const { createProcessEventEmitter } = require('../jobs/events.cjs');
+const { assertMathSource } = require('../sources/registry.cjs');
+const { SourceControl } = require('../policies/source_control.cjs');
+const { SourceBudget } = require('../policies/source_budget.cjs');
+const { ResourceGuard } = require('../policies/resource_guard.cjs');
 
 async function readVersionsFromPage(page, sourceUrl) {
   const raw = await page.evaluate(() => {
@@ -136,6 +141,9 @@ async function waitForTextbookList(page, { previousSignature, allowUnchanged, ti
 
 async function fetchTextbooksForVersion(page, version, options) {
   const requestUrl = assertAllowedUrl(buildChapterTextbooksUrl(version, options), ALLOWED_PAGE_HOSTS);
+  options.sourceControl?.assertAllowed();
+  options.resourceGuard?.assertAllowed();
+  options.sourceBudget?.request();
   const payload = await page.evaluate(async (href) => {
     try {
       const response = await fetch(href, {
@@ -145,11 +153,12 @@ async function fetchTextbooksForVersion(page, version, options) {
           'X-Requested-With': 'XMLHttpRequest',
         },
       });
-      return { status: response.status, text: await response.text(), error: null };
+      return { status: response.status, headers: Object.fromEntries(response.headers), text: await response.text(), error: null };
     } catch (error) {
       return { status: 0, text: '', error: String(error && error.message ? error.message : error) };
     }
   }, requestUrl);
+  options.sourceControl?.observe(payload.status, payload.headers);
   if (payload.error) throw new Error(`教材列表接口失败：${payload.error}`);
   if ([401, 403].includes(payload.status)) {
     throw new StopCrawlError(`HTTP ${payload.status}，任务已熔断。`, `http_${payload.status}`);
@@ -157,6 +166,7 @@ async function fetchTextbooksForVersion(page, version, options) {
   if (payload.status >= 400) throw new Error(`教材列表接口返回 HTTP ${payload.status}`);
   const protection = classifyHtmlProtection(payload.text);
   if (protection.terminalBlock || (protection.transientChallenge && !protection.hasContent)) {
+    options.sourceControl?.requireManual(protectionStopMessage(protection));
     throw new StopCrawlError(protectionStopMessage(protection), 'challenge');
   }
   const textbooks = parseTextbooksFromApiHtml(payload.text, {
@@ -196,6 +206,7 @@ async function readBootstrapChapter(page) {
 }
 
 async function runDiscovery(options) {
+  assertMathSource(options);
   if (!options.acknowledgeSourcePolicy) {
     throw new Error(
       '运行前必须传 --acknowledge-source-policy，确认已核对来源站规则、授权范围和内容使用边界。',
@@ -206,6 +217,11 @@ async function runDiscovery(options) {
   ensureDir(options.dataDir);
   ensureDir(options.profileDir);
   const store = new MetadataStore(options.dbPath);
+  options.sourceControl = new SourceControl(options.dbPath);
+  options.sourceBudget = new SourceBudget(options.dbPath);
+  options.resourceGuard = new ResourceGuard({ paths: {
+    database: path.dirname(options.dbPath), data: options.dataDir, profile: options.profileDir,
+  } });
   let releaseLock;
   try {
     releaseLock = acquireLock(`${options.dbPath}.lock`);
@@ -248,6 +264,10 @@ async function runDiscovery(options) {
   try {
     console.log(`[启动] metadata-run=${runId}，数据库：${options.dbPath}`);
     events.emit('metadata_run_created', { runId });
+    options.sourceControl.assertAllowed();
+    options.resourceGuard.assertAllowed();
+    options.sourceBudget.startRun(`metadata:${runId}`, 'metadata');
+    options.sourceBudget.startTiming();
     applyInitialChromeMode(options);
     console.log(`[环境] ${describeChromeMode(options)}，入口 ${options.seedUrl}`);
     const boot = async () => {
@@ -388,6 +408,7 @@ async function runDiscovery(options) {
     } catch {}
     throw error;
   } finally {
+    options.sourceBudget.stopTiming();
     await closeCollectorContext(context);
     process.removeListener('SIGINT', onSigint);
     process.removeListener('SIGTERM', onSigterm);

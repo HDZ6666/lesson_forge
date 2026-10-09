@@ -24,6 +24,9 @@ const ORPHAN_HEARTBEAT_MS = 3 * 60 * 1000;
 const BLOCKED_ERROR_CODES = new Set([
   'verification_required', 'waiting_verification', 'json_html', 'http_401', 'http_403',
   'robots_disallowed', 'protection_block', 'blocked',
+  'source_verification', 'source_cooldown',
+  'source_budget',
+  'resource_pressure',
 ]);
 
 module.exports = {

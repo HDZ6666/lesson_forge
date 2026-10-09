@@ -226,9 +226,11 @@ async def test_catalog_list_injects_direct_and_descendant_counts(monkeypatch: py
         hasNext=False,
     )
     monkeypatch.setattr(BankDao, 'list_catalogs', AsyncMock(return_value=page))
-    nodes = [_catalog(1, 3), SimpleNamespace(catalog_id=2, textbook_id=3, parent_id=1)]
-    monkeypatch.setattr(BankDao, 'get_catalog_nodes', AsyncMock(return_value=nodes))
-    monkeypatch.setattr(BankDao, 'catalog_question_counts', AsyncMock(return_value={2: 4}))
+    from plugins.bank.service import coverage_queries
+    monkeypatch.setattr(coverage_queries, 'catalog_coverage', AsyncMock(return_value={
+        1: {'directQuestionCount': 0, 'descendantQuestionCount': 4},
+        2: {'directQuestionCount': 4, 'descendantQuestionCount': 4},
+    }))
 
     result = await BankService.list_catalogs(db, CatalogPageQueryModel(textbookId=3))
     assert result.rows[0]['descendantQuestionCount'] == CATALOG_QUESTION_COUNT
@@ -299,7 +301,8 @@ async def test_catalog_tree_defaults_to_active_and_management_can_include_disabl
         return nodes
 
     monkeypatch.setattr(BankDao, 'get_catalog_nodes', get_nodes)
-    monkeypatch.setattr(BankDao, 'catalog_question_counts', AsyncMock(return_value={}))
+    from plugins.bank.service import coverage_queries
+    monkeypatch.setattr(coverage_queries, 'catalog_coverage', AsyncMock(return_value={}))
     await BankService.catalog_tree(db, 3)
     await BankService.catalog_tree(db, 3, include_disabled=True)
     assert calls == ['0', None]
@@ -336,5 +339,24 @@ def test_publisher_deactivates_only_current_provider_and_copies_other_relations(
     assert all(args == ('zujuan',) for _, args in deactivation)
     relation_copies = [(sql, args) for sql, args in publisher.sql if sql.startswith('INSERT')]
     assert len(relation_copies) == RELATION_TABLE_COUNT
-    assert all('WHERE q.source_provider<>%s' in sql for sql, _ in relation_copies)
+    assert all('q.source_provider<>%s OR q.subject_id<>1' in sql for sql, _ in relation_copies)
+    assert all('AND subject_id=1' in sql for sql, _ in deactivation)
     assert all(args == ('zujuan',) for _, args in relation_copies)
+
+
+def test_browse_permission_can_refresh_book_coverage_without_write_permission(monkeypatch):
+    from common.aspect.interface_auth import CheckUserInterfaceAuth
+    from common.context import RequestContext
+    from exceptions.exception import PermissionException
+    from utils.dependency_util import DependencyUtil
+
+    monkeypatch.setattr(DependencyUtil, 'check_exclude_routes', lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(RequestContext, 'get_current_user', lambda: SimpleNamespace(permissions=['bank:browse:list']))
+
+    def auth(path, method):
+        route = next(row for row in bank_controller.routes if row.path == path and method in row.methods)
+        return next(item.dependency for item in route.dependencies if isinstance(item.dependency, CheckUserInterfaceAuth))
+
+    assert auth('/bank/textbook/{textbook_id}', 'GET')(None) is True
+    with pytest.raises(PermissionException):
+        auth('/bank/textbook', 'PUT')(None)

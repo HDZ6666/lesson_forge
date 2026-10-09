@@ -55,3 +55,32 @@ assert.equal(isBatchActionable({ status: 'archived' }, 'rollback'), true)
 assert.equal(isBatchActionable({ status: 'building' }, 'publish'), false)
 assert.deepEqual(unwrapList({ data: { rows: [{ id: 1 }] } }), [{ id: 1 }])
 assert.deepEqual(unwrapPage({ rows: [{ id: 1 }], total: 7 }), { rows: [{ id: 1 }], total: 7 })
+
+// A transient fetch failure is visible and retryable; it is distinct from an
+// asset the collector never downloaded. Duplicate clicks do not start more I/O.
+let attempts = 0
+let finishRetry
+const retryAsset = { assetKey: 'retry', storagePath: 'retry.png', downloadStatus: 'downloaded' }
+const retryStore = createQuestionAssetStore(async () => {
+  attempts += 1
+  if (attempts === 1) throw new Error('素材文件不存在')
+  return await new Promise(resolve => { finishRetry = resolve })
+})
+await retryStore.load(3, [retryAsset])
+assert.equal(retryStore.state(retryAsset).status, 'failed')
+assert.equal(retryStore.label(retryAsset), '素材文件不存在')
+assert.equal(retryStore.state({ assetKey: 'never', downloadStatus: 'pending' }).status, 'notDownloaded')
+const retryPending = retryStore.retry(retryAsset)
+await retryStore.retry(retryAsset)
+assert.equal(attempts, 2)
+assert.equal(retryStore.state(retryAsset).status, 'loading')
+finishRetry(new Blob(['recovered'], { type: 'image/png' }))
+await retryPending
+assert.equal(retryStore.state(retryAsset).status, 'ready')
+assert.match(retryStore.resolve(retryAsset), /^blob:/)
+retryStore.reset()
+const errorBlobStore = createQuestionAssetStore(async () => new Blob(['{"error":"missing"}'], { type: 'application/json' }))
+await errorBlobStore.load(4, [retryAsset])
+assert.equal(errorBlobStore.state(retryAsset).status, 'failed')
+assert.equal(errorBlobStore.resolve(retryAsset), '')
+errorBlobStore.reset()

@@ -96,11 +96,18 @@ class LifecycleMethods {
     this.finishJob(job, blocked ? 'blocked' : 'failed', message, code);
   }
 
-  cancel(id) {
-    const job = this.get(id);
+  cancel(id, { reserveDispatch = false } = {}) {
+    let job = this.get(id);
+    if (!job && reserveDispatch) {
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(id)) || !this.store) {
+        throw new Error('停止派发需要持久存储及合法 UUID');
+      }
+      job = this.store.reserveCancelledRequest(String(id).toLowerCase());
+      if (!job) return { id: String(id).toLowerCase(), status: 'cancelled' };
+    }
     if (!job) return null;
     if (!ACTIVE_STATUSES.has(job.status)) return publicJob(job);
-    if (job.persisted && !this.jobs.has(job.id)) {
+    if (job.persisted && job.ownerToken && job.ownerToken !== this.ownerToken) {
       // A job owned by another process cannot be signalled from here.
       const error = new Error('该任务由其他采集进程持有，无法从当前进程停止');
       error.statusCode = 409;

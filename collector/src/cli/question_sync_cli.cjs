@@ -34,6 +34,7 @@ const { catalogSafetyPageLimit } = require('../policies/pagination.cjs');
 const { QuestionSyncStore } = require('../storage/question_store/index.cjs');
 const { createProcessEventEmitter } = require('../jobs/events.cjs');
 const { runSync } = require('../jobs/question_run.cjs');
+const { assertMathSource } = require('../sources/registry.cjs');
 
 function usage() {
   return `
@@ -77,7 +78,7 @@ function usage() {
   --status                只显示 collector 状态
   --help                  显示帮助
 
-安全行为：题目列表默认 8 路并发。遇风控会关闭当前浏览器，等待后打开全新无痕会话继续未完成页；新会话仍阻断时在当前窗口等待人工滑块。一轮最多切换 ${MAX_SESSION_SWITCHES} 次全新会话。不会自动绕过滑块。
+安全行为：题目列表默认 8 路并发，部署节奏以运维配置为准。限流/验证会持久暂停同来源，保留成功页和断点；验证需要人工核对后恢复，不通过切换会话继续。教材发现、内容、素材和重试共用每日主动请求预算。
 `;
 }
 
@@ -185,6 +186,7 @@ function parseArgs(argv = []) {
   options.chapterId = String(options.chapterId || options.textbookId).trim();
   if (!options.chapterId) throw new Error('--chapter-id 不能为空。');
   if (!options.bankPath.trim()) throw new Error('--bank-path 不能为空。');
+  options.sourceNamespace = assertMathSource(options);
   if (options.cdpUrl) {
     let parsedCdp;
     try { parsedCdp = new URL(options.cdpUrl); } catch { throw new Error('--cdp-url 必须是有效的 CDP URL。'); }

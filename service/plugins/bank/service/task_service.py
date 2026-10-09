@@ -40,6 +40,7 @@ from plugins.bank.entity.vo.bank_vo import (
 )
 from plugins.bank.service.collector_client import CollectorClient
 from plugins.bank.service.question_apply_service import _normalise_answer_status
+from plugins.bank.service.sync_dispatch import queue_fields
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -182,8 +183,11 @@ def _live_projection_tree(value: Any) -> dict[str, Any] | None:
     raw_tree = output.get('tree')
     if not isinstance(raw_tree, list):
         raw_tree = next(
-            (output.get(key) for key in ('catalogs', 'catalogTree', 'catalog_tree')
-             if isinstance(output.get(key), list)),
+            (
+                output.get(key)
+                for key in ('catalogs', 'catalogTree', 'catalog_tree')
+                if isinstance(output.get(key), list)
+            ),
             [],
         )
     for key in ('catalogs', 'catalogTree', 'catalog_tree'):
@@ -300,8 +304,7 @@ def task_payload(row: object, scopes: list[object] | None = None) -> dict[str, A
     catalog_count = int(_pick(row, 'catalog_count', 'catalogCount', default=0) or 0)
     question_count = int(_pick(row, 'question_count', 'questionCount', default=0) or 0)
     question_catalog_count = int(
-        _pick(row, 'question_catalog_count', 'questionCatalogCount', 'relation_count', 'relationCount', default=0)
-        or 0
+        _pick(row, 'question_catalog_count', 'questionCatalogCount', 'relation_count', 'relationCount', default=0) or 0
     )
     question_tag_count = int(
         _pick(row, 'question_tag_count', 'questionTagCount', 'tag_count', 'tagCount', default=0) or 0
@@ -354,6 +357,20 @@ def task_payload(row: object, scopes: list[object] | None = None) -> dict[str, A
     if normalized_row_resume is None and len(resume_ids) == 1:
         normalized_row_resume = int(resume_ids[0])
     task_status = str(status or '').strip().lower()
+    if module == 'question' and int(options.get('workflowVersion', 1)) >= 2:
+        resume_ids = []
+        for item in scope_payloads:
+            available = (
+                task_status in _TERMINAL_TASK_STATUSES
+                and not item['snapshotComplete']
+                and bool(item.get('snapshotLockedAt'))
+                and _positive_resume_run_id(item.get('collectorRunId')) is not None
+            )
+            item['resumeAvailable'] = available
+            if available:
+                item['resumeFromCollectorRunId'] = int(item['collectorRunId'])
+                resume_ids.append(item['resumeFromCollectorRunId'])
+        normalized_row_resume = resume_ids[0] if len(resume_ids) == 1 else None
     auto_resume_enabled_value = options.get('autoResume', options.get('auto_resume', True))
     auto_resume_enabled = (
         auto_resume_enabled_value
@@ -409,6 +426,7 @@ def task_payload(row: object, scopes: list[object] | None = None) -> dict[str, A
     ) or _as_flag(_pick(live_progress, 'pageLimitReached', 'page_limit_reached', default=False))
     return {
         'taskId': run_id,
+        'subjectId': int(_pick(row, 'subject_id', 'subjectId', default=1) or 1),
         'taskNo': str(run_id),
         'runId': run_id,
         'taskModule': module,
@@ -424,9 +442,7 @@ def task_payload(row: object, scopes: list[object] | None = None) -> dict[str, A
         'retryOfRunId': _pick(row, 'retry_of_run_id', 'retryOfRunId'),
         'retryOfTaskId': _pick(row, 'retry_of_run_id', 'retryOfTaskId'),
         'collectorJobId': _pick(row, 'collector_job_id', 'collectorJobId'),
-        'limitTo1000Pages': _as_flag(
-            options.get('limitTo1000Pages', options.get('limit_to_1000_pages', False))
-        ),
+        'limitTo1000Pages': _as_flag(options.get('limitTo1000Pages', options.get('limit_to_1000_pages', False))),
         'pageLimitReached': page_limit_reached,
         'versionId': version_id,
         'versionName': version_name,
@@ -465,17 +481,19 @@ def task_payload(row: object, scopes: list[object] | None = None) -> dict[str, A
         # Keep a snake-case-compatible nested projection for non-browser
         # clients without leaking worker tokens or process IDs.
         'scope': scope_payloads,
+        'workflowVersion': options.get('workflowVersion', 1),
         'resumeFromCollectorRunId': normalized_row_resume,
-        'resumeAvailable': task_status in {'interrupted', 'blocked'} and bool(resume_ids),
+        'resumeAvailable': bool(resume_ids)
+        if int(options.get('workflowVersion', 1)) >= 2
+        else task_status in {'interrupted', 'blocked'} and bool(resume_ids),
         'autoResumeEnabled': auto_resume_enabled,
         'autoResumeAttempt': auto_resume_attempt,
         'autoResumeMaxAttempts': auto_resume_max_attempts,
-        'autoResumePending': _as_flag(
-            options.get('autoResumePending', options.get('auto_resume_pending', False))
-        ),
+        'autoResumePending': _as_flag(options.get('autoResumePending', options.get('auto_resume_pending', False))),
         'autoResumeNextAt': options.get('autoResumeNextAt') or options.get('auto_resume_next_at'),
         # Mutable, read-only progress projection. Formal comparison/apply
         # endpoints continue to use the immutable collector snapshot APIs.
+        **queue_fields(row),
         'liveProgress': live_progress,
         'liveProgressByScope': live_by_scope,
     }
@@ -535,7 +553,9 @@ def _normalise_catalog(row: Mapping[str, Any] | object) -> dict[str, Any] | None
         'sourceUrl': _pick(row, 'sourceUrl', 'source_url'),
         'sortOrder': _pick(row, 'sortOrder', 'sort_order', default=0),
         'questionCount': int(_pick(row, 'questionCount', 'question_count', default=0) or 0),
-        'uniqueQuestionCount': int(_pick(row, 'uniqueQuestionCount', 'questionCount', 'question_count', default=0) or 0),
+        'uniqueQuestionCount': int(
+            _pick(row, 'uniqueQuestionCount', 'questionCount', 'question_count', default=0) or 0
+        ),
         'scanComplete': bool(_pick(row, 'scanComplete', default=False)),
         'excludedQuestionCount': int(_pick(row, 'excludedQuestionCount', default=0) or 0),
         'capturedAt': _pick(row, 'capturedAt', 'captured_at'),
@@ -1096,7 +1116,9 @@ async def _collector_question_detail(run_id: int, external_id: str, textbook_ext
     item = payload.get('item') or payload.get('question') or payload.get('data')
     if not isinstance(item, Mapping):
         raise ServiceException(message='collector API 题目详情缺少题目')
-    item_id = _pick(item, 'externalQuestionId', 'questionExternalId', 'external_question_id', 'externalId', 'external_id')
+    item_id = _pick(
+        item, 'externalQuestionId', 'questionExternalId', 'external_question_id', 'externalId', 'external_id'
+    )
     if not _safe_external_id(item_id) or str(item_id) != str(external_id):
         raise ServiceException(message='collector API 题目详情外部 ID 不一致')
     provider = str(_pick(item, 'sourceProvider', 'source_provider', 'provider', default='') or '')
@@ -1172,25 +1194,44 @@ class SyncTaskService:
         payload = task_payload(row, scopes)
         if str(payload.get('status') or '').lower() in ('starting', 'running', 'cancelling'):
             from plugins.bank.service.sync_run_service import enrich_live_progress
+
             payload = await enrich_live_progress(payload)
         if module == 'textbook':
             from plugins.bank.service.textbook_apply_service import TextbookApplyService  # noqa: PLC0415
 
             payload.update(await TextbookApplyService.task_apply_status(db, row, scopes))
         elif module == 'question':
-            from plugins.bank.service.question_apply_service import QuestionApplyService  # noqa: PLC0415
+            from plugins.bank.service.question_apply_service import (  # noqa: PLC0415
+                QuestionApplyService,
+                _uses_incremental_workflow,
+            )
 
             apply_status = await QuestionApplyService.task_apply_status(db, row, scopes)
             # Keep the rich nested projection for new clients and flatten its
             # stable compatibility fields for existing task-page consumers.
             payload['applyStatus'] = apply_status
-            payload.update(
-                {
-                    key: value
-                    for key, value in apply_status.items()
-                    if key != 'applyStatus'
-                }
-            )
+            payload.update({key: value for key, value in apply_status.items() if key != 'applyStatus'})
+            if _uses_incremental_workflow(row):
+                from plugins.bank.service.import_intake import current_task_intake_status  # noqa: PLC0415
+                from plugins.bank.service.incremental_import import current_task_import_status  # noqa: PLC0415
+
+                payload['incrementalImport'] = await current_task_import_status(db, task_id, scopes)
+                payload['importIntake'] = await current_task_intake_status(db, task_id, scopes)
+                payload['awaitingImportIntake'] = (
+                    row.status in _TERMINAL_TASK_STATUSES
+                    and len(scopes) == 1
+                    and bool(scopes[0].collector_run_id)
+                    and payload['incrementalImport'] is None
+                    and payload['importIntake'] is None
+                )
+                payload['canRequestImport'] = (
+                    row.status in {'completed', 'failed', 'blocked', 'interrupted', 'cancelled'}
+                    and len(scopes) == 1
+                    and bool(scopes[0].collector_run_id)
+                    and bool(scopes[0].snapshot_locked_at)
+                    and not payload['awaitingImportIntake']
+                    and (payload['importIntake'] is None or payload['importIntake']['status'] == 'ready')
+                )
         return payload
 
     @classmethod
@@ -1222,7 +1263,27 @@ class SyncTaskService:
 
             await TextbookApplyService.ensure_task_not_current(db, task_id)
         elif module == 'question':
-            from plugins.bank.service.question_apply_service import QuestionApplyService  # noqa: PLC0415
+            from plugins.bank.service.question_apply_service import (  # noqa: PLC0415
+                QuestionApplyService,
+                _uses_incremental_workflow,
+            )
+
+            if _uses_incremental_workflow(row):
+                from plugins.bank.entity.do.bank_do import QbQuestionImport  # noqa: PLC0415
+
+                active_import = await db.scalar(
+                    select(QbQuestionImport.import_id)
+                    .where(
+                        QbQuestionImport.task_id == task_id,
+                        QbQuestionImport.status.in_(['queued', 'preparing', 'running']),
+                    )
+                    .limit(1)
+                )
+                if active_import is not None:
+                    raise ServiceException(message='任务仍有未结束的分批入库，不能删除其恢复断点')
+                from plugins.bank.service.import_intake import ensure_import_intake_finished  # noqa: PLC0415
+
+                await ensure_import_intake_finished(db, task_id)
 
             await QuestionApplyService.ensure_task_not_current(db, task_id)
 
@@ -1261,8 +1322,26 @@ class SyncTaskService:
 
     @classmethod
     async def resume_question(cls, db: AsyncSession, task_id: int, operator: str | None = None) -> dict[str, Any]:
-        """Resume an interrupted question task without allocating a new ID."""
-
+        """Public v2 refill starts a linked task; internal short recovery keeps its ID."""
+        row = await SyncTaskDao.get(db, task_id, 'question')
+        if row is None:
+            raise ServiceException(message='同步题库任务不存在')
+        if int(_task_options(row).get('workflowVersion', 1)) >= 2:
+            options = _task_options(row)
+            scopes = await SyncTaskDao.scopes(db, task_id)
+            if len(scopes) != 1:
+                raise ServiceException(message='新版补采必须绑定一本教材')
+            scope = scopes[0]
+            return await cls.create_question(
+                db,
+                {
+                    'versionId': scope.local_version_id,
+                    'textbookId': scope.local_textbook_id,
+                    'limitTo1000Pages': options.get('limitTo1000Pages', False),
+                },
+                operator,
+                resume_task_id=task_id,
+            )
         from plugins.bank.service.sync_run_service import SyncRunService  # noqa: PLC0415
 
         return await SyncRunService.resume_question(db, task_id, operator)
@@ -1362,7 +1441,10 @@ class SyncTaskService:
             source_task_id=None,
             retry_of_run_id=task_id,
             scope_rows=retry_scopes,
+            defer_dispatch=int(options.get('workflowVersion', 1)) >= 2,
             extra_options={
+                'workflowVersion': int(options.get('workflowVersion', 1)),
+                'subjectId': int(_pick(row, 'subject_id', 'subjectId', default=1) or 1),
                 'versionId': int(version_id),
                 'textbookIds': [int(item) for item in textbook_ids],
                 # Preserve the original per-task page policy across a retry.
@@ -1375,6 +1457,9 @@ class SyncTaskService:
     # ----------------------------- options/create ------------------------
     @classmethod
     async def question_options(cls, db: AsyncSession) -> dict[str, Any]:
+        from plugins.bank.service.subject_service import SubjectService
+
+        subjects = {item['subjectId']: item for item in await SubjectService.list(db)}
         try:
             versions_result = await db.execute(
                 select(QbTextbookVersion)
@@ -1401,21 +1486,35 @@ class SyncTaskService:
             provider = str(_pick(version, 'source_provider', 'sourceProvider', default='') or '')
             external_version_id = _pick(version, 'external_version_id', 'externalVersionId')
             version_valid = bool(provider and _safe_external_id(external_version_id))
+            subject_id = int(_pick(version, 'subject_id', 'subjectId', default=1) or 1)
+            subject = subjects.get(subject_id)
+            adapter_ready = bool(subject and subject['syncSupported'])
+            version_valid = version_valid and adapter_ready
             book_values: list[dict[str, Any]] = []
             for book in books_by_version.get(version_id, []):
                 book_provider = str(_pick(book, 'source_provider', 'sourceProvider', default='') or '')
                 external_book_id = _pick(book, 'external_textbook_id', 'externalTextbookId')
-                valid = bool(version_valid and book_provider == provider and _safe_external_id(external_book_id))
+                valid = bool(
+                    version_valid
+                    and book_provider == provider
+                    and int(_pick(book, 'subject_id', 'subjectId', default=1) or 1) == subject_id
+                    and _safe_external_id(external_book_id)
+                )
                 reason = ''
-                if not provider or not _safe_external_id(external_version_id):
+                if not adapter_ready:
+                    reason = '所属学科已停用或采集适配尚未验证'
+                elif not provider or not _safe_external_id(external_version_id):
                     reason = '版本缺少稳定采集来源标识'
                 elif book_provider != provider:
                     reason = '教材来源提供方与版本不一致'
+                elif int(_pick(book, 'subject_id', 'subjectId', default=1) or 1) != subject_id:
+                    reason = '教材学科与版本不一致'
                 elif not _safe_external_id(external_book_id):
                     reason = '教材缺少稳定采集来源标识'
                 book_values.append(
                     {
                         'textbookId': int(_pick(book, 'textbook_id', 'textbookId', default=0) or 0),
+                        'subjectId': subject_id,
                         'textbookName': _pick(book, 'textbook_name', 'textbookName'),
                         'versionId': version_id,
                         'sourceProvider': book_provider,
@@ -1430,6 +1529,8 @@ class SyncTaskService:
             result.append(
                 {
                     'versionId': version_id,
+                    'subjectId': subject_id,
+                    'subjectName': subject['subjectName'] if subject else '未启用学科',
                     'versionName': _pick(version, 'version_name', 'versionName'),
                     'sourceProvider': provider,
                     'externalVersionId': external_version_id,
@@ -1458,6 +1559,10 @@ class SyncTaskService:
             raise ServiceException(message='正式版本不存在')
         if str(_pick(version, 'status', default='0')) == '1':
             raise ServiceException(message='只能选择启用的正式版本')
+        from plugins.bank.service.subject_service import SubjectService
+
+        subject_id = int(_pick(version, 'subject_id', 'subjectId', default=1) or 1)
+        await SubjectService.require(db, subject_id, sync=True)
         provider = str(_pick(version, 'source_provider', 'sourceProvider', default='') or '').strip()
         external_version_id = _pick(version, 'external_version_id', 'externalVersionId')
         if not provider or not _safe_external_id(external_version_id):
@@ -1475,6 +1580,8 @@ class SyncTaskService:
             external_book_id = _pick(book, 'external_textbook_id', 'externalTextbookId')
             if book_provider != provider:
                 raise ServiceException(message='所选教材与版本的来源提供方不一致')
+            if int(_pick(book, 'subject_id', 'subjectId', default=1) or 1) != subject_id:
+                raise ServiceException(message='教材学科与版本不一致')
             if not _safe_external_id(external_book_id):
                 raise ServiceException(message=f'教材 {textbook_id} 缺少稳定采集来源 ID，不能创建题库任务')
             books.append(book)
@@ -1489,6 +1596,9 @@ class SyncTaskService:
         db: AsyncSession,
         payload: QuestionTaskCreateModel | Mapping[str, Any],
         operator: str | None = None,
+        *,
+        automatic_options: dict | None = None,
+        resume_task_id: int | None = None,
     ) -> dict[str, Any]:
         request = (
             payload if isinstance(payload, QuestionTaskCreateModel) else QuestionTaskCreateModel.model_validate(payload)
@@ -1515,6 +1625,29 @@ class SyncTaskService:
                     'status': 'queued',
                 }
             )
+        if resume_task_id is not None:
+            source = await SyncTaskDao.get(db, resume_task_id, 'question')
+            sources = await SyncTaskDao.scopes(db, resume_task_id)
+            if source is None or source.status not in _TERMINAL_TASK_STATUSES or len(sources) != 1:
+                raise ServiceException(message='补采必须使用已结束的单本任务')
+            previous = sources[0]
+            target = scope_rows[0]
+            if (
+                previous.local_textbook_id != target['local_textbook_id']
+                or previous.source_provider != target['source_provider']
+                or previous.external_textbook_id != target['external_textbook_id']
+                or not previous.collector_run_id
+                or not previous.snapshot_locked_at
+                or previous.snapshot_complete
+            ):
+                raise ServiceException(message='原任务没有与当前教材匹配的已封存部分成果，请重新同步')
+            if all(
+                int(getattr(previous, field) or 0) > 0
+                for field in ('catalog_count', 'question_count', 'question_catalog_count')
+            ):
+                target['resume_from_collector_run_id'] = previous.collector_run_id
+            # An empty interrupted observation has no cloneable content. The
+            # linked refill still runs a fresh scan and retains formal data.
         from plugins.bank.service.sync_run_service import SyncRunService  # noqa: PLC0415
 
         return await SyncRunService._create_job(
@@ -1524,10 +1657,17 @@ class SyncTaskService:
             acknowledge_source_policy=True,
             operator=operator,
             metadata_run_id=None,
+            retry_of_run_id=resume_task_id,
             textbook_external_ids=external_ids,
+            defer_dispatch=True,
             source_task_id=None,
             scope_rows=scope_rows,
             extra_options={
+                **(automatic_options or {}),
+                'workflowVersion': 2,
+                'subjectId': int(_pick(version, 'subject_id', 'subjectId', default=1) or 1),
+                'sourceProfile': 'zujuan_czsx',
+                'sourceNamespace': 'zujuan:junior:math',
                 'versionId': int(request.version_id),
                 'versionName': _pick(version, 'version_name', 'versionName'),
                 'textbookIds': [int(value) for value in request.textbook_ids],
@@ -1580,7 +1720,8 @@ class SyncTaskService:
         db: AsyncSession,
         task_id: int,
         query: TaskComparisonQueryModel | None,
-        *, allow_running: bool = False,
+        *,
+        allow_running: bool = False,
     ) -> tuple[QbSyncJob, list[Any]]:
         row = await SyncTaskDao.get(db, task_id, 'question')
         if row is None:

@@ -8,6 +8,7 @@
     <el-alert v-if="errorMessage" class="state-alert" type="error" :closable="false" show-icon>{{ errorMessage }}</el-alert>
     <section class="panel">
       <el-form ref="queryRef" :model="query" :inline="true" class="filter-form" @submit.prevent="search">
+        <el-form-item label="学科" prop="subjectId"><SubjectSelect v-model="query.subjectId" @change="search" /></el-form-item>
         <el-form-item label="版本名称" prop="versionName"><el-input v-model="query.versionName" clearable placeholder="请输入版本名称" @keyup.enter="search" /></el-form-item>
         <el-form-item label="来源" prop="sourceProvider"><el-input v-model="query.sourceProvider" clearable placeholder="来源提供方" @keyup.enter="search" /></el-form-item>
         <el-form-item label="状态" prop="status"><el-select v-model="query.status" clearable placeholder="全部" class="status-select"><el-option v-for="item in sys_normal_disable" :key="item.value" :label="item.label" :value="item.value" /></el-select></el-form-item>
@@ -40,6 +41,7 @@
 
     <el-dialog v-model="dialogVisible" :title="form.versionId ? '修改版本' : '新增版本'" width="560px" append-to-body @closed="resetForm">
       <el-form ref="formRef" :model="form" :rules="rules" label-width="96px">
+        <el-form-item label="学科" prop="subjectId"><SubjectSelect v-model="form.subjectId" :clearable="false" :disabled="!!form.versionId" /></el-form-item>
         <el-form-item label="版本名称" prop="versionName"><el-input v-model="form.versionName" placeholder="请输入版本名称" /></el-form-item>
         <el-form-item label="来源提供方"><el-input v-model="form.sourceProvider" disabled placeholder="人工数据" /></el-form-item>
         <el-form-item label="外部 ID"><el-input v-model="form.externalVersionId" disabled placeholder="同步数据由系统维护" /></el-form-item>
@@ -54,6 +56,8 @@
 </template>
 
 <script setup>
+let scopeReadRevision = 0
+import SubjectSelect from "../../components/SubjectSelect.vue"
 import { computed, getCurrentInstance, onMounted, reactive, ref } from 'vue'
 import { Delete, Edit, Plus, Refresh, RefreshLeft, Search } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -71,15 +75,15 @@ const dialogVisible = ref(false)
 const errorMessage = ref('')
 const queryRef = ref()
 const formRef = ref()
-const query = reactive({ pageNum: 1, pageSize: 10, versionName: '', sourceProvider: '', status: undefined })
+const query = reactive({ pageNum: 1, pageSize: 10, subjectId: undefined, versionName: '', sourceProvider: '', status: undefined })
 const form = reactive({})
-const rules = { versionName: [{ required: true, message: '版本名称不能为空', trigger: 'blur' }] }
+const rules = { subjectId: [{ required: true, message: '请选择学科', trigger: 'change' }], versionName: [{ required: true, message: '版本名称不能为空', trigger: 'blur' }] }
 const isManual = (row) => String(row?.sourceProvider || '').toLowerCase() === 'manual'
 const deletableSelected = computed(() => selected.value.length > 0 && selected.value.every(isManual))
 
-function resetForm() { Object.assign(form, { versionId: undefined, versionName: '', sourceProvider: 'manual', externalVersionId: undefined, sourceUrl: '', isNew: 'N', sortOrder: 0, status: '0' }); formRef.value?.clearValidate() }
+function resetForm() { Object.assign(form, { versionId: undefined, subjectId: query.subjectId || 1, versionName: '', sourceProvider: 'manual', externalVersionId: undefined, sourceUrl: '', isNew: 'N', sortOrder: 0, status: '0' }); formRef.value?.clearValidate() }
 function unwrapOne(result) { return result?.data && !result.versionId ? result.data : result }
-async function loadList() { loading.value = true; errorMessage.value = ''; try { const page = unwrapPage(await listVersions({ ...query, includeDisabled: true })); rows.value = page.rows; total.value = page.total; selected.value = [] } catch (error) { rows.value = []; total.value = 0; errorMessage.value = error?.message || '版本加载失败，请稍后重试' } finally { loading.value = false } }
+async function loadList() { const revision = ++scopeReadRevision; loading.value = true; errorMessage.value = ''; try { const page = unwrapPage(await listVersions({ ...query, includeDisabled: true })); if (revision !== scopeReadRevision) return; rows.value = page.rows; total.value = page.total; selected.value = [] } catch (error) { if (revision !== scopeReadRevision) return; rows.value = []; total.value = 0; errorMessage.value = error?.message || '版本加载失败，请稍后重试' } finally { if (revision === scopeReadRevision) loading.value = false } }
 function search() { query.pageNum = 1; loadList() }
 function resetQuery() { queryRef.value?.resetFields(); query.pageNum = 1; loadList() }
 function openAdd() { resetForm(); dialogVisible.value = true }

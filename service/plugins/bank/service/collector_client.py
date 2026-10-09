@@ -217,6 +217,12 @@ class CollectorClient:
     def health(self) -> dict[str, Any]:
         return self._request('GET', '/v1/health')
 
+    def source_control(self):
+        return self._request('GET', '/v1/source-control')
+
+    def resume_source(self, revision):
+        return self._request('POST', '/v1/source-control/resume', payload={'expectedRevision': revision})
+
     def start_job(
         self,
         run_type: str,
@@ -226,6 +232,8 @@ class CollectorClient:
         textbook_external_ids: list[str] | None = None,
         textbook_scopes: list[dict[str, Any]] | None = None,
         limit_to_1000_pages: bool | None = None,
+        workflow_version: int | None = None,
+        job_id: str | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             'runType': run_type,
@@ -233,6 +241,10 @@ class CollectorClient:
             'maxPages': max_pages,
             'metadataRunId': metadata_run_id,
             'textbookExternalIds': list(textbook_external_ids or []),
+            # Omitted versions on durable Service tasks are the historical
+            # contract. New Service tasks explicitly pass version 2.
+            'workflowVersion': workflow_version if workflow_version is not None else 1,
+            'sourceNamespace': 'zujuan:junior:math',
         }
         # Independent question tasks carry their server-resolved formal and
         # external identities directly. Keep this optional for legacy center
@@ -244,6 +256,10 @@ class CollectorClient:
         # persisted task choice when enabled.
         if limit_to_1000_pages is not None:
             payload['limitTo1000Pages'] = bool(limit_to_1000_pages)
+        if job_id is not None:
+            if not re.fullmatch(r'[0-9a-fA-F-]{36}', job_id):
+                raise ServiceException(message='派发任务 ID 无效')
+            payload['jobId'] = job_id
         return self._request(
             'POST',
             '/v1/jobs',
@@ -254,9 +270,11 @@ class CollectorClient:
         safe_id = urllib.parse.quote(str(job_id), safe='')
         return self._request('GET', f'/v1/jobs/{safe_id}')
 
-    def cancel_job(self, job_id: str) -> dict[str, Any]:
+    def cancel_job(self, job_id: str, *, reserve_dispatch: bool = False) -> dict[str, Any]:
         safe_id = urllib.parse.quote(str(job_id), safe='')
-        return self._request('POST', f'/v1/jobs/{safe_id}/cancel', payload={})
+        return self._request(
+            'POST', f'/v1/jobs/{safe_id}/cancel', payload={'reserveDispatch': True} if reserve_dispatch else {},
+        )
 
     def validate_metadata(self, metadata_run_id: int, textbook_external_ids: list[str]) -> dict[str, Any]:
         return self._request(
@@ -634,6 +652,7 @@ class CollectorClient:
         cursor: int,
         *,
         page_size: int | None = None,
+        sealed_for_import: bool = False,
     ) -> None:
         if page.get('available') is not True or page.get('immutable') is not True:
             raise ServiceException(message='collector 分页快照未锁定或不可用')
@@ -644,8 +663,15 @@ class CollectorClient:
             raise ServiceException(message='collector 分页快照运行信息不一致')
         for source in (page, run):
             for marker in ('snapshotComplete', 'snapshot_complete', 'complete', 'isComplete'):
-                if marker in source and source[marker] is not None and not cls._flag_is_true(source[marker]):
+                if not sealed_for_import and marker in source and source[marker] is not None and not cls._flag_is_true(source[marker]):
                     raise ServiceException(message='collector 分页快照未完成')
+        if sealed_for_import:
+            from plugins.bank.service.question_apply_service import _normalise_snapshot_summary
+            _normalise_snapshot_summary(page, 0, str(textbook_external_id), sealed_for_import=True)
+            summary_complete = next((summary_run[name] for name in ('snapshotComplete', 'snapshot_complete') if name in summary_run), None)
+            page_complete = next((run[name] for name in ('snapshotComplete', 'snapshot_complete') if name in run), None)
+            if cls._flag_is_true(summary_complete) != cls._flag_is_true(page_complete):
+                raise ServiceException(message='collector 分页快照完整标记与摘要不一致')
         if textbook_external_id is not None:
             page_scope_ids = cls._scope_ids(run) | cls._scope_ids(page)
             if str(textbook_external_id) not in page_scope_ids:
@@ -771,6 +797,7 @@ class CollectorClient:
         textbook_external_id: str | None = None,
         cursor: int = 0,
         page_size: int = DEFAULT_SNAPSHOT_PAGE_SIZE,
+        sealed_for_import: bool = False,
     ) -> dict[str, Any]:
         if collection not in SNAPSHOT_COLLECTIONS:
             raise ServiceException(message='collector 快照 collection 不受支持')
@@ -787,6 +814,7 @@ class CollectorClient:
                 'textbookExternalId': textbook_external_id,
                 'cursor': cursor,
                 'pageSize': page_size,
+                **({'sealedForImport': 'true'} if sealed_for_import else {}),
             },
         )
         # Validate the inexpensive structural markers here. Cross-page count
@@ -814,6 +842,7 @@ class CollectorClient:
             payload['run'],
             cursor,
             page_size=page_size,
+            sealed_for_import=sealed_for_import,
         )
         return payload
 
@@ -826,6 +855,7 @@ class CollectorClient:
         content_sha256: str,
         *,
         textbook_external_id: str | None = None,
+        sealed_for_import: bool = False,
     ) -> bytes:
         digest = str(content_sha256 or '').strip().lower()
         if not _SHA256_RE.fullmatch(digest):
@@ -835,7 +865,7 @@ class CollectorClient:
         return self._request_bytes(
             'GET',
             f'/v1/runs/{safe_run_id}/assets/{safe_digest}',
-            query={'textbookExternalId': textbook_external_id},
+            query={'textbookExternalId': textbook_external_id, **({'sealedForImport': 'true'} if sealed_for_import else {})},
         )
 
     asset_bytes = run_asset_bytes
@@ -846,6 +876,7 @@ class CollectorClient:
         *,
         textbook_external_id: str | None = None,
         allow_incomplete: bool = False,
+        sealed_for_import: bool = False,
     ) -> dict[str, Any]:
         """Read bounded metadata/counts for one immutable content scope.
 
@@ -859,6 +890,8 @@ class CollectorClient:
         query: dict[str, Any] = {'textbookExternalId': textbook_external_id}
         if allow_incomplete:
             query['allowIncomplete'] = 'true'
+        if sealed_for_import:
+            query['sealedForImport'] = 'true'
         return self._request(
             'GET',
             f'/v1/runs/{safe_run_id}/snapshot-summary',

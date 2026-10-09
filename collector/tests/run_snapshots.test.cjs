@@ -26,6 +26,7 @@ const {
 const { CollectorJobManager, createCollectorServer } = require('../server.cjs');
 const { MetadataStore } = require('../zujuan_metadata_sync.cjs');
 const { SyncStore } = require('../legacy/zujuan_sync.cjs');
+const { QuestionSyncStore } = require('../zujuan_question_sync.cjs');
 
 function temporaryDb(prefix = 'collector-snapshot-') {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -40,6 +41,7 @@ function seedRun(dbPath, {
   scope = { textbookId: 'tb1' },
   textbookIds = ['tb1'],
   duplicateQuestion = false,
+  finish = true,
 } = {}) {
   const store = new SyncStore(dbPath);
   const runId = store.beginRun(scope);
@@ -77,7 +79,7 @@ function seedRun(dbPath, {
       path: `/${catalogId}`,
     }]);
   }
-  store.finishRun(runId, status, {
+  if (finish) store.finishRun(runId, status, {
     pagesOk: 3,
     questionsSeen: textbookIds.length,
     questionsInserted: textbookIds.length,
@@ -89,6 +91,108 @@ function seedRun(dbPath, {
   store.close();
   return runId;
 }
+
+test('sealed coverage retains the root observation and only counts frozen scan targets', () => {
+  const { directory, dbPath } = temporaryDb('collector-coverage-');
+  try {
+    const runId = seedRun(dbPath, { finish: false, scope: {
+      textbookId: 'tb1', coverageFormat: 'run-coverage-v1', textbookExpectedTotal: 40000,
+      textbookExpectedTotalObservedAt: '2026-10-01T00:00:00Z', summaryStrategy: 'textbook_root_probe',
+      availableCatalogCount: 3, selectedCatalogCount: 2, scanCatalogIds: ['tb1-c1', 'tb1-c2'],
+      catalogSelectionTruncated: true, startPage: 1, maxPages: 30, limit: 0,
+    } });
+    new QuestionSyncStore(dbPath, { dataDir: directory }).close();
+    const db = new DatabaseSync(dbPath);
+    try {
+      const insert = db.prepare(`INSERT INTO sync_run_catalog_progress
+        (run_id,provider,textbook_external_id,catalog_external_id,observed_at,
+          scan_complete,data_complete,failed_page_count,parse_error_count,asset_error_count)
+        VALUES (?,'zujuan',?,?,?, ?,0,2,1,3)`);
+      insert.run(runId, 'tb1', 'tb1-c1', '2026-10-01T01:00:00Z', 0);
+      insert.run(runId, 'tb1', 'old-removed-target', '2026-10-01T01:00:00Z', 1);
+      insert.run(runId, 'tb2', 'tb1-c2', '2026-10-01T01:00:00Z', 1);
+    } finally { db.close(); }
+    const store = new QuestionSyncStore(dbPath, { dataDir: directory });
+    store.finishRun(runId, 'failed', { errors: 1 });
+    store.close();
+    const summary = readRunSnapshotSummary(dbPath, runId, 'tb1', { sealedForImport: true });
+    assert.equal(summary.coverage.sourceReport.count, 40000);
+    assert.equal(summary.coverage.sourceReport.observedAt, '2026-10-01T00:00:00.000Z');
+    assert.equal(summary.coverage.scan.targetsKnown, true);
+    assert.equal(summary.coverage.scan.observedCatalogCount, 1);
+    assert.equal(summary.coverage.scan.unscannedCatalogCount, 2);
+    assert.equal(summary.coverage.scan.failedPageCount, 2);
+    assert.equal(summary.coverage.scan.assetErrorCount, 3);
+    assert.equal(summary.counts.questionItemCount, 1); // Never substitute a reported total.
+    const late = new DatabaseSync(dbPath);
+    try {
+      // Projections can change after sealing; the historic report cannot.
+      late.prepare('UPDATE sync_run_catalog_progress SET failed_page_count=99 WHERE run_id=?').run(runId);
+      assert.throws(() => late.prepare('UPDATE sync_runs SET scope_json=? WHERE id=?').run('{}', runId), /immutable/);
+    } finally { late.close(); }
+    assert.deepEqual(readRunSnapshotSummary(dbPath, runId, 'tb1', { sealedForImport: true }).coverage, summary.coverage);
+  } finally { fs.rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('legacy and truncated target declarations retain unknown coverage', () => {
+  const { directory, dbPath } = temporaryDb('collector-coverage-legacy-');
+  try {
+    const runId = seedRun(dbPath, { status: 'failed', scope: {
+      textbookId: 'tb1', coverageFormat: 'run-coverage-v1', textbookExpectedTotal: 0,
+      summaryStrategy: 'textbook_root_probe',
+      selectedCatalogCount: 501, scanCatalogIds: Array.from({ length: 501 }, (_, index) => `c-${index}`),
+    } });
+    new QuestionSyncStore(dbPath, { dataDir: directory }).close();
+    const db = new DatabaseSync(dbPath);
+    try { db.exec('ALTER TABLE sync_run_catalog_progress DROP COLUMN failed_page_count'); }
+    finally { db.close(); }
+    const coverage = readRunSnapshotSummary(dbPath, runId, 'tb1', { sealedForImport: true }).coverage;
+    assert.equal(coverage.sourceReport.count, 0);
+    assert.equal(coverage.sourceReport.observedAt, null); // No guessed start/finish time.
+    assert.equal(coverage.scan.targetsKnown, false);
+    assert.equal(coverage.scan.unscannedCatalogCount, null);
+    assert.equal(coverage.scan.failedPageCount, null);
+    assert.equal(coverage.scan.assetErrorCount, null);
+  } finally { fs.rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('new sealed coverage preserves exact large target counts without returning target arrays', () => {
+  const { directory, dbPath } = temporaryDb('collector-coverage-targets-');
+  try {
+    const targets = Array.from({ length: 501 }, (_, index) => `c-${index}`);
+    const store = new QuestionSyncStore(dbPath, { dataDir: directory });
+    const runId = store.beginRun({
+      textbookId: 'tb1', coverageFormat: 'run-coverage-v1', scanCatalogIds: targets,
+      selectedCatalogCount: 501, availableCatalogCount: 501,
+      // Caller-supplied historic evidence must never be inherited.
+      sealedCoverageEvidence: { collectorRunId: 999 },
+    }, { resume: false });
+    assert.equal(JSON.parse(store.getRun(runId).scope_json).sealedCoverageEvidence, undefined);
+    store.finishRun(runId, 'failed', { errors: 1 });
+    store.close();
+    const report = readRunSnapshotSummary(dbPath, runId, 'tb1', { sealedForImport: true });
+    assert.equal(report.run.scope.scanCatalogIds.length, 500); // Public scope stays bounded.
+    assert.equal(report.coverage.scan.targetsKnown, true);
+    assert.equal(report.coverage.scan.selectedCatalogCount, 501);
+    assert.equal(report.coverage.scan.unscannedCatalogCount, 501);
+    assert.equal(report.coverage.scan.failedPageCount, 0);
+    assert.equal(Object.hasOwn(report.coverage.scan, 'scanCatalogIds'), false);
+  } finally { fs.rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('legacy multi-book totals cannot masquerade as one book root observation', () => {
+  const { directory, dbPath } = temporaryDb('collector-coverage-multi-');
+  try {
+    const runId = seedRun(dbPath, { textbookIds: ['tb1', 'tb2'], scope: {
+      textbookIds: ['tb1', 'tb2'], textbookExpectedTotal: 40000,
+      summaryStrategy: 'textbook_root_probe', selectedCatalogCount: 2,
+    } });
+    const coverage = readRunSnapshotSummary(dbPath, runId, 'tb1').coverage;
+    assert.equal(coverage.sourceReport.count, null);
+    assert.equal(coverage.scan.selectedCatalogCount, null);
+    assert.equal(coverage.scan.unscannedCatalogCount, null);
+  } finally { fs.rmSync(directory, { recursive: true, force: true }); }
+});
 
 test('summary scope check finds row scopes omitted from the run declaration', () => {
   const { directory, dbPath } = temporaryDb('collector-scope-edges-');
@@ -618,7 +722,7 @@ test('完整题库快照 API 返回五类不可变数据且计数与教材 scope
     assert.equal(snapshot.tags.length, 2);
     assert.equal(snapshot.assets.length, 1);
 
-    const server = createCollectorServer({ dbPath });
+    const server = createCollectorServer({ dbPath, token: '' });
     const baseUrl = await listen(server);
     try {
       const response = await fetch(`${baseUrl}/v1/runs/${runId}/snapshot?textbookExternalId=tb1`);
@@ -803,6 +907,7 @@ test('多教材 content job 为每本教材绑定独立 run、统计、时间和
       runType: 'content',
       acknowledgeSourcePolicy: true,
       metadataRunId: 1,
+      workflowVersion: 1, // historical multi-book contract
       textbookExternalIds: ['tb1', 'tb2'],
       maxPages: 1,
     });
@@ -855,6 +960,7 @@ test('多教材 content job 在单本失败时保留已完成 scope 并标记失
       runType: 'content',
       acknowledgeSourcePolicy: true,
       metadataRunId: 1,
+      workflowVersion: 1, // historical multi-book contract
       textbookExternalIds: ['tb1', 'tb2'],
       maxPages: 1,
     });

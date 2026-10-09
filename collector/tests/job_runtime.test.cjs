@@ -142,7 +142,7 @@ test('A3-3 run_created 事件立即回绑 collectorRunId；结构化 error 决�
       return child;
     },
   });
-  const server = createCollectorServer({ manager });
+  const server = createCollectorServer({ manager, token: '' });
   const base = await listen(server);
   try {
     const started = manager.start(contentPayload());
@@ -413,6 +413,48 @@ test('A3-6b 任务总时限到期后终止子进程并记 job_timeout', async ()
   }
 });
 
+test('资源低水位终止活动子进程并封存已采内容；恢复后可启动后续任务', async () => {
+  const { directory, dbPath } = temporaryDb();
+  seedMetadata(dbPath);
+  let child;
+  let memory = 10 * 1024 * 1024;
+  const manager = new CollectorJobManager({
+    dbPath, jobTimeoutMs: 60000, stallTimeoutMs: 2000,
+    resourceGuardOptions: { minMemoryMiB: 1, memoryReader: () => memory },
+    spawnImpl(_node, args) {
+      seedChildRun(dbPath, args[args.indexOf('--textbook-id') + 1], 'running', { finish: false });
+      child = fakeChild();
+      return child;
+    },
+  });
+  try {
+    const started = manager.start(contentPayload());
+    await waitFor(() => child != null);
+    memory = 0;
+    manager.resourceGuard.status({ fresh: true });
+    await waitFor(() => manager.get(started.id)?.abortCode === 'resource_pressure');
+    assert.ok(child.killed.includes('SIGTERM'));
+    child.finish(-15);
+    await waitFor(() => ['interrupted', 'failed'].includes(manager.get(started.id)?.status));
+    const result = publicJob(manager.get(started.id));
+    assert.equal(result.errorCode, 'resource_pressure');
+    assert.ok(result.scopeItems[0].snapshotLockedAt);
+    assert.equal(result.scopeItems[0].questionCount, 1);
+    assert.throws(() => manager.start(contentPayload()), /可用内存/);
+    memory = 10 * 1024 * 1024;
+    manager.resourceGuard.status({ fresh: true });
+    child = null;
+    const next = manager.start(contentPayload());
+    await waitFor(() => child != null);
+    manager.cancel(next.id);
+    child.finish(-15);
+    await waitFor(() => manager.get(next.id)?.status === 'cancelled');
+  } finally {
+    await manager.shutdown();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test('真实子进程通过 IPC 通道发送结构化 error（不启动 Chrome）', async () => {
   const { spawn } = require('node:child_process');
   const received = [];
@@ -518,7 +560,7 @@ test('A3-7 --events-stdout 是隐藏诊断参数：--help 不提及，parseArgs 
   assert.equal(parseArgs(['--textbook-id', '260617', '--events-stdout']).eventsStdout, true);
 });
 
-test('JobStore 只新增 collector_jobs 表与两个索引，其它 schema 对象不变', () => {
+test('JobStore 只新增任务、派发去重表与两个索引，其它 schema 对象不变', () => {
   const { directory, dbPath } = temporaryDb();
   try {
     const before = new SyncStore(dbPath);
@@ -535,11 +577,117 @@ test('JobStore 只新增 collector_jobs 表与两个索引，其它 schema 对�
     const after = snapshot();
     const added = after.filter((row) => !baseline.some((item) => item.name === row.name));
     assert.deepEqual(added.map((row) => row.name).sort(), [
-      'collector_jobs', 'ix_collector_jobs_created_at', 'ux_collector_jobs_active_slot',
+      'collector_job_requests', 'collector_jobs', 'ix_collector_jobs_created_at', 'ux_collector_jobs_active_slot',
     ]);
     const unchanged = after.filter((row) => baseline.some((item) => item.name === row.name));
     assert.deepEqual(unchanged, baseline);
   } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('派发 UUID 在响应丢失、另一管理器及终态后重试均不重复启动', async () => {
+  const { directory, dbPath } = temporaryDb('collector-dispatch-replay-');
+  const id = 'ac4102a1-8237-4ef8-a56a-6611df50c9c8';
+  const payload = {
+    runType: 'content', acknowledgeSourcePolicy: true, maxPages: 1, jobId: id,
+    textbookExternalIds: ['tb1'],
+    textbookScopes: [{ sourceProvider: 'zujuan', externalVersionId: 'v1', externalTextbookId: 'tb1',
+      versionName: '测试版', textbookName: '教材 1' }],
+  };
+  const first = new CollectorJobManager({ dbPath });
+  const second = new CollectorJobManager({ dbPath });
+  let starts = 0;
+  first.execute = async () => { starts += 1; };
+  second.execute = async () => { throw new Error('duplicate execution'); };
+  try {
+    assert.equal(first.start(payload).id, id);
+    await Promise.resolve();
+    assert.equal(first.start(payload).id, id);
+    assert.equal(second.start(payload).id, id);
+    assert.equal(starts, 1);
+    assert.throws(() => second.cancel(id), (error) => error.code === 'job_not_owned');
+    assert.equal(second.store.load(id).ownerToken, first.ownerToken);
+    assert.throws(() => second.start({ ...payload, maxPages: 2 }), /不同采集范围/);
+    const job = first.get(id);
+    job.status = 'completed';
+    job.phase = 'completed';
+    first.persist(job, { force: true });
+    assert.equal(second.start(payload).status, 'completed');
+    assert.equal(starts, 1);
+    // Job retention may remove a terminal payload, but its request marker
+    // remains: retry cannot silently create another crawl with the old UUID.
+    first.store.db.prepare('DELETE FROM collector_jobs WHERE id = ?').run(id);
+    first.jobs.delete(id);
+    second.jobs.delete(id);
+    assert.throws(() => second.start(payload), /已归档/);
+    assert.equal(starts, 1);
+  } finally {
+    first.dispose();
+    second.dispose();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('派发前确认停止会保存 UUID，迟到的启动请求不能再创建任务', async () => {
+  const { directory, dbPath } = temporaryDb('collector-dispatch-cancel-');
+  const id = 'ad4102a1-8237-4ef8-a56a-6611df50c9c8';
+  const manager = new CollectorJobManager({ dbPath });
+  manager.execute = async () => { throw new Error('cancelled dispatch started'); };
+  try {
+    assert.equal(manager.cancel(id), null, 'legacy missing-job cancel remains 404');
+    assert.equal(manager.cancel(id, { reserveDispatch: true }).status, 'cancelled');
+    assert.throws(() => manager.start({
+      runType: 'metadata', maxPages: 1, acknowledgeSourcePolicy: true, jobId: id,
+    }), /已归档/);
+    assert.equal(manager.store.load(id), null);
+  } finally {
+    manager.dispose();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('实际 HTTP 丢弃首次启动响应后重试仍只执行一次，提前停止请求也持久生效', async () => {
+  const { request } = require('node:http');
+  const { directory, dbPath } = temporaryDb('collector-http-dispatch-');
+  const manager = new CollectorJobManager({ dbPath });
+  let starts = 0;
+  manager.execute = async () => { starts += 1; };
+  const server = createCollectorServer({ manager, token: 'local-dispatch-test' });
+  const base = await listen(server);
+  const id = 'af4102a1-8237-4ef8-a56a-6611df50c9c8';
+  const payload = { runType: 'metadata', maxPages: 1, acknowledgeSourcePolicy: true, jobId: id };
+  const headers = { Authorization: 'Bearer local-dispatch-test', 'Content-Type': 'application/json' };
+  try {
+    // Discard the response without reading its body/UUID: the remote task
+    // exists, while the caller does not possess an acknowledgement.
+    await new Promise((resolve, reject) => {
+      const req = request(`${base}/v1/jobs`, { method: 'POST', headers }, (res) => {
+        assert.equal(res.statusCode, 202);
+        res.destroy();
+        resolve();
+      });
+      req.on('error', reject);
+      req.end(JSON.stringify(payload));
+    });
+    const replay = await fetch(`${base}/v1/jobs`, { method: 'POST', headers, body: JSON.stringify(payload) });
+    assert.equal(replay.status, 202);
+    assert.equal((await replay.json()).id, id);
+    assert.equal(starts, 1);
+    const cancelledId = 'aa4102a1-8237-4ef8-a56a-6611df50c9c8';
+    const cancelled = await fetch(`${base}/v1/jobs/${cancelledId}/cancel`, {
+      method: 'POST', headers, body: JSON.stringify({ reserveDispatch: true }),
+    });
+    assert.equal(cancelled.status, 200);
+    assert.equal((await cancelled.json()).status, 'cancelled');
+    const late = await fetch(`${base}/v1/jobs`, {
+      method: 'POST', headers, body: JSON.stringify({ ...payload, jobId: cancelledId }),
+    });
+    assert.equal(late.status, 409);
+    assert.equal(starts, 1);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    manager.dispose();
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });

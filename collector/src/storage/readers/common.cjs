@@ -433,7 +433,7 @@ function assertSnapshotTables(db, { all = false } = {}) {
  * tables are protected by SQLite triggers, while the service validates the
  * complete summary before it starts consuming pages/assets.
  */
-function assertApplyableSnapshotRun(db, run) {
+function assertApplyableSnapshotRun(db, run, { sealedForImport = false } = {}) {
   const runColumns = tableColumns(db, 'sync_runs');
   const missingRunColumns = STRICT_SNAPSHOT_RUN_COLUMNS.filter((column) => !runColumns.has(column));
   if (missingRunColumns.length) {
@@ -443,19 +443,20 @@ function assertApplyableSnapshotRun(db, run) {
       'snapshot_unavailable',
     );
   }
-  if (!['success', 'completed'].includes(String(run.status || '').toLowerCase()) || !run.finishedAt) {
+  const statuses = sealedForImport ? ['success', 'completed', 'interrupted', 'failed', 'blocked'] : ['success', 'completed'];
+  if (!statuses.includes(String(run.status || '').toLowerCase()) || !run.finishedAt) {
     throw httpError(`内容运行 ${run.id} 未成功完成，暂无可用快照`, 409, 'snapshot_unavailable');
   }
   if (!snapshotLockPresent(run.snapshotLockedAt)) {
     throw httpError(`内容运行 ${run.id} 尚未锁定，暂无可用快照`, 409, 'snapshot_unavailable');
   }
-  if (run.snapshotComplete !== true) {
+  if (!sealedForImport && run.snapshotComplete !== true) {
     throw httpError(`内容运行 ${run.id} 的快照不完整，不能应用`, 409, 'snapshot_incomplete');
   }
   if (!Number.isSafeInteger(run.errorCount) || run.errorCount < 0) {
     throw httpError(`内容运行 ${run.id} 的 error_count 无效`, 409, 'snapshot_incomplete');
   }
-  if (run.errorCount > 0) {
+  if (!sealedForImport && run.errorCount > 0) {
     throw httpError(`内容运行 ${run.id} 包含采集错误，不能应用`, 409, 'snapshot_incomplete');
   }
 }

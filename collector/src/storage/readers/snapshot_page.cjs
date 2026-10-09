@@ -241,7 +241,7 @@ function readRunSnapshotPage(dbPath, runId, options = {}) {
   try {
     const run = resolveContentRun(db, runId);
     assertSnapshotTables(db, { all: true });
-    assertApplyableSnapshotRun(db, run);
+    assertApplyableSnapshotRun(db, run, { sealedForImport: options.sealedForImport === true });
     const { textbookExternalId } = resolveSnapshotTextbook(db, run, requestedTextbookId);
 
     const scopedCounts = {};

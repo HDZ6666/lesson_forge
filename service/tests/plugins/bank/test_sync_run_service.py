@@ -31,6 +31,10 @@ RACE_QUESTION_COUNT = 7
 
 def _configured(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv('BANK_COLLECTOR_URL', 'http://collector.test:9110')
+    from plugins.bank.service import sync_plans
+    async def unpaused(_db):
+        return {'paused': False, 'reason': None}
+    monkeypatch.setattr(sync_plans, 'control_status', unpaused)
 
 
 def _completed_remote(**extra: Any) -> dict[str, Any]:
@@ -1077,8 +1081,16 @@ def test_metadata_locator_validation_remains_source_scoped() -> None:
 
 
 @pytest.mark.asyncio
-async def test_startup_recovery_only_runs_in_writer_worker(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_immediate_recovery_is_writer_only_but_local_loops_start_for_readers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     _configured(monkeypatch)
+    from plugins.bank.service import incremental_import_worker, question_readiness_worker, sync_dispatch
+    starts = []
+    monkeypatch.setattr(incremental_import_worker, 'start_incremental_import_worker', lambda: starts.append('import'))
+    monkeypatch.setattr(question_readiness_worker, 'start_question_readiness_worker', lambda: starts.append('readiness'))
+    monkeypatch.setattr(sync_dispatch, 'start_sync_dispatch_worker', lambda: starts.append('dispatch'))
+    monkeypatch.setattr(module.SyncRunService, 'start_recovery_monitor', lambda: starts.append('recovery'))
     calls = 0
 
     async def recover() -> int:
@@ -1097,6 +1109,7 @@ async def test_startup_recovery_only_runs_in_writer_worker(monkeypatch: pytest.M
     await module.SyncRunService.shutdown()
 
     assert calls == 1
+    assert starts == ['recovery', 'import', 'readiness', 'dispatch'] * 2
 
 
 @pytest.mark.asyncio

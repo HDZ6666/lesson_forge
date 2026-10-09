@@ -112,6 +112,8 @@ class SyncTaskDao:
         query = select(QbSyncJob).where(QbSyncJob.task_module == task_module)
         if query_object.status:
             query = query.where(QbSyncJob.status == query_object.status)
+        if query_object.subject_id:
+            query = query.where(QbSyncJob.subject_id == query_object.subject_id)
         if query_object.create_time_start:
             query = query.where(QbSyncJob.create_time >= query_object.create_time_start)
         if query_object.create_time_end:
@@ -309,7 +311,7 @@ class SyncTaskDao:
 
     @staticmethod
     async def active(db: AsyncSession, task_module: str | None = None) -> QbSyncJob | None:
-        query = select(QbSyncJob).where(QbSyncJob.status.in_(_ACTIVE_STATUSES))
+        query = select(QbSyncJob).where(QbSyncJob.status.in_(_ACTIVE_STATUSES), QbSyncJob.active_slot.is_not(None))
         if task_module:
             query = query.where(QbSyncJob.task_module == task_module)
         result = await db.execute(query.order_by(desc(QbSyncJob.run_id)).limit(1))

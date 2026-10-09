@@ -893,21 +893,22 @@ class SyncService:
 
         try:
             if entity_type == 'version':
-                statement = select(*_VERSION_CURRENT_COLUMNS)
+                statement = select(*_VERSION_CURRENT_COLUMNS).where(QbTextbookVersion.subject_id == 1)
                 if source_provider:
-                    statement = statement.where(QbTextbookVersion.source_provider == source_provider)
+                    statement = statement.where(QbTextbookVersion.subject_id == 1, QbTextbookVersion.source_provider == source_provider)
                 rows = execute_mappings(await db.execute(statement))
                 values = [_formal_version(row) for row in rows]
             elif entity_type == 'textbook':
-                statement = select(*_TEXTBOOK_CURRENT_COLUMNS)
+                statement = select(*_TEXTBOOK_CURRENT_COLUMNS).where(QbTextbook.subject_id == 1)
                 version_statement = select(
                     QbTextbookVersion.version_id,
                     QbTextbookVersion.external_version_id,
                     QbTextbookVersion.source_provider,
                 )
                 if source_provider:
-                    statement = statement.where(QbTextbook.source_provider == source_provider)
-                    version_statement = version_statement.where(QbTextbookVersion.source_provider == source_provider)
+                    statement = statement.where(QbTextbook.subject_id == 1, QbTextbook.source_provider == source_provider)
+                    version_statement = version_statement.where(QbTextbookVersion.subject_id == 1, QbTextbookVersion.source_provider == source_provider)
+                version_statement = version_statement.where(QbTextbookVersion.subject_id == 1)
                 rows = execute_mappings(await db.execute(statement))
                 versions = execute_mappings(await db.execute(version_statement))
                 version_map = {
@@ -925,15 +926,16 @@ class SyncService:
                     for row in rows
                 ]
             elif entity_type == 'catalog':
-                statement = select(*_CATALOG_CURRENT_COLUMNS)
+                statement = select(*_CATALOG_CURRENT_COLUMNS).where(QbCatalogNode.subject_id == 1)
                 textbook_statement = select(
                     QbTextbook.textbook_id,
                     QbTextbook.external_textbook_id,
                     QbTextbook.source_provider,
                 )
                 if source_provider:
-                    statement = statement.where(QbCatalogNode.source_provider == source_provider)
-                    textbook_statement = textbook_statement.where(QbTextbook.source_provider == source_provider)
+                    statement = statement.where(QbCatalogNode.subject_id == 1, QbCatalogNode.source_provider == source_provider)
+                    textbook_statement = textbook_statement.where(QbTextbook.subject_id == 1, QbTextbook.source_provider == source_provider)
+                textbook_statement = textbook_statement.where(QbTextbook.subject_id == 1)
                 rows = execute_mappings(await db.execute(statement))
                 textbooks = execute_mappings(await db.execute(textbook_statement))
                 textbook_map = {
@@ -957,9 +959,9 @@ class SyncService:
                     for row in rows
                 ]
             else:
-                statement = select(*_QUESTION_CURRENT_COLUMNS)
+                statement = select(*_QUESTION_CURRENT_COLUMNS).where(QbQuestion.subject_id == 1)
                 if source_provider:
-                    statement = statement.where(QbQuestion.source_provider == source_provider)
+                    statement = statement.where(QbQuestion.subject_id == 1, QbQuestion.source_provider == source_provider)
                 rows = execute_mappings(await db.execute(statement))
                 values = [_formal_question(row) for row in rows]
         except SQLAlchemyError as exc:

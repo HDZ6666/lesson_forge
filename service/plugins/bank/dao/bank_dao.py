@@ -19,7 +19,9 @@ from plugins.bank.entity.do.bank_do import (
     QbQuestion,
     QbQuestionAsset,
     QbQuestionCatalog,
+    QbQuestionReadiness,
     QbQuestionTag,
+    QbSubject,
     QbSyncBatch,
     QbTextbook,
     QbTextbookVersion,
@@ -74,6 +76,8 @@ class BankDao:
         cls, db: AsyncSession, query_object: TextbookVersionQueryModel
     ) -> PageModel | list[dict[str, Any]]:
         query = cls._apply_status_filter(select(QbTextbookVersion), QbTextbookVersion.status, query_object)
+        if getattr(query_object, 'subject_id', None):
+            query = query.where(QbTextbookVersion.subject_id == query_object.subject_id)
         if query_object.version_name:
             query = query.where(QbTextbookVersion.version_name.ilike(f'%{query_object.version_name}%'))
         if query_object.source_provider:
@@ -97,6 +101,8 @@ class BankDao:
         cls, db: AsyncSession, query_object: TextbookQueryModel
     ) -> PageModel | list[dict[str, Any]]:
         query = cls._apply_status_filter(select(QbTextbook), QbTextbook.status, query_object)
+        if getattr(query_object, 'subject_id', None):
+            query = query.where(QbTextbook.subject_id == query_object.subject_id)
         if query_object.version_id:
             query = query.where(QbTextbook.version_id == query_object.version_id)
         if query_object.textbook_name:
@@ -144,11 +150,15 @@ class BankDao:
     ) -> dict[int, tuple[int, int]]:
         if not textbook_ids:
             return {}
-        catalog_on = QbCatalogNode.textbook_id == QbTextbook.textbook_id
+        catalog_on = (QbCatalogNode.textbook_id == QbTextbook.textbook_id) & (
+            QbCatalogNode.subject_id == QbTextbook.subject_id
+        )
         question_catalog_on = (QbQuestionCatalog.catalog_id == QbCatalogNode.catalog_id) & (
             QbQuestionCatalog.relation_type == 'query_catalog'
         )
-        question_on = QbQuestion.question_id == QbQuestionCatalog.question_id
+        question_on = (QbQuestion.question_id == QbQuestionCatalog.question_id) & (
+            QbQuestion.subject_id == QbTextbook.subject_id
+        )
         if not include_disabled:
             catalog_on = catalog_on & (QbCatalogNode.status == '0')
             question_on = question_on & (QbQuestion.status == '0')
@@ -183,6 +193,8 @@ class BankDao:
     @classmethod
     async def list_catalogs(cls, db: AsyncSession, query_object: Any) -> PageModel:
         query = cls._apply_status_filter(select(QbCatalogNode), QbCatalogNode.status, query_object)
+        if getattr(query_object, 'subject_id', None):
+            query = query.where(QbCatalogNode.subject_id == query_object.subject_id)
         if query_object.textbook_id:
             query = query.where(QbCatalogNode.textbook_id == query_object.textbook_id)
         if query_object.node_name:
@@ -284,6 +296,7 @@ class BankDao:
         await db.execute(delete(QbQuestionCatalog).where(QbQuestionCatalog.question_id.in_(ids)))
         await db.execute(delete(QbQuestionTag).where(QbQuestionTag.question_id.in_(ids)))
         await db.execute(delete(QbQuestionAsset).where(QbQuestionAsset.question_id.in_(ids)))
+        await db.execute(delete(QbQuestionReadiness).where(QbQuestionReadiness.question_id.in_(ids)))
         await db.execute(delete(QbQuestion).where(QbQuestion.question_id.in_(ids)))
 
     @classmethod
@@ -463,6 +476,11 @@ class BankDao:
         cls, db: AsyncSession, query_object: QuestionPageQueryModel
     ) -> PageModel:
         query = cls._apply_status_filter(select(QbQuestion), QbQuestion.status, query_object)
+        if query_object.usable_only:
+            from plugins.bank.service.coverage_queries import usable_scope_predicate
+            query = query.where(usable_scope_predicate())
+        if getattr(query_object, 'subject_id', None):
+            query = query.where(QbQuestion.subject_id == query_object.subject_id)
         if query_object.source_provider:
             query = query.where(QbQuestion.source_provider == query_object.source_provider)
         if query_object.keyword:
@@ -508,8 +526,28 @@ class BankDao:
                     )
                 )
 
-        include_disabled = cls._include_disabled(query_object)
+        include_disabled = cls._include_disabled(query_object) and not query_object.usable_only
         catalog_status = None if include_disabled else '0'
+        if query_object.usable_only and (query_object.textbook_id or query_object.catalog_id):
+            from plugins.bank.service.coverage_queries import enabled_scope
+            scope_query = (select(1).select_from(QbQuestionCatalog)
+                           .join(QbCatalogNode, QbCatalogNode.catalog_id == QbQuestionCatalog.catalog_id)
+                           .join(QbTextbook, QbTextbook.textbook_id == QbCatalogNode.textbook_id)
+                           .join(QbTextbookVersion, QbTextbookVersion.version_id == QbTextbook.version_id)
+                           .join(QbSubject, QbSubject.subject_id == QbTextbook.subject_id).where(
+                               QbQuestionCatalog.question_id == QbQuestion.question_id,
+                               QbQuestionCatalog.relation_type == 'query_catalog', enabled_scope(),
+                           ))
+            if query_object.textbook_id:
+                scope_query = scope_query.where(QbTextbook.textbook_id == query_object.textbook_id)
+            if query_object.catalog_id:
+                requested = await cls.get_catalog(db, query_object.catalog_id)
+                if requested is None:
+                    query = query.where(False)
+                else:
+                    scope_query = scope_query.where(QbTextbook.textbook_id == requested.textbook_id,
+                                                   requested.status == '0')
+            query = query.where(exists(scope_query))
         if query_object.textbook_id:
             query = query.where(
                 exists(
@@ -519,6 +557,7 @@ class BankDao:
                     .where(
                         QbQuestionCatalog.question_id == QbQuestion.question_id,
                         QbCatalogNode.textbook_id == query_object.textbook_id,
+                        QbCatalogNode.subject_id == QbQuestion.subject_id,
                         QbQuestionCatalog.relation_type == 'query_catalog',
                         QbCatalogNode.status == catalog_status if catalog_status is not None else True,
                     )
@@ -533,8 +572,10 @@ class BankDao:
             else:
                 query = query.where(
                     exists(
-                        select(1).where(
+                        select(1).select_from(QbQuestionCatalog)
+                        .join(QbCatalogNode, QbCatalogNode.catalog_id == QbQuestionCatalog.catalog_id).where(
                             QbQuestionCatalog.question_id == QbQuestion.question_id,
+                            QbCatalogNode.subject_id == QbQuestion.subject_id,
                             QbQuestionCatalog.catalog_id.in_(ids),
                             QbQuestionCatalog.relation_type == 'query_catalog',
                         )

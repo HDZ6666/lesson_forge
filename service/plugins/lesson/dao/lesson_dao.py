@@ -330,6 +330,7 @@ class LessonDao:
             )
             .join(LpScheme, LpScheme.scheme_id == LpGeneration.scheme_id)
             .outerjoin(QbTextbook, QbTextbook.textbook_id == LpScheme.textbook_id)
+            .where(LpGeneration.editor_schema_version == 1)
             .order_by(LpGeneration.generation_id.desc())
         )
         if query.textbook_id:

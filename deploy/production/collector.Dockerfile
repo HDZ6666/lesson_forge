@@ -1,5 +1,8 @@
 FROM node:22-bookworm-slim
 
+ARG SOURCE_REVISION=uncommitted
+LABEL org.opencontainers.image.revision=$SOURCE_REVISION
+
 ENV NODE_ENV=production \
     PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 \
     DISPLAY=:99

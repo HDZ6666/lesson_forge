@@ -13,13 +13,16 @@ import os
 import re
 import secrets
 import time
+import urllib.error
 from collections import deque
 from collections.abc import Mapping
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
+from uuid import uuid4
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
@@ -100,6 +103,15 @@ def _stable_json(value: Any) -> str:
 _WORKERS: dict[int, _WorkerHandle] = {}
 _RECOVERY_MONITOR_TASK: asyncio.Task[None] | None = None
 _RECOVERY_IN_PROGRESS = False
+_QUEUE_OWNER: ContextVar[tuple[int, str] | None] = ContextVar('bank_queue_owner', default=None)
+
+
+class WorkerOwnershipLost(ServiceException):
+    """A successor owns this dispatch; the old worker must stop writing."""
+
+
+class DispatchAckPending(ServiceException):
+    """Collector may have accepted the UUID; replay it before freeing the slot."""
 
 
 @dataclass
@@ -134,6 +146,8 @@ class _WorkerHandle:
     # A per-task question collection policy. Rehydrate this from options_json
     # so retries/resumes keep the same page-limit mode.
     limit_to_1000_pages: bool = False
+    workflow_version: int = 1
+    dispatch_job_id: str | None = None
 
 def _max_pages() -> int:
     """Allow an operator/test environment to reduce the site page ceiling."""
@@ -692,11 +706,14 @@ async def _update_row(
     expected_statuses: tuple[str, ...] | None = None,
 ) -> bool:
     async with DataSourceRegistry.session() as db:
+        owner = _QUEUE_OWNER.get()
+        owner_kwargs = {'expected_worker_token': owner[1]} if owner and owner[0] == run_id else {}
         affected = await SyncJobDao.update_fields(
             db,
             run_id,
             values,
             expected_statuses=expected_statuses,
+            **owner_kwargs,
         )
         await db.commit()
         return affected > 0
@@ -969,6 +986,9 @@ async def _compact_active_options(run_id: int) -> None:
                                .with_for_update())).scalars().first()
         if row is None or row.status not in ('starting', 'running', 'cancelling'):
             return
+        owner = _QUEUE_OWNER.get()
+        if owner and owner[0] == run_id and row.worker_token != owner[1]:
+            raise WorkerOwnershipLost(message='同步任务执行权已被接管')
         options = _row_options(row)
         compact = dict(options)
         for key in ('liveProgress', 'live_progress', 'liveProgressByScope', 'live_progress_by_scope'):
@@ -1090,6 +1110,11 @@ async def _update_scope_values(
 
     try:
         async with DataSourceRegistry.session() as db:
+            owner = _QUEUE_OWNER.get()
+            if owner and owner[0] == run_id:
+                parent = await SyncTaskDao.get_for_update(db, run_id)
+                if parent is None or parent.worker_token != owner[1]:
+                    raise WorkerOwnershipLost(message='同步任务执行权已被接管')
             if external_textbook_id:
                 result = await db.execute(
                     select(QbSyncJobScope).where(
@@ -1115,6 +1140,8 @@ async def _update_scope_values(
                 )
             await db.commit()
             return affected > 0
+    except WorkerOwnershipLost:
+        raise
     except Exception:
         return False
 
@@ -1224,7 +1251,7 @@ async def _materialize_textbook_scopes(  # noqa: PLR0912, PLR0915
         if version_external_ids:
             formal_version_result = await db.execute(
                 select(QbTextbookVersion).where(
-                    QbTextbookVersion.source_provider == PROVIDER,
+                    QbTextbookVersion.subject_id == 1, QbTextbookVersion.source_provider == PROVIDER,
                     QbTextbookVersion.external_version_id.in_(version_external_ids),
                 )
             )
@@ -1232,7 +1259,7 @@ async def _materialize_textbook_scopes(  # noqa: PLR0912, PLR0915
         if textbook_external_ids:
             formal_textbook_result = await db.execute(
                 select(QbTextbook).where(
-                    QbTextbook.source_provider == PROVIDER,
+                    QbTextbook.subject_id == 1, QbTextbook.source_provider == PROVIDER,
                     QbTextbook.external_textbook_id.in_(textbook_external_ids),
                 )
             )
@@ -1946,6 +1973,18 @@ async def _terminate_process(handle: _WorkerHandle) -> None:
 
     if handle.terminate_sent:
         return
+    owner = _QUEUE_OWNER.get()
+    if owner:
+        row = await _load_row(owner[0])
+        if row is None or row.worker_token != owner[1]:
+            raise WorkerOwnershipLost(message='同步任务执行权已被接管')
+        target = handle.remote_job_id or row.dispatch_job_id
+        try:
+            await asyncio.to_thread(CollectorClient().cancel_job, target, reserve_dispatch=True)
+        except ServiceException as exc:
+            raise DispatchAckPending(message='采集器暂不可用，正在等待确认停止结果') from exc
+        handle.terminate_sent = True
+        return
     handle.terminate_sent = True
     if not handle.remote_job_id:
         return
@@ -2110,11 +2149,18 @@ async def _execute_remote(  # noqa: PLR0912, PLR0915
             start_kwargs['textbook_scopes'] = list(handle.textbook_scopes)
         if handle.task_module == 'question' and handle.limit_to_1000_pages:
             start_kwargs['limit_to_1000_pages'] = True
-        remote = await asyncio.to_thread(
-            client.start_job,
-            handle.run_type,
-            **start_kwargs,
-        )
+        if handle.workflow_version >= 2:
+            start_kwargs['workflow_version'] = 2
+        dispatch_id = handle.dispatch_job_id
+        if dispatch_id:
+            start_kwargs['job_id'] = dispatch_id
+        try:
+            remote = await asyncio.to_thread(client.start_job, handle.run_type, **start_kwargs)
+        except ServiceException as exc:
+            cause = exc.__cause__
+            if dispatch_id and not (isinstance(cause, urllib.error.HTTPError) and cause.code in (400, 401, 403, 409)):
+                raise DispatchAckPending(message='等待核对采集器派发结果，将使用相同任务标识恢复') from exc
+            raise
     remote_job_id = str(
         remote.get('id') or remote.get('jobId') or remote.get('job_id') or handle.remote_job_id or ''
     ).strip()
@@ -2475,6 +2521,7 @@ async def _execute_remote(  # noqa: PLR0912, PLR0915
 
 
 async def _execute(run_id: int, handle: _WorkerHandle) -> None:  # noqa: PLR0912, PLR0915
+    owner_context = None
     try:
         # Rehydrate module/options from the durable row.  This is important
         # after a process restart and also keeps the worker from trusting
@@ -2488,6 +2535,11 @@ async def _execute(run_id: int, handle: _WorkerHandle) -> None:  # noqa: PLR0912
                 raise
             persisted_row = None
         if persisted_row is not None:
+            if getattr(persisted_row, 'dispatch_job_id', None):
+                if persisted_row.worker_token != handle.token:
+                    return
+                handle.dispatch_job_id = persisted_row.dispatch_job_id
+                owner_context = _QUEUE_OWNER.set((run_id, handle.token))
             handle.task_module = (
                 _scope_field(persisted_row, 'task_module', 'taskModule', default=None) or handle.task_module or 'center'
             )
@@ -2504,6 +2556,7 @@ async def _execute(run_id: int, handle: _WorkerHandle) -> None:  # noqa: PLR0912
                     except (TypeError, json.JSONDecodeError):
                         options = {}
                 options = options if isinstance(options, Mapping) else {}
+                handle.workflow_version = int(options.get('workflowVersion', 1))
                 handle.resumed = handle.resumed or bool(options.get('resumeTask') or options.get('resume_task'))
                 handle.limit_to_1000_pages = _status_flag(
                     options.get(
@@ -2642,6 +2695,8 @@ async def _execute(run_id: int, handle: _WorkerHandle) -> None:  # noqa: PLR0912
                 except Exception:
                     cancelled_before_start = False
                 if cancelled_before_start:
+                    if _QUEUE_OWNER.get():
+                        await _terminate_process(handle)
                     await _finish(run_id, handle, 'cancelled', 'cancelled', '同步在启动前被停止')
                 return
 
@@ -2665,6 +2720,16 @@ async def _execute(run_id: int, handle: _WorkerHandle) -> None:  # noqa: PLR0912
         max_pages = _max_pages()
         await _execute_remote(run_id, handle, max_pages)
         return
+    except DispatchAckPending as exc:
+        from plugins.bank.service.incremental_import import _clock
+        async with DataSourceRegistry.session() as clock_db:
+            retry_at = await _clock(clock_db) + timedelta(seconds=30)
+        await _update_row(run_id, {
+            'status': 'queued', 'dispatch_error': exc.message,
+            'dispatch_not_before': retry_at,
+        }, expected_statuses=('starting', 'running'))
+    except WorkerOwnershipLost:
+        return
     except asyncio.CancelledError:
         # Application shutdown can cancel the Python task after signalling the
         # child.  Keep a durable terminal state for the next process.
@@ -2685,7 +2750,10 @@ async def _execute(run_id: int, handle: _WorkerHandle) -> None:  # noqa: PLR0912
     except Exception as exc:  # pragma: no cover - defensive worker boundary
         await _finish(run_id, handle, 'failed', 'failed', f'同步任务异常：{exc}')
     finally:
-        _WORKERS.pop(run_id, None)
+        if owner_context is not None:
+            _QUEUE_OWNER.reset(owner_context)
+        if _WORKERS.get(run_id) is handle:
+            _WORKERS.pop(run_id, None)
 
 
 async def _finalize_scopes(
@@ -2753,7 +2821,7 @@ async def _finish(  # noqa: PLR0913
             'phase': final_phase,
             'active_slot': None,
             'process_id': None,
-            'worker_token': None,
+            'worker_token': handle.token if _QUEUE_OWNER.get() else None,
             'current_textbook_id': None,
             'current_textbook_name': None,
             'finished_at': datetime.now(),
@@ -2786,6 +2854,30 @@ async def _finish(  # noqa: PLR0913
         return values
 
     values = finish_values(status, phase, error_message)
+    owner = _QUEUE_OWNER.get()
+    if owner:
+        async with DataSourceRegistry.session() as db:
+            parent = await SyncTaskDao.get_for_update(db, run_id, 'question')
+            if parent is None or parent.worker_token != owner[1] or parent.status not in (
+                'queued', 'starting', 'running', 'cancelling',
+            ):
+                return
+            if parent.status == 'cancelling':
+                status, error_message = 'cancelled', '同步已停止'
+                values = finish_values(status, status, error_message)
+            for key, value in values.items():
+                setattr(parent, key, value)
+            # Job and unfinished scopes settle together. A dispatcher must
+            # not release the book between these two lifecycle writes.
+            for scope in await SyncTaskDao.scopes_for_update(db, run_id):
+                if scope.status in ('queued', 'starting', 'running'):
+                    scope.status = 'cancelled' if status in ('failed', 'blocked') and scope.status == 'queued' else status
+                    scope.error_message = error_message
+                    scope.finished_at = scope.update_time = datetime.now()
+            await db.commit()
+        from plugins.bank.service.import_intake_worker import register_task_intake
+        await register_task_intake(run_id)
+        return
     expected_statuses = (
         ('queued', 'starting', 'running', 'cancelling')
         if status == 'cancelled'
@@ -2797,8 +2889,19 @@ async def _finish(  # noqa: PLR0913
     )
     try:
         updated = await _update_row(run_id, values, expected_statuses=expected_statuses)
+        if not updated and _QUEUE_OWNER.get():
+            fallback = await _update_row(
+                run_id, finish_values('cancelled', 'cancelled', '同步已停止'), expected_statuses=('cancelling',),
+            )
+            if not fallback:
+                return
+            status, error_message = 'cancelled', '同步已停止'
+            updated = True
         if updated or status in {'cancelled', 'interrupted'}:
             await _finalize_scopes(run_id, status, error_message)
+            if handle.task_module == 'question' and handle.workflow_version == 2:
+                from plugins.bank.service.import_intake_worker import register_task_intake
+                await register_task_intake(run_id)
             return
 
         # Cancellation and process completion can arrive together.  If the
@@ -2810,6 +2913,9 @@ async def _finish(  # noqa: PLR0913
             expected_statuses=('cancelling',),
         )
         await _finalize_scopes(run_id, 'cancelled', '同步已停止')
+        if handle.task_module == 'question' and handle.workflow_version == 2:
+            from plugins.bank.service.import_intake_worker import register_task_intake
+            await register_task_intake(run_id)
     except Exception:
         # The original task state remains queryable even if the final status
         # update races with a database shutdown; startup recovery handles it.
@@ -2833,6 +2939,7 @@ class SyncRunService:
         retry_of_run_id: int | None = None,
         scope_rows: list[dict[str, Any]] | None = None,
         extra_options: dict[str, Any] | None = None,
+        defer_dispatch: bool = False,
     ) -> dict[str, Any]:
         """Persist one task and schedule its worker after the transaction commits."""
 
@@ -2859,9 +2966,13 @@ class SyncRunService:
             metadata_run_id = int(metadata_run_id)
         if not acknowledge_source_policy:
             raise ServiceException(message='开始同步前必须确认已核对来源站规则、授权范围和内容使用边界')
+        from plugins.bank.service.sync_plans import control_status
+        if (await control_status(db))['paused']:
+            raise ServiceException(message='同步已紧急暂停，请在同步总览恢复后再创建任务')
         # Fail closed at task creation: every worker, resume, and status path
         # relies on the configured collector HTTP service.
-        await asyncio.to_thread(CollectorClient().health)
+        if not defer_dispatch:
+            await asyncio.to_thread(CollectorClient().health)
         selected = list(textbook_external_ids or [])
         if len(selected) > MAX_SELECTED_TEXTBOOKS:
             raise ServiceException(message=f'教材选择数量不能超过 {MAX_SELECTED_TEXTBOOKS}')
@@ -2914,6 +3025,10 @@ class SyncRunService:
             raise ServiceException(message='教材选择列表不能包含重复 ID')
         options: dict[str, Any] = {
             'provider': PROVIDER,
+            'workflowVersion': 2 if not (source_task_id or retry_of_run_id) else 1,
+            'subjectId': 1,
+            'sourceProfile': 'zujuan_czsx',
+            'sourceNamespace': 'zujuan:junior:math',
             'taskModule': task_module,
             'catalogLevels': [1, 2, 3],
             'maxPages': _max_pages(),
@@ -2984,6 +3099,25 @@ class SyncRunService:
                 options['metadataRunId'] = None
         if selected and not selected_scope_rows and task_module == 'question':
             raise ServiceException(message='题库任务必须持久化教材范围')
+        if run_type == 'content' and options.get('workflowVersion', 2) >= 2 and len(selected) != 1:
+            raise ServiceException(message='新同步任务必须且只能选择一本教材')
+        dispatch_key = None
+        if defer_dispatch:
+            if task_module != 'question' or options.get('workflowVersion') != 2 or len(selected_scope_rows) != 1:
+                raise ServiceException(message='持久待办只接受新版单本题库任务')
+            from plugins.bank.service.sync_dispatch import book_key, existing_book_task, legacy_unsettled_book_task
+            local_book_id = _scope_field(selected_scope_rows[0], 'local_textbook_id', 'localTextbookId')
+            if not local_book_id or await db.get(QbTextbook, int(local_book_id), with_for_update=True) is None:
+                raise ServiceException(message='待办任务必须绑定正式教材')
+            dispatch_key = book_key(int(options['subjectId']), PROVIDER, selected[0])
+            existing = await existing_book_task(db, dispatch_key, limit_to_1000_pages=options['limitTo1000Pages'])
+            if existing is not None:
+                return _status_from_row(existing, await SyncTaskDao.scopes(db, existing.run_id)) or {}
+            legacy = await legacy_unsettled_book_task(db, int(options['subjectId']), PROVIDER, selected[0])
+            if legacy is not None:
+                if _row_options(legacy).get('workflowVersion', 1) < 2:
+                    raise ServiceException(message='该教材已有旧版活动任务，请先等待或停止原任务')
+                return _status_from_row(legacy, await SyncTaskDao.scopes(db, legacy.run_id)) or {}
         row = QbSyncJob(
             run_type=run_type,
             task_module=task_module,
@@ -2995,7 +3129,10 @@ class SyncRunService:
             retry_of_run_id=retry_of_run_id,
             options_json=options,
             total_textbooks=len(selected) if run_type == 'content' else 0,
-            active_slot='1',
+            subject_id=int(options['subjectId']),
+            active_slot=None if defer_dispatch else '1',
+            dispatch_book_key=dispatch_key,
+            dispatch_job_id=str(uuid4()) if defer_dispatch else None,
             created_by=operator,
             create_time=datetime.now(),
             update_time=datetime.now(),
@@ -3003,12 +3140,13 @@ class SyncRunService:
         scope_entities: list[QbSyncJobScope] = []
         run_id: int
         try:
-            stale_before = datetime.now() - timedelta(seconds=WORKER_HEARTBEAT_TIMEOUT_SECONDS)
-            await SyncJobDao.mark_interrupted(
-                db,
-                '后端工作进程已失联，未完成的同步任务已标记为失败',
-                stale_before,
-            )
+            if not defer_dispatch:
+                stale_before = datetime.now() - timedelta(seconds=WORKER_HEARTBEAT_TIMEOUT_SECONDS)
+                await SyncJobDao.mark_interrupted(
+                    db,
+                    '后端工作进程已失联，未完成的同步任务已标记为失败',
+                    stale_before,
+                )
             await SyncJobDao.add(db, row)
             run_id = int(row.run_id)
             if selected_scope_rows:
@@ -3028,6 +3166,10 @@ class SyncRunService:
             await db.commit()
         except IntegrityError as exc:
             await db.rollback()
+            if defer_dispatch:
+                existing = await existing_book_task(db, dispatch_key, limit_to_1000_pages=options['limitTo1000Pages'])
+                if existing is not None:
+                    return _status_from_row(existing, await SyncTaskDao.scopes(db, existing.run_id)) or {}
             raise ServiceException(message='已有同步任务正在运行，请等待当前任务完成') from exc
 
         # MySQL does not return every server-generated default on INSERT.
@@ -3038,6 +3180,9 @@ class SyncRunService:
             await db.refresh(scope)
         response = _status_from_row(row, scope_entities) if scope_entities else _status_from_row(row)
 
+        if defer_dispatch:
+            return response or {}
+
         token = secrets.token_hex(32)
         handle = _WorkerHandle(
             token=token,
@@ -3046,6 +3191,7 @@ class SyncRunService:
             metadata_run_id=None if task_module == 'question' else metadata_run_id,
             textbook_external_ids=selected,
             textbook_scopes=resolved_textbook_scopes,
+            workflow_version=int(options.get('workflowVersion', 1)),
             limit_to_1000_pages=bool(options.get('limitTo1000Pages', False)),
         )
         task = asyncio.create_task(_execute(run_id, handle))
@@ -3164,10 +3310,19 @@ class SyncRunService:
         if row is None:
             raise ServiceException(message='同步题库任务不存在')
         current_status = str(_scope_field(row, 'status', default='') or '').strip().lower()
+        if current_status == 'queued' and getattr(row, 'dispatch_job_id', None):
+            return _status_from_row(row, await SyncTaskDao.scopes(db, parsed_task_id)) or {}
         if current_status not in {'interrupted', 'blocked'}:
             raise ServiceException(message='只有已中断或已解除阻断的题库任务可以续采')
         if str(_scope_field(row, 'run_type', 'runType', default='content') or 'content').lower() != 'content':
             raise ServiceException(message='只有 content 题库任务可以续采')
+        from plugins.bank.service.question_apply_service import _uses_incremental_workflow
+        queue_resume = _uses_incremental_workflow(row)
+        if queue_resume:
+            from plugins.bank.service.import_intake import ensure_import_intake_finished
+            from plugins.bank.service.incremental_import import ensure_no_active_incremental_import
+            await ensure_no_active_incremental_import(db, parsed_task_id)
+            await ensure_import_intake_finished(db, parsed_task_id, automatic=operator is None)
 
         scope_lock = getattr(SyncTaskDao, 'scopes_for_update', None) or getattr(SyncTaskDao, 'locked_scopes', None)
         if not callable(scope_lock):
@@ -3177,11 +3332,11 @@ class SyncRunService:
             raise ServiceException(message='中断题库任务缺少教材范围，不能续采')
 
         active = await SyncTaskDao.active(db, 'question')
-        if active is not None:
+        if active is not None and not queue_resume:
             active_id = _positive_collector_run_id(_scope_field(active, 'run_id', 'runId', default=None))
             if active_id is None or active_id != parsed_task_id:
                 raise ServiceException(message='已有其他题库同步任务正在运行，请等待当前任务完成')
-        if any(other_id != parsed_task_id for other_id in _WORKERS):
+        if not queue_resume and any(other_id != parsed_task_id for other_id in _WORKERS):
             raise ServiceException(message='已有其他题库同步任务正在运行，请等待当前任务完成')
 
         options = _scope_field(row, 'options_json', 'optionsJson', default={})
@@ -3194,6 +3349,15 @@ class SyncRunService:
         expected_ids = _question_option_external_ids(options)
         identities = _strict_question_scope_identities(scopes, expected_external_ids=expected_ids)
         identity_by_id = {identity['externalTextbookId']: identity for identity in identities}
+        dispatch_key = None
+        if queue_resume:
+            from plugins.bank.service.sync_dispatch import book_key, existing_book_task
+            if len(scopes) != 1:
+                raise ServiceException(message='新版续采任务只能包含一本教材')
+            dispatch_key = book_key(int(row.subject_id), identities[0]['sourceProvider'], identities[0]['externalTextbookId'])
+            existing = await existing_book_task(db, dispatch_key, limit_to_1000_pages=bool(options.get('limitTo1000Pages')))
+            if existing and existing.run_id != parsed_task_id:
+                raise ServiceException(message='该教材已有其他待办或未结束任务，请先处理当前任务')
 
         completed_count = 0
         completed_catalogs = 0
@@ -3295,7 +3459,12 @@ class SyncRunService:
             row.options_json = resume_options
             row.metadata_run_id = None
             row.collector_job_id = None
-            row.active_slot = '1'
+            row.active_slot = None if queue_resume else '1'
+            if queue_resume:
+                row.dispatch_book_key = dispatch_key
+                row.dispatch_job_id = str(uuid4())
+                row.dispatch_not_before = None
+                row.dispatch_error = None
             row.process_id = None
             row.worker_token = None
             row.current_textbook_id = None
@@ -3326,6 +3495,9 @@ class SyncRunService:
             await db.rollback()
             raise
 
+        if queue_resume:
+            return _status_from_row(row, scopes) or {}
+
         # Use the same durable identities, including resume sources, for the
         # new worker.  The run/task number intentionally remains unchanged.
         worker_scopes = [_scope_identity(scope) for scope in scopes]
@@ -3337,6 +3509,7 @@ class SyncRunService:
             textbook_external_ids=[identity['externalTextbookId'] for identity in worker_scopes],
             textbook_scopes=worker_scopes,
             resumed=True,
+            workflow_version=int(options.get('workflowVersion', 1)),
             limit_to_1000_pages=_status_flag(
                 options.get('limitTo1000Pages', options.get('limit_to_1000_pages', False))
             ),
@@ -3349,6 +3522,11 @@ class SyncRunService:
     @staticmethod
     async def cancel(db: AsyncSession, run_id: int) -> dict[str, Any]:
         row = await SyncJobDao.get(db, run_id)
+        if getattr(row, 'dispatch_job_id', None):
+            from plugins.bank.service.sync_dispatch import cancel_waiting
+            if await cancel_waiting(db, run_id):
+                row = await SyncJobDao.get(db, run_id)
+                return _status_from_row(row, await SyncTaskDao.scopes(db, run_id)) or {}
         if row is None:
             raise ServiceException(message='同步任务不存在')
         if row.status in {'completed', 'failed', 'blocked', 'cancelled', 'interrupted'}:
@@ -3359,10 +3537,14 @@ class SyncRunService:
         await db.commit()
         if cancelled is None:
             cancelled = await SyncJobDao.get(db, run_id)
-        remote_job_id = str(getattr(cancelled, 'collector_job_id', '') or '').strip()
+        if getattr(cancelled, 'dispatch_job_id', None):
+            await db.refresh(cancelled)
+        dispatch_id = getattr(cancelled, 'dispatch_job_id', None)
+        remote_job_id = str(getattr(cancelled, 'collector_job_id', '') or dispatch_id or '').strip()
         if remote_job_id:
             try:
-                await asyncio.to_thread(CollectorClient().cancel_job, remote_job_id)
+                kwargs = {'reserve_dispatch': True} if dispatch_id else {}
+                await asyncio.to_thread(CollectorClient().cancel_job, remote_job_id, **kwargs)
             except ServiceException:
                 # The worker will retry cancellation while polling.  A remote
                 # terminal job is also safe to treat as already cancelled.
@@ -3391,6 +3573,21 @@ class SyncRunService:
                 run_id = int(row.run_id)
                 if run_id in _WORKERS:
                     continue
+                queue_token = None
+                if getattr(row, 'dispatch_job_id', None):
+                    # Only an expired owner can be replaced. Recheck under a
+                    # row lock; an older worker's ContextVar token then fails
+                    # every task/scope write against this new durable token.
+                    locked = (await db.execute(select(QbSyncJob).where(
+                        QbSyncJob.run_id == run_id, QbSyncJob.active_slot.is_not(None),
+                        QbSyncJob.update_time < stale_before,
+                    ).with_for_update().execution_options(populate_existing=True))).scalars().first()
+                    if locked is None or locked.status not in ('queued', 'starting', 'running', 'cancelling'):
+                        continue
+                    row = locked
+                    queue_token = secrets.token_hex(32)
+                    row.worker_token = queue_token
+                    row.update_time = datetime.now()
                 remote_job_id = str(getattr(row, 'collector_job_id', '') or '').strip()
                 task_module = str(getattr(row, 'task_module', 'center') or 'center')
                 options = getattr(row, 'options_json', None)
@@ -3431,7 +3628,7 @@ class SyncRunService:
                 if remote_job_id:
                     textbook_scopes = question_scopes
                     handle = _WorkerHandle(
-                        token=secrets.token_hex(32),
+                        token=queue_token or secrets.token_hex(32),
                         run_type=str(getattr(row, 'run_type', 'metadata') or 'metadata'),
                         task_module=task_module,
                         metadata_run_id=(
@@ -3447,9 +3644,11 @@ class SyncRunService:
                 # A remote job without a durable ID cannot be reattached after
                 # a Python restart. Only queued jobs may be started afresh;
                 # stale starting/running rows are finalized below.
-                if str(getattr(row, 'status', '') or '') == 'queued':
+                if str(getattr(row, 'status', '') or '') == 'queued' or queue_token:
+                    if queue_token and row.status in ('starting', 'running'):
+                        row.status = 'queued'
                     handle = _WorkerHandle(
-                        token=secrets.token_hex(32),
+                        token=queue_token or secrets.token_hex(32),
                         run_type=str(getattr(row, 'run_type', 'metadata') or 'metadata'),
                         task_module=str(getattr(row, 'task_module', 'center') or 'center'),
                         metadata_run_id=(
@@ -3576,14 +3775,16 @@ class SyncRunService:
 
         if not due_ids:
             return 0
-        try:
-            async with DataSourceRegistry.session() as db:
-                await SyncRunService.resume_question(db, due_ids[0], operator=None)
-            return 1
-        except ServiceException:
-            # Another worker/task may have claimed the single active slot.
-            # The durable pending flag remains for the next pass.
-            return 0
+        for task_id in due_ids:
+            try:
+                async with DataSourceRegistry.session() as db:
+                    await SyncRunService.resume_question(db, task_id, operator=None)
+                return 1
+            except ServiceException:
+                # A book waiting for import/manual judgement must not prevent
+                # other due books from claiming the single execution slot.
+                continue
+        return 0
 
     @staticmethod
     async def _recovery_monitor() -> None:
@@ -3633,22 +3834,38 @@ class SyncRunService:
 async def on_startup(context: object | None = None) -> None:
     """Plugin lifecycle hook: recover tasks left active by a process restart."""
 
-    if context is not None and not bool(getattr(context, 'startup_write_enabled', True)):
-        return
     # Validate operator configuration during the plugin startup hook, without
     # making a network request.  Every task/status path constructs the same
     # client later; failing here prevents a bank plugin from appearing ready
     # while its collector URL is absent or malformed.
     CollectorClient()
-    await SyncRunService.recover_orphans()
-    try:
-        await SyncRunService.resume_pending_question_tasks()
-    except Exception:
-        pass
+    if context is None or bool(getattr(context, 'startup_write_enabled', True)):
+        await SyncRunService.recover_orphans()
+        try:
+            await SyncRunService.resume_pending_question_tasks()
+        except Exception:
+            pass
+    # The startup writer flag protects installation/global initialization;
+    # it is not a durable daemon leader. A later process can reuse the ready
+    # marker as a reader after the writer has exited. Every process therefore
+    # starts its local loops; database slots, leases and ownership CAS decide
+    # who can execute a business task. No install/menu/resource writes here.
     SyncRunService.start_recovery_monitor()
+    from plugins.bank.service.incremental_import_worker import start_incremental_import_worker
+    start_incremental_import_worker()
+    from plugins.bank.service.question_readiness_worker import start_question_readiness_worker
+    start_question_readiness_worker()
+    from plugins.bank.service.sync_dispatch import start_sync_dispatch_worker
+    start_sync_dispatch_worker()
 
 
 async def on_shutdown(_context: object | None = None) -> None:
+    from plugins.bank.service.sync_dispatch import stop_sync_dispatch_worker
+    await stop_sync_dispatch_worker()
+    from plugins.bank.service.incremental_import_worker import stop_incremental_import_worker
+    await stop_incremental_import_worker()
+    from plugins.bank.service.question_readiness_worker import stop_question_readiness_worker
+    await stop_question_readiness_worker()
     await SyncRunService.shutdown()
     from plugins.bank.service.live_progress_cache import close
     await close()

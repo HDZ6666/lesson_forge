@@ -376,6 +376,8 @@ async function settleSourcePage(page, options, extras = {}) {
   let sawChallenge = false;
   let lastState = classifyProtectionState({});
   while (Date.now() < deadline) {
+    options.sourceControl?.assertAllowed();
+    options.resourceGuard?.assertAllowed();
     try {
       lastState = classifyProtectionState(await readProtectionSnapshot(page, contentSelector));
     } catch (error) {
@@ -387,6 +389,7 @@ async function settleSourcePage(page, options, extras = {}) {
     }
     if (lastState.hasContent) return lastState;
     if (lastState.terminalBlock) {
+      options.sourceControl?.requireManual(protectionStopMessage(lastState));
       throw new StopCrawlError(protectionStopMessage(lastState), 'challenge');
     }
     if (lastState.transientChallenge && !sawChallenge) {
@@ -396,6 +399,7 @@ async function settleSourcePage(page, options, extras = {}) {
     await sleep(200);
   }
   if (lastState.terminalBlock || lastState.transientChallenge || lastState.hasChallengeInputs) {
+    options.sourceControl?.requireManual(protectionStopMessage(lastState));
     throw new StopCrawlError(protectionStopMessage(lastState), 'challenge');
   }
   throw new StopCrawlError(
@@ -428,12 +432,15 @@ async function safeGoto(page, url, gate, options, label) {
   let lastError;
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     await gate.wait(label);
+    options.sourceControl?.assertAllowed();
     try {
+      options.sourceBudget?.request();
       const response = await page.goto(target, {
         waitUntil: 'domcontentloaded',
         timeout: options.timeout,
       });
       const status = response?.status() || 0;
+      options.sourceControl?.observe(status, response?.headers() || {});
       if ([401, 403].includes(status)) {
         throw new StopCrawlError(`HTTP ${status}，任务已熔断。`, `http_${status}`);
       }
@@ -463,10 +470,15 @@ async function safeGoto(page, url, gate, options, label) {
 async function inspectRobots(context, options) {
   const url = new URL('/robots.txt', options.baseUrl).href;
   try {
+    options.sourceControl?.assertAllowed();
+    options.resourceGuard?.assertAllowed();
+    options.sourceBudget?.request();
     const response = await context.request.get(url, {
       timeout: Math.min(options.timeout, 10000),
       failOnStatusCode: false,
     });
+    try { options.sourceControl?.observe(response.status(), response.headers()); }
+    catch (error) { try { await response.dispose?.(); } catch {} throw error; }
     if ([401, 403].includes(response.status())) {
       try { await response.dispose?.(); } catch {}
       return { status: 'unavailable', reason: `HTTP ${response.status()}` };
@@ -490,6 +502,7 @@ async function inspectRobots(context, options) {
     const blocked = disallows.some((rule) => rule === '/' || targetPath.startsWith(rule));
     return { status: blocked ? 'disallowed' : 'allowed', disallows };
   } catch (error) {
+    if (error.blocked) throw error;
     return { status: 'unknown', reason: error.message };
   }
 }
@@ -511,6 +524,8 @@ async function waitForVerification(page, options = {}) {
   const pollValue = Number(options.verificationPoll ?? DEFAULT_VERIFICATION_POLL);
   const poll = Math.max(100, Number.isFinite(pollValue) ? pollValue : DEFAULT_VERIFICATION_POLL);
   const requiresProbe = options.requireProbe === true;
+  options.sourceControl?.assertAllowed();
+  if (requiresProbe) options.sourceControl?.requireManual('来源要求验证，请人工核对后恢复');
   const probeValue = Number(options.verificationProbeInterval ?? DEFAULT_VERIFICATION_PROBE_INTERVAL);
   const probeInterval = Math.max(100, Number.isFinite(probeValue)
     ? probeValue : DEFAULT_VERIFICATION_PROBE_INTERVAL);
@@ -555,24 +570,28 @@ async function waitForVerification(page, options = {}) {
     let state = { challenge: false, text: '', title: '' };
     if (page && typeof page.evaluate === 'function') {
       try {
-        state = await page.evaluate(() => {
+        state = await page.evaluate((contentSelector) => {
           const text = document.body?.innerText || '';
           const title = document.title || '';
           const combined = `${title}\n${text}`;
+          const hasContent = Boolean(document.querySelector(contentSelector));
           return {
             challenge: Boolean(document.querySelector(
               '#parm_0, #parm_1, [class*="slider"], [class*="captcha"], [data-captcha="true"]',
-            )) || /验证码|滑块|安全验证|请按住滑块|拖动滑块|challenge|captcha|access denied/i.test(combined),
+            )) || (!hasContent && /验证码|滑块|安全验证|请按住滑块|拖动滑块|challenge|captcha|access denied/i.test(combined)),
+            hasContent,
             title,
             text: text.slice(0, 1000),
             url: location.href,
           };
-        });
+        }, SOURCE_CONTENT_SELECTOR);
       } catch (error) {
         state = { challenge: true, text: error.message, title: '' };
       }
     }
-    const challenge = Boolean(state?.challenge) || isProtectionText(`${state?.title || ''} ${state?.text || ''}`);
+    const challenge = Boolean(state?.challenge)
+      || (!state?.hasContent && isProtectionText(`${state?.title || ''} ${state?.text || ''}`));
+    if (challenge) options.sourceControl?.requireManual('来源要求验证，请人工核对后恢复');
     if (!challenge) {
       if (requiresProbe) {
         console.warn('[验证] 当前页未显示挑战控件；将以间隔 API probe，恢复后继续同一目录/页。');

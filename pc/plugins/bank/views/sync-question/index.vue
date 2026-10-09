@@ -3,7 +3,7 @@
     <header class="page-heading">
       <div>
         <h2>同步题库任务</h2>
-        <p>从当前正式数据中选择一个版本和多本教材，在同一任务内抓取完整目录与题目快照。</p>
+        <p>从当前正式数据中选择一本教材，单独采集目录与题目；历史多本任务仍可查看。</p>
       </div>
       <div class="heading-actions">
         <el-button :icon="Refresh" :loading="loading" @click="loadTasks">刷新</el-button>
@@ -12,15 +12,17 @@
     </header>
 
     <el-alert class="state-alert" type="info" :closable="false" show-icon>
-      “采集完成”不等于“已发布”。后续应用必须基于任务不可变快照生成发布批次。
+      采集完成表示本次抓取结束；题目是否已可用，请查看任务中的入库结果。
     </el-alert>
     <el-alert v-if="hasInterruptedTasks" class="state-alert" type="warning" :closable="false" show-icon>
       采集中断任务的已有快照和断点保留，可断点续采；也可重试从头创建新任务。
     </el-alert>
     <el-alert v-if="errorMessage" class="state-alert" type="error" :closable="false" show-icon>{{ errorMessage }}</el-alert>
 
-    <section class="panel">
+    <el-tabs v-model="activeTab"><el-tab-pane label="全部任务" name="tasks"/><el-tab-pane label="待处理问题" name="issues"/></el-tabs>
+    <section v-show="activeTab==='tasks'" class="panel">
       <el-form :inline="true" :model="filters" class="filter-form" @submit.prevent="searchTasks">
+        <el-form-item label="学科"><SubjectSelect v-model="filters.subjectId" @change="searchTasks" /></el-form-item>
         <el-form-item label="任务编号"><el-input v-model="filters.taskNo" clearable placeholder="请输入任务编号" @keyup.enter="searchTasks" /></el-form-item>
         <el-form-item label="状态">
           <el-select v-model="filters.status" clearable placeholder="全部状态" class="status-select">
@@ -62,6 +64,7 @@
           <template #default="scope"><el-link type="primary" :underline="false" @click="openDetail(scope.row)">{{ scope.row.taskNo || scope.row.taskId }}</el-link></template>
         </el-table-column>
         <el-table-column label="状态" width="112" align="center"><template #default="scope"><el-tag size="small" :type="syncTaskStatusMeta(scope.row.status).type">{{ syncTaskStatusMeta(scope.row.status).label }}</el-tag></template></el-table-column>
+        <el-table-column label="排队说明" min-width="180" show-overflow-tooltip><template #default="scope">{{ scope.row.queueReason || (scope.row.queueState === 'waiting' ? '等待后台派发' : '—') }}</template></el-table-column>
         <el-table-column label="选择版本" min-width="140" show-overflow-tooltip><template #default="scope">{{ scope.row.versionName || '—' }}</template></el-table-column>
         <el-table-column label="教材范围" min-width="210" show-overflow-tooltip><template #default="scope">{{ textbookSummary(scope.row) }}</template></el-table-column>
         <el-table-column prop="catalogCount" label="抓取目录" width="96" align="right" />
@@ -75,7 +78,7 @@
           <template #default="scope">
             <el-button v-hasPermi="['bank:sync:question:query', 'bank:sync:question:list', 'bank:sync:center:list']" link type="primary" :icon="View" @click="openDetail(scope.row)">查看详情</el-button>
             <el-button v-if="canCancelSyncTask(scope.row.status)" v-hasPermi="['bank:sync:question:cancel', 'bank:sync:run']" link type="danger" :icon="VideoPause" :loading="actionId === scope.row.taskId" @click="stopTask(scope.row)">停止</el-button>
-            <el-button v-if="canResumeSyncTask(scope.row)" v-hasPermi="['bank:sync:question:resume', 'bank:sync:run']" link type="primary" :icon="RefreshRight" :loading="actionId === scope.row.taskId" :disabled="Boolean(actionId)" @click="resumeTask(scope.row)">断点续采</el-button>
+            <el-button v-if="canResumeSyncTask(scope.row)" v-hasPermi="['bank:sync:question:resume', 'bank:sync:run']" link type="primary" :icon="RefreshRight" :loading="actionId === scope.row.taskId" :disabled="Boolean(actionId)" @click="resumeTask(scope.row)">{{ scope.row.workflowVersion === 2 ? '补采' : '断点续采' }}</el-button>
             <el-button v-if="canRetrySyncTask(scope.row.status)" v-hasPermi="['bank:sync:question:retry', 'bank:sync:question:add', 'bank:sync:run']" link type="warning" :icon="RefreshRight" :loading="actionId === scope.row.taskId" @click="retryTask(scope.row)">重试</el-button>
             <el-button v-if="canDeleteSyncTask(scope.row.status)" v-hasPermi="['bank:sync:question:remove', 'bank:sync:run']" link type="danger" :icon="Delete" :loading="actionId === scope.row.taskId" @click="deleteTask(scope.row)">删除</el-button>
           </template>
@@ -88,12 +91,14 @@
       </footer>
     </section>
 
+    <template v-if="activeTab==='issues'"><SubjectSelect v-model="filters.subjectId"/><SyncIssues :subject-id="filters.subjectId"/></template>
     <el-dialog v-model="createVisible" title="新增同步题库任务" width="720px" append-to-body @closed="resetCreate">
       <el-alert v-if="optionError" class="dialog-alert" type="error" :closable="false" show-icon>{{ optionError }}</el-alert>
       <el-form label-width="96px" v-loading="optionsLoading">
+        <el-form-item label="学科"><SubjectSelect v-model="createForm.subjectId" :clearable="false" sync-only @change="resetBookSelection" /></el-form-item>
         <el-form-item label="选择版本" required>
           <el-select v-model="createForm.versionId" placeholder="请选择当前正式版本" filterable class="full-control" @change="handleVersionChange">
-            <el-option v-for="version in optionVersions" :key="String(version.versionId)" :label="version.versionName" :value="version.versionId" :disabled="version.disabled">
+            <el-option v-for="version in visibleOptionVersions" :key="String(version.versionId)" :label="version.versionName" :value="version.versionId" :disabled="version.disabled">
               <div class="option-line"><span>{{ version.versionName }}</span><small v-if="version.disabled">{{ version.disabledReason || '缺少采集来源标识' }}</small></div>
             </el-option>
           </el-select>
@@ -102,15 +107,15 @@
           <div class="textbook-picker">
             <el-empty v-if="!createForm.versionId" :image-size="58" description="请先选择一个版本" />
             <el-empty v-else-if="!currentVersionTextbooks.length" :image-size="58" description="该版本下暂无教材" />
-            <el-checkbox-group v-else v-model="createForm.textbookIds" class="textbook-options">
+            <el-radio-group v-else v-model="createForm.textbookId" class="textbook-options">
               <div v-for="book in currentVersionTextbooks" :key="String(book.textbookId)" class="textbook-option" :class="{ 'is-disabled': book.disabled }">
-                <el-checkbox :value="book.textbookId" :disabled="book.disabled">
+                <el-radio :value="book.textbookId" :disabled="book.disabled">
                   <span class="book-name">{{ book.textbookName }}</span>
                   <span v-if="book.grade || book.volume" class="book-meta">{{ [book.grade, book.volume].filter(Boolean).join(' · ') }}</span>
-                </el-checkbox>
+                </el-radio>
                 <small v-if="book.disabled" class="disabled-reason">{{ book.disabledReason || '缺少采集来源标识' }}</small>
               </div>
-            </el-checkbox-group>
+            </el-radio-group>
           </div>
         </el-form-item>
         <el-form-item label="预计范围">
@@ -118,7 +123,7 @@
             <strong>{{ selectedVersion?.versionName || '尚未选择版本' }}</strong>
             <span>已选 {{ selectedBooks.length }} 本教材</span>
             <p v-if="selectedBooks.length">{{ selectedBooks.map((item) => item.textbookName).join('、') }}</p>
-            <p v-else>一次任务可选择同一版本下的一本或多本教材，不会拆成多个任务。</p>
+            <p v-else>一次任务可选择同一版本下的一本教材，其他教材另建任务。</p>
           </div>
         </el-form-item>
         <el-form-item label="分页限制">
@@ -128,7 +133,7 @@
           </div>
         </el-form-item>
         <el-form-item label="采集确认">
-          <el-checkbox v-model="acknowledged">我已确认来源授权和采集规则，并了解本任务不会自动发布。</el-checkbox>
+          <el-checkbox v-model="acknowledged">我已确认来源授权和采集规则，并了解合格成果会在后台自动分批入库。</el-checkbox>
         </el-form-item>
       </el-form>
       <template #footer>
@@ -140,6 +145,8 @@
 </template>
 
 <script setup>
+import SyncIssues from "../../components/SyncIssues.vue"
+import SubjectSelect from "../../components/SubjectSelect.vue"
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { Delete, Plus, Refresh, RefreshLeft, RefreshRight, Search, VideoPause, View } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -168,6 +175,7 @@ import {
   unwrapSyncTaskPage,
 } from '../../utils/sync-task'
 
+const activeTab = ref('tasks')
 const router = useRouter()
 const tasks = ref([])
 const tableRef = ref()
@@ -183,15 +191,17 @@ const optionsLoading = ref(false)
 const optionError = ref('')
 const optionVersions = ref([])
 const acknowledged = ref(false)
-const createForm = reactive({ versionId: '', textbookIds: [], limitTo1000Pages: false })
-const filters = reactive({ taskNo: '', status: undefined, versionName: '', createTimeRange: [], pageNum: 1, pageSize: 10 })
+const createForm = reactive({ subjectId: 1, versionId: '', textbookId: undefined, limitTo1000Pages: false })
+const filters = reactive({ subjectId: undefined, taskNo: '', status: undefined, versionName: '', createTimeRange: [], pageNum: 1, pageSize: 10 })
+let taskListRevision = 0
 let refreshTimer = null
 let mounted = false
 
+const visibleOptionVersions = computed(() => optionVersions.value.filter(item => String(item.subjectId || 1) === String(createForm.subjectId)))
 const selectedVersion = computed(() => optionVersions.value.find((item) => String(item.versionId) === String(createForm.versionId)))
 const currentVersionTextbooks = computed(() => selectedVersion.value?.textbooks || [])
-const selectedBooks = computed(() => currentVersionTextbooks.value.filter((item) => createForm.textbookIds.some((id) => String(id) === String(item.textbookId))))
-const canCreate = computed(() => Boolean(createForm.versionId && createForm.textbookIds.length && acknowledged.value && !optionsLoading.value))
+const selectedBooks = computed(() => currentVersionTextbooks.value.filter((item) => String(createForm.textbookId) === String(item.textbookId)))
+const canCreate = computed(() => Boolean(createForm.versionId && createForm.textbookId && acknowledged.value && !optionsLoading.value))
 const hasInterruptedTasks = computed(() => tasks.value.some((task) => task.status === 'interrupted'))
 
 function textbookSummary(task) {
@@ -204,6 +214,7 @@ function textbookSummary(task) {
 function requestQuery() {
   const [createTimeStart, createTimeEnd] = Array.isArray(filters.createTimeRange) ? filters.createTimeRange : []
   return {
+    subjectId: filters.subjectId,
     taskNo: filters.taskNo || undefined,
     status: filters.status || undefined,
     versionName: filters.versionName || undefined,
@@ -246,6 +257,7 @@ function clearSelection() {
 }
 
 async function loadTasks(silent = false) {
+  const revision = ++taskListRevision
   // Clear before the request too: a failed query must not leave an old row
   // armed for a later batch action.
   clearSelection()
@@ -253,22 +265,23 @@ async function loadTasks(silent = false) {
   errorMessage.value = ''
   try {
     const page = unwrapSyncTaskPage(await listQuestionSyncTasks(requestQuery()), 'question')
+    if (revision !== taskListRevision) return
     tasks.value = page.rows
     total.value = page.total
     // A refresh/query/page change invalidates table row identities; clear
     // selection so a stale task cannot be deleted accidentally.
     clearSelection()
   } catch (error) {
+    if (revision !== taskListRevision) return
     if (!silent) { tasks.value = []; total.value = 0 }
     errorMessage.value = syncTaskErrorMessage(error, '同步题库任务加载失败')
   } finally {
-    if (!silent) loading.value = false
-    scheduleRefresh()
+    if (revision === taskListRevision) { loading.value = false; scheduleRefresh() }
   }
 }
 
 function searchTasks() { filters.pageNum = 1; loadTasks() }
-function resetFilters() { Object.assign(filters, { taskNo: '', status: undefined, versionName: '', createTimeRange: [], pageNum: 1 }); loadTasks() }
+function resetFilters() { Object.assign(filters, { subjectId: undefined, taskNo: '', status: undefined, versionName: '', createTimeRange: [], pageNum: 1 }); loadTasks() }
 
 async function loadOptions() {
   optionsLoading.value = true
@@ -291,14 +304,16 @@ async function openCreate() {
 
 function resetCreate() {
   createForm.versionId = ''
-  createForm.textbookIds = []
+  createForm.textbookId = undefined
   createForm.limitTo1000Pages = false
   acknowledged.value = false
   optionError.value = ''
 }
 
+function resetBookSelection() { createForm.versionId = ''; createForm.textbookId = undefined }
+
 function handleVersionChange() {
-  createForm.textbookIds = []
+  createForm.textbookId = undefined
 }
 
 async function createTask() {
@@ -307,13 +322,13 @@ async function createTask() {
   try {
     const requestData = {
       versionId: createForm.versionId,
-      textbookIds: [...new Set(createForm.textbookIds)],
+      textbookId: createForm.textbookId,
     }
     if (createForm.limitTo1000Pages === true) requestData.limitTo1000Pages = true
     const task = unwrapSyncTask(await createQuestionSyncTask(requestData), 'question')
     if (!task?.taskId) throw new Error('服务端未返回任务编号')
     createVisible.value = false
-    ElMessage.success('同步题库任务已创建')
+    ElMessage.success('同步题库任务已加入队列；同一教材会复用未结束任务')
     await router.push(`/bank/sync-question/${encodeURIComponent(task.taskId)}`)
   } catch (error) {
     ElMessage.error(syncTaskErrorMessage(error, '同步题库任务创建失败'))
@@ -328,15 +343,16 @@ async function resumeTask(task) {
   if (actionId.value || !canResumeSyncTask(task)) return
   try {
     await ElMessageBox.confirm(
-      `将继续同一个任务“${task.taskNo || task.taskId}”。Collector 新 run 会继承旧快照并从断点继续，不会直接应用正式库。${task.status === 'blocked' ? '请先确认风控已解除。' : ''}确定断点续采吗？`,
+      task.workflowVersion === 2 ? `将为任务“${task.taskNo || task.taskId}”创建关联的补采任务，保留已有成果，核对当前页面后补齐；合格题目自动分批入库。` : `将继续同一个任务“${task.taskNo || task.taskId}”。Collector 新 run 会继承旧快照并从断点继续，不会直接应用正式库。${task.status === 'blocked' ? '请先确认风控已解除。' : ''}确定断点续采吗？`,
       '断点续采',
       { type: 'warning', confirmButtonText: '确认续采', cancelButtonText: '取消' },
     )
     actionId.value = task.taskId
     const resumed = unwrapSyncTask(await resumeQuestionSyncTask(task.taskId), 'question')
-    if (resumed?.taskId && String(resumed.taskId) !== String(task.taskId)) throw new Error('服务端返回了不同的任务编号')
-    ElMessage.success('断点续采已提交，仍将继续原任务')
+    if (!resumed?.taskId) throw new Error('服务端未返回任务编号')
+    ElMessage.success(task.workflowVersion === 2 ? '补采任务已提交' : '原任务续采已提交')
     await loadTasks(true)
+    if (String(resumed.taskId) !== String(task.taskId)) openDetail(resumed)
   } catch (error) {
     if (error !== 'cancel' && error !== 'close') ElMessage.error(syncTaskErrorMessage(error, '断点续采失败'))
   } finally {

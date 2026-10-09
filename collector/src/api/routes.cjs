@@ -23,6 +23,15 @@ const {
 const { readJson, safeEqual, sendAssetResponse, sendJson } = require('./http.cjs');
 const { CollectorJobManager, intInRange } = require('./job_manager.cjs');
 const { publicJob } = require('./progress.cjs');
+const { collectorReadiness } = require('../policies/collector_readiness.cjs');
+
+function queryBoolean(url, key) {
+  const value = url.searchParams.get(key);
+  if (value != null && !['true', 'false'].includes(value.toLowerCase())) {
+    throw new Error(`${key} 必须是 true 或 false`);
+  }
+  return value?.toLowerCase() === 'true';
+}
 
 function createCollectorServer(options = {}) {
   const token = String(options.token ?? process.env.COLLECTOR_API_TOKEN ?? '');
@@ -46,7 +55,22 @@ function createCollectorServer(options = {}) {
           ok: true,
           service: 'lesson-bank-collector',
           activeJobId: manager.activeJobId,
+          ...collectorReadiness(manager),
         });
+        return;
+      }
+      if (request.method === 'GET' && url.pathname === '/v1/source-control') {
+        sendJson(response, 200, manager.sourceControl.status());
+        return;
+      }
+      if (request.method === 'GET' && url.pathname === '/v1/source-budget') {
+        sendJson(response, 200, manager.sourceBudget.status());
+        return;
+      }
+      if (request.method === 'POST' && url.pathname === '/v1/source-control/resume') {
+        // Deployment token is checked above. No provider/session override.
+        const body = await readJson(request);
+        sendJson(response, 200, manager.sourceControl.resume(body.expectedRevision));
         return;
       }
       if (request.method === 'POST' && url.pathname === '/v1/jobs') {
@@ -87,6 +111,7 @@ function createCollectorServer(options = {}) {
             textbookExternalId: url.searchParams.get('textbookExternalId'),
             cursor: url.searchParams.get('cursor'),
             pageSize: url.searchParams.get('pageSize'),
+            sealedForImport: queryBoolean(url, 'sealedForImport'),
           },
         ));
         return;
@@ -100,6 +125,7 @@ function createCollectorServer(options = {}) {
           {
             textbookExternalId: url.searchParams.get('textbookExternalId'),
             dataDir: manager.dataDir,
+            sealedForImport: queryBoolean(url, 'sealedForImport'),
           },
         );
         sendAssetResponse(response, asset);
@@ -127,6 +153,7 @@ function createCollectorServer(options = {}) {
           {
             textbookExternalId: url.searchParams.get('textbookExternalId'),
             allowIncomplete,
+            sealedForImport: queryBoolean(url, 'sealedForImport'),
           },
         ));
         return;
@@ -161,7 +188,11 @@ function createCollectorServer(options = {}) {
       }
       const cancelMatch = url.pathname.match(/^\/v1\/jobs\/([0-9a-f-]+)\/cancel$/i);
       if (request.method === 'POST' && cancelMatch) {
-        const job = manager.cancel(cancelMatch[1]);
+        const body = await readJson(request);
+        if (body.reserveDispatch != null && typeof body.reserveDispatch !== 'boolean') {
+          throw new Error('reserveDispatch 必须是布尔值');
+        }
+        const job = manager.cancel(cancelMatch[1], { reserveDispatch: body.reserveDispatch === true });
         if (!job) {
           sendJson(response, 404, { error: { code: 'job_not_found', message: '采集任务不存在' } });
           return;

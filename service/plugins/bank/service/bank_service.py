@@ -152,6 +152,8 @@ def _safe_raw(value: object, depth: int = 0) -> object:
 
 
 def _check_immutable(values: dict, row: object, fields: set[str]) -> None:
+    if 'subject_id' in values and values['subject_id'] != getattr(row, 'subject_id', 1):
+        raise ServiceException(message='学科归属不允许修改')
     for field in fields:
         if field in values and values[field] != getattr(row, field, None):
             raise ServiceException(message=f'{field}为系统来源字段，不允许修改')
@@ -176,7 +178,16 @@ class BankService:
 
     @classmethod
     async def list_textbooks(cls, db: AsyncSession, query: TextbookQueryModel) -> PageModel:
-        return _rows_page(await BankDao.list_textbooks(db, query), TextbookModel)
+        from plugins.bank.service.book_coverage import book_coverage
+
+        page = _rows_page(await BankDao.list_textbooks(db, query), TextbookModel)
+        coverage = await book_coverage(
+            db, [row['textbookId'] for row in page.rows],
+            formal_counts={row['textbookId']: row['questionCount'] for row in page.rows} if query.include_disabled else None,
+        )
+        for row in page.rows:
+            row.update(coverage.get(row['textbookId'], {}))
+        return page
 
     @classmethod
     async def version_detail(cls, db: AsyncSession, version_id: int) -> dict:
@@ -189,21 +200,24 @@ class BankService:
 
     @classmethod
     async def textbook_detail(cls, db: AsyncSession, textbook_id: int) -> dict:
+        from plugins.bank.service.book_coverage import book_coverage
+
         row = await BankDao.get_textbook(db, textbook_id)
         if row is None:
             raise ServiceException(message='教材不存在')
         stats = await BankDao.textbook_stats(db, [textbook_id])
         row.catalog_count, row.question_count = stats.get(textbook_id, (0, 0))
-        return _dump(TextbookModel.model_validate(row))
+        return {**_dump(TextbookModel.model_validate(row)), **(await book_coverage(db, [textbook_id]))[textbook_id]}
 
     @classmethod
     async def catalog_detail(cls, db: AsyncSession, catalog_id: int) -> dict:
         row = await BankDao.get_catalog(db, catalog_id)
         if row is None:
             raise ServiceException(message='目录不存在')
-        direct = await BankDao.catalog_question_counts(db, [catalog_id])
-        row.direct_question_count = direct.get(catalog_id, 0)
-        row.descendant_question_count = await cls._descendant_question_count(db, catalog_id)
+        from plugins.bank.service.coverage_queries import catalog_coverage
+        counts = (await catalog_coverage(db, row.textbook_id, include_disabled=True)).get(catalog_id, {})
+        row.direct_question_count = counts.get('directQuestionCount', 0)
+        row.descendant_question_count = counts.get('descendantQuestionCount', 0)
         return _dump(CatalogNodeModel.model_validate(row))
 
     @classmethod
@@ -215,26 +229,15 @@ class BankService:
             for row in rows
             if cls._row_value(row, 'textbook_id', 'textbookId') is not None
         }
-        all_nodes: dict[int, list] = {}
-        all_direct: dict[int, int] = {}
-        include_disabled = BankDao._include_disabled(query)
-        for textbook_id in textbook_ids:
-            nodes = await BankDao.get_catalog_nodes(db, textbook_id, status=None)
-            all_nodes[textbook_id] = nodes
-            all_direct.update(
-                await BankDao.catalog_question_counts(
-                    db, [node.catalog_id for node in nodes], include_disabled=include_disabled
-                )
-            )
-        all_totals: dict[int, int] = {}
-        for nodes in all_nodes.values():
-            all_totals.update(cls._catalog_totals(nodes, all_direct))
+        from plugins.bank.service.coverage_queries import catalog_coverage
+        counts = await catalog_coverage(db, list(textbook_ids), include_disabled=BankDao._include_disabled(query))
         for row in rows:
             catalog_id = cls._row_value(row, 'catalog_id', 'catalogId')
             if catalog_id is None:
                 continue
-            direct = all_direct.get(int(catalog_id), 0)
-            descendant = all_totals.get(int(catalog_id), direct)
+            values = counts.get(int(catalog_id), {})
+            direct = values.get('directQuestionCount', 0)
+            descendant = values.get('descendantQuestionCount', 0)
             if isinstance(row, dict):
                 row['direct_question_count'] = direct
                 row['descendant_question_count'] = descendant
@@ -253,15 +256,21 @@ class BankService:
     async def catalog_tree(cls, db: AsyncSession, textbook_id: int, include_disabled: bool = False) -> list[dict]:
         """Return active nodes for browsing, or all nodes for management."""
         nodes = await BankDao.get_catalog_nodes(db, textbook_id, status=None if include_disabled else '0')
-        direct = await BankDao.catalog_question_counts(
-            db, [node.catalog_id for node in nodes], include_disabled=include_disabled
-        )
-        totals = cls._catalog_totals(nodes, direct)
+        from plugins.bank.service.coverage_queries import catalog_coverage
+        counts = await catalog_coverage(db, textbook_id, include_disabled=include_disabled)
+        # Reject malformed cycles/depth before constructing nested JSON.
+        parents = {node.catalog_id: node.parent_id for node in nodes}
+        for node in nodes:
+            seen, current = set(), node.catalog_id
+            while current in parents:
+                if current in seen or len(seen) >= 1000:
+                    raise ServiceException(message='目录层级存在循环或超过最大深度')
+                seen.add(current)
+                current = parents[current]
         result: dict[int, dict] = {}
         for node in nodes:
-            node.direct_question_count = direct.get(node.catalog_id, 0)
-            node.descendant_question_count = totals.get(node.catalog_id, 0)
-            result[node.catalog_id] = _dump(CatalogTreeModel.model_validate(node))
+            values = counts.get(node.catalog_id, {})
+            result[node.catalog_id] = {**_dump(CatalogTreeModel.model_validate(node)), **values}
         for node in result.values():
             node['children'] = []
         roots: list[dict] = []
@@ -273,39 +282,17 @@ class BankService:
                 roots.append(node)
         return roots
 
-    @staticmethod
-    def _catalog_totals(nodes: list, direct: dict[int, int]) -> dict[int, int]:
-        """Aggregate each node's direct questions into all of its ancestors."""
-        totals = {int(node.catalog_id): int(direct.get(node.catalog_id, 0)) for node in nodes}
-        parents = {int(node.catalog_id): node.parent_id for node in nodes}
-        for node_id, count in list(totals.items()):
-            current = node_id
-            seen = {node_id}
-            while parents.get(current) is not None:
-                parent = int(parents[current])
-                if parent in seen:
-                    break
-                seen.add(parent)
-                totals[parent] = totals.get(parent, 0) + count
-                current = parent
-        return totals
-
-    @classmethod
-    async def _descendant_question_count(cls, db: AsyncSession, catalog_id: int) -> int:
-        row = await BankDao.get_catalog(db, catalog_id)
-        if row is None:
-            return 0
-        nodes = await BankDao.get_catalog_nodes(db, row.textbook_id, status=None)
-        direct = await BankDao.catalog_question_counts(db, [node.catalog_id for node in nodes])
-        return cls._catalog_totals(nodes, direct).get(catalog_id, 0)
-
     @classmethod
     async def list_questions(cls, db: AsyncSession, query: QuestionPageQueryModel) -> PageModel:
         return _rows_page(await BankDao.list_questions(db, query), QuestionModel)
 
     @classmethod
     async def add_version(cls, db: AsyncSession, payload: TextbookVersionModel) -> dict:
+        if payload.subject_id is not None:
+            from plugins.bank.service.subject_service import SubjectService
+            await SubjectService.require(db, payload.subject_id)
         row = QbTextbookVersion(
+            subject_id=payload.subject_id or 1,
             source_provider='manual',
             external_version_id=None,
             version_name=_require_name(payload.version_name, '版本名称'),
@@ -362,9 +349,14 @@ class BankService:
 
     @classmethod
     async def add_textbook(cls, db: AsyncSession, payload: TextbookModel) -> dict:
-        if not payload.version_id or await BankDao.get_version(db, payload.version_id) is None:
+        version = await BankDao.get_version(db, payload.version_id or 0)
+        if version is None:
             raise ServiceException(message='所属版本不存在')
+        subject_id = getattr(version, 'subject_id', 1)
+        if payload.subject_id is not None and payload.subject_id != subject_id:
+            raise ServiceException(message='教材学科必须与所属版本一致')
         row = QbTextbook(
+            subject_id=subject_id,
             version_id=payload.version_id,
             source_provider='manual',
             external_textbook_id=None,
@@ -408,10 +400,12 @@ class BankService:
         values = {key: value for key, value in values.items() if key in allowed}
         if 'textbook_name' in values:
             values['textbook_name'] = _require_name(values['textbook_name'], '教材名称')
-        if 'version_id' in values and (
-            not values['version_id'] or await BankDao.get_version(db, values['version_id']) is None
-        ):
-            raise ServiceException(message='所属版本不存在')
+        if 'version_id' in values:
+            version = await BankDao.get_version(db, values['version_id'] or 0)
+            if version is None:
+                raise ServiceException(message='所属版本不存在')
+            if getattr(version, 'subject_id', 1) != getattr(row, 'subject_id', 1):
+                raise ServiceException(message='教材不能移动到其他学科')
         values['update_time'] = datetime.now()
         await _commit_or_rollback(db, BankDao.update_entity(db, row, values))
         return await cls.textbook_detail(db, row.textbook_id)
@@ -437,7 +431,10 @@ class BankService:
         if textbook is None:
             raise ServiceException(message='所属教材不存在')
         await cls._validate_catalog_parent(db, payload.textbook_id, payload.parent_id)
+        if payload.subject_id is not None and payload.subject_id != getattr(textbook, 'subject_id', 1):
+            raise ServiceException(message='目录学科必须与所属教材一致')
         row = QbCatalogNode(
+            subject_id=getattr(textbook, 'subject_id', 1),
             textbook_id=payload.textbook_id,
             parent_id=payload.parent_id,
             source_provider='manual',
@@ -480,8 +477,11 @@ class BankService:
             raise ServiceException(message='同步来源目录不能修改所属教材')
         if textbook_id != row.textbook_id and await BankDao.catalog_child_counts(db, [row.catalog_id]):
             raise ServiceException(message='含有子目录的节点不能直接移动教材')
-        if await BankDao.get_textbook(db, textbook_id) is None:
+        textbook = await BankDao.get_textbook(db, textbook_id)
+        if textbook is None:
             raise ServiceException(message='所属教材不存在')
+        if getattr(textbook, 'subject_id', 1) != getattr(row, 'subject_id', 1):
+            raise ServiceException(message='目录不能移动到其他学科')
         await cls._validate_catalog_parent(db, textbook_id, parent_id, row.catalog_id)
         if 'node_name' in values:
             values['node_name'] = _require_name(values['node_name'], '目录名称')
@@ -523,9 +523,14 @@ class BankService:
     @classmethod
     async def add_question(cls, db: AsyncSession, payload: QuestionWriteModel) -> dict:
         catalog_ids = await cls._validate_question_catalogs(db, payload.catalog_ids, required=True)
+        catalogs = await BankDao.get_catalogs(db, catalog_ids)
+        subject_id = getattr(catalogs[0], 'subject_id', 1)
+        if payload.subject_id is not None and payload.subject_id != subject_id:
+            raise ServiceException(message='题目学科必须与目录一致')
         tags = cls._question_tags(payload.tags)
         values = cls._question_values(payload, creating=True)
         row = QbQuestion(
+            subject_id=subject_id,
             source_provider='manual',
             external_question_id=None,
             answer_status=values.pop('answer_status', None) or 'unknown',
@@ -679,6 +684,9 @@ class BankService:
             if payload.catalog_ids is None:
                 raise ServiceException(message='catalogIds必须是数组')
             catalog_ids = await cls._validate_question_catalogs(db, payload.catalog_ids, required=True)
+            catalogs = await BankDao.get_catalogs(db, catalog_ids)
+            if any(getattr(catalog, 'subject_id', 1) != getattr(row, 'subject_id', 1) for catalog in catalogs):
+                raise ServiceException(message='题目不能关联其他学科的目录')
         if row.source_provider == 'manual' and 'tags' in relation_fields:
             if payload.tags is None:
                 raise ServiceException(message='tags必须是数组')

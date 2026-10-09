@@ -69,6 +69,8 @@ def test_client_sends_bearer_auth_and_server_owned_job_shape(
         'maxPages': 4,
         'metadataRunId': 12,
         'textbookExternalIds': ['tb-1'],
+        'workflowVersion': 1,
+        'sourceNamespace': 'zujuan:junior:math',
     }
 
 

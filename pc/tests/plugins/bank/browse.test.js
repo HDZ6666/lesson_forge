@@ -23,6 +23,7 @@ query.isFresh = true
 query.unsupported = 'must-not-be-sent'
 
 assert.deepEqual(buildBrowseQuery(query), {
+  usableOnly: true,
   textbookId: 8,
   catalogId: 13,
   keyword: '二次函数',

@@ -4,10 +4,22 @@
       <div class="heading-copy">
         <el-button link type="primary" :icon="ArrowLeft" @click="goBack">返回任务列表</el-button>
         <h2>同步题库任务详情</h2>
-        <p>查看目录新增和题数变化，选择本次需要同步的题目。</p>
+        <p>{{ isIncremental ? '查看本次采集进度、分批入库结果和待处理题数。' : '查看目录新增和题数变化，选择本次需要同步的题目。' }}</p>
       </div>
       <div class="heading-actions">
         <el-button :icon="Refresh" :loading="loading" @click="refreshTask">刷新状态</el-button>
+        <el-button
+          v-if="isIncremental && ['blocked', 'retry'].includes(task?.importIntake?.status)"
+          v-hasPermi="['bank:sync:question:apply']" type="warning" :icon="RefreshRight"
+          :loading="acting" @click="retryIntake"
+        >重试封存核验</el-button>
+        <el-button
+          v-if="isIncremental && task?.canRequestImport && !['completed', 'partial'].includes(task.incrementalImport?.status)"
+          v-hasPermi="['bank:sync:question:apply']"
+          type="primary" :icon="Upload" :loading="acting"
+          :disabled="acting || isActiveIncrementalImport(task)"
+          @click="requestImport"
+        >{{ task.incrementalImport?.status === 'failed' ? '继续入库' : '分批入库' }}</el-button>
         <el-button
           v-if="task && task.status === 'completed' && task.eligible"
           v-hasPermi="['bank:sync:question:apply']"
@@ -17,7 +29,7 @@
           :loading="acting"
           @click="applyTask"
         >{{ questionApplyActionLabel(task) }}</el-button>
-        <el-button v-if="task && canResumeSyncTask(task)" v-hasPermi="['bank:sync:question:resume', 'bank:sync:run']" type="primary" plain :icon="RefreshRight" :loading="acting" :disabled="acting" @click="resumeTask">断点续采</el-button>
+        <el-button v-if="task && canResumeSyncTask(task)" v-hasPermi="['bank:sync:question:resume', 'bank:sync:run']" type="primary" plain :icon="RefreshRight" :loading="acting" :disabled="acting || isActiveIncrementalImport(task) || isActiveImportIntake(task)" @click="resumeTask">{{ task.workflowVersion === 2 ? '补采' : '断点续采' }}</el-button>
         <el-button v-if="task && canCancelSyncTask(task.status)" v-hasPermi="['bank:sync:question:cancel', 'bank:sync:run']" type="danger" plain :icon="VideoPause" :loading="acting" @click="stopTask">停止任务</el-button>
         <el-button v-if="task && canRetrySyncTask(task.status)" v-hasPermi="['bank:sync:question:retry', 'bank:sync:question:add', 'bank:sync:run']" type="warning" plain :icon="RefreshRight" :loading="acting" @click="retryTask">重试任务</el-button>
       </div>
@@ -45,10 +57,10 @@
     </el-alert>
     <el-alert v-if="task?.status === 'interrupted'" class="state-alert" type="warning" :closable="false" show-icon>
       <template v-if="task.autoResumePending">已保留完整页断点，系统将于 {{ formatTaskTime(task.autoResumeNextAt) }} 自动续采（{{ task.autoResumeAttempt }}/{{ task.autoResumeMaxAttempts }}）。</template>
-      <template v-else>已有快照和断点保留，可断点续采；也可重试从头创建新任务。</template>
+      <template v-else>已有成果和日志保留，可创建补采任务；也可从头重跑。</template>
     </el-alert>
     <el-alert v-if="task?.status === 'blocked' && task?.resumeAvailable" class="state-alert" type="warning" :closable="false" show-icon>
-      已保留完整页断点。请先确认滑块/403 等风控已解除，再点击“断点续采”；阻断任务不会自动重试。
+      已有成果保留。请先处理来源验证，再补采；来源暂停状态会统一限制新任务。
     </el-alert>
     <el-alert v-if="task?.status === 'completed' && task?.isCurrent" class="state-alert" type="info" :closable="false" show-icon>
       当前任务快照已是正式题库，重复提交不会产生新的应用历史。
@@ -56,7 +68,7 @@
     <el-alert v-if="task?.status === 'completed' && task?.eligible && !task?.isCurrent && questionApplyWillReplace(task)" class="state-alert" type="warning" :closable="false" show-icon>
       本次应用将替换以下教材的当前正式题库快照：{{ affectedTextbookLabel }}。旧快照仍可回退或恢复。
     </el-alert>
-    <el-alert v-if="task?.status === 'completed' && !task?.isCurrent && !task?.eligible && task?.eligibilityMessage" class="state-alert" type="warning" :closable="false" show-icon>
+    <el-alert v-if="!isIncremental && task?.status === 'completed' && !task?.isCurrent && !task?.eligible && task?.eligibilityMessage" class="state-alert" type="warning" :closable="false" show-icon>
       当前任务暂不可应用：{{ task.eligibilityMessage }}
     </el-alert>
 
@@ -71,7 +83,7 @@
         <div class="summary-stat"><span>章节</span><strong>{{ liveStats.chapterCount }}</strong></div>
         <div class="summary-stat"><span>知识点</span><strong>{{ liveStats.knowledgePointCount }}</strong></div>
         <div class="summary-stat"><span>二级知识点</span><strong>{{ liveStats.secondaryKnowledgePointCount }}</strong></div>
-        <div class="summary-stat summary-stat-wide"><span>总题目</span><strong>{{ summaryTotalQuestionText }}</strong></div>
+        <div class="summary-stat summary-stat-wide"><span>{{ isIncremental ? '来源报告题数' : '总题目' }}</span><strong>{{ summaryTotalQuestionText }}</strong></div>
         <div class="summary-stat summary-stat-wide"><span>已采集</span><strong>{{ summaryCollectedQuestionText }}</strong></div>
       </div>
       <div class="summary-time-line">
@@ -86,7 +98,35 @@
       </section>
     </section>
 
-    <section v-if="task" class="comparison-workspace panel">
+    <el-alert v-if="task?.queueState === 'waiting' || (task?.status === 'queued' && task?.queueReason)" type="info" :closable="false" show-icon>
+      {{ task.queueReason || '任务已保存，等待后台依次派发。可以关闭页面，排队时不占用采集执行位置。' }}
+      <template v-if="task.queueNotBefore">下次检查：{{ formatTaskTime(task.queueNotBefore) }}</template>
+    </el-alert>
+
+    <section v-if="task && isIncremental" class="import-summary panel" aria-label="本次入库结果">
+      <div class="section-heading"><h3>本次入库结果</h3><el-tag :type="importMeta.type">{{ importMeta.label }}</el-tag></div>
+      <p>{{ importMeta.message }}</p>
+      <p v-if="task.importIntake && !task.incrementalImport" class="progress-basis">
+        核验尝试：{{ task.importIntake.attemptCount }} / {{ task.importIntake.attemptLimit }}
+        <template v-if="task.importIntake.nextAttemptAt"> · 下次核验：{{ formatImportTime(task.importIntake.nextAttemptAt) }}</template>
+      </p>
+      <el-alert v-if="task.importIntake?.errorMessage && !task.incrementalImport" type="warning" :closable="false">{{ task.importIntake.errorMessage }}</el-alert>
+      <p v-if="task.incrementalImport" class="progress-basis">入库编号：{{ task.incrementalImport.importId }}</p>
+      <div v-if="task.incrementalImport" class="summary-stat-grid">
+        <div class="summary-stat"><span>质量已检查</span><strong>{{ task.incrementalImport.checkedCount }}</strong></div>
+        <div class="summary-stat"><span>入库已处理</span><strong>{{ task.incrementalImport.processedCount }}</strong></div>
+        <div class="summary-stat"><span>合格已合并</span><strong>{{ task.incrementalImport.acceptedCount }}</strong></div>
+        <div class="summary-stat"><span>暂缓题目</span><strong>{{ task.incrementalImport.quarantinedCount }}</strong></div>
+        <div class="summary-stat"><span>已提交批次</span><strong>{{ task.incrementalImport.batchCount }}</strong></div>
+      </div>
+      <p v-if="task.incrementalImport" class="progress-basis">合并数包含新增、更新和内容未变化的题目；累计可用题目以教材浏览为准。</p>
+      <el-alert v-if="task.incrementalImport?.errorMessage" type="error" :closable="false">{{ task.incrementalImport.errorMessage }}</el-alert>
+      <RunCoverage :coverage="task.incrementalImport?.runCoverage" />
+      <SyncIssues :task-id="task.taskId" />
+      <ImportResults :task-id="task.taskId" :current-import-id="task.incrementalImport?.importId" :current-batch-no="task.incrementalImport?.batchCount || 0" />
+    </section>
+
+    <section v-if="task && !isIncremental" class="comparison-workspace panel">
       <div class="workspace-heading">
         <div><h3>任务快照对比</h3><p>查看本次目录更新，筛选需要同步的题目。采集过程中自动刷新。</p></div>
         <el-select v-model="selectedScopeKey" placeholder="选择任务教材" filterable class="scope-select" @change="handleScopeChange">
@@ -207,6 +247,8 @@ import { useRoute, useRouter } from 'vue-router'
 import {
   cancelQuestionSyncTask,
   applyQuestionSyncTask,
+  requestQuestionIncrementalImport,
+  retryQuestionImportIntake,
   getQuestionReviewCatalogs as getQuestionSyncCatalogComparison,
   getQuestionReviewQuestions as getQuestionSyncQuestionComparison,
   getQuestionReviewDetail as getQuestionSyncQuestionDetail,
@@ -216,6 +258,9 @@ import {
   retryQuestionSyncTask,
 } from '../../api/bank'
 import { sanitizeHtml } from '../../utils/html'
+import ImportResults from '../../components/ImportResults.vue'
+import SyncIssues from '../../components/SyncIssues.vue'
+import RunCoverage from '../../components/RunCoverage.vue'
 import {
   flattenCatalogTree,
   findCurrentCatalogNode,
@@ -231,6 +276,7 @@ import {
   canRetrySyncTask,
   formatQuestionApplyStats,
   formatTaskTime,
+  formatImportTime,
   isActiveSyncTask,
   questionApplyActionLabel,
   questionApplyAffectedTextbooks,
@@ -242,6 +288,9 @@ import {
   syncTaskErrorMessage,
   syncTaskStatusMeta,
   unwrapSyncTask,
+  incrementalImportMeta,
+  isActiveIncrementalImport,
+  isActiveImportIntake,
 } from '../../utils/sync-task'
 
 const QuestionSnapshot = defineComponent({
@@ -299,6 +348,7 @@ const questionDetailLoading = ref(false)
 const questionDetailError = ref('')
 const questionDetail = ref(null)
 let pollTimer = null
+let taskLoadRevision = 0
 let mounted = false
 let loadedScopeKey = ''
 
@@ -383,14 +433,18 @@ const summaryProgressBasis = computed(() => {
   return parts.join(' · ')
 })
 const summaryTotalQuestionText = computed(() => {
+  const source = task.value?.incrementalImport?.runCoverage?.sourceReport?.count
+  if (isIncremental.value && source != null) return formatLiveCount(source)
   const value = liveProjection.value?.totalQuestionCount
   if (value != null) return formatLiveCount(value)
+  if (isIncremental.value) return isActiveSyncTask(task.value?.status) ? '统计总数中' : '未记录'
   if (task.value?.status !== 'completed') return '统计总数中'
   return formatLiveCount(selectedScope.value?.questionCount ?? task.value?.questionCount)
 })
 const summaryCollectedQuestionText = computed(() => {
   const value = liveProjection.value?.collectedQuestionCount
   if (value != null) return formatLiveCount(value)
+  if (isIncremental.value) return formatLiveCount(selectedScope.value?.questionCount ?? task.value?.questionCount)
   if (task.value?.status !== 'completed') return '统计中'
   return formatLiveCount(selectedScope.value?.questionCount ?? task.value?.questionCount)
 })
@@ -425,6 +479,7 @@ const affectedTextbookLabel = computed(() => {
 })
 const currentFormalSummary = computed(() => questionApplyCurrentTaskSummary(task.value || {}))
 const completedStateMessage = computed(() => {
+  if (isIncremental.value) return '本次采集已结束。分批入库结果见下方，采集结束不代表已覆盖网站全部题目。'
   if (task.value?.isCurrent) return '采集已完成，且本任务快照已应用为当前正式题库。'
   const live = liveProjection.value
   const dataIncomplete = live?.dataComplete === false
@@ -530,11 +585,13 @@ function scopeQuery() {
   } : {}
 }
 
-function goBack() { router.push('/bank/sync-question') }
+const isIncremental = computed(() => task.value?.workflowVersion === 2)
+const importMeta = computed(() => incrementalImportMeta(task.value || {}))
+function goBack() { router.push(isIncremental.value ? '/sync-center/tasks' : '/bank/sync-question') }
 function clearPoll() { if (pollTimer !== null) window.clearTimeout(pollTimer); pollTimer = null }
 function schedulePoll() {
   clearPoll()
-  if (!mounted || !task.value || !isActiveSyncTask(task.value.status)) return
+  if (!mounted || !task.value || (!isActiveSyncTask(task.value.status) && !isActiveIncrementalImport(task.value) && !isActiveImportIntake(task.value))) return
   pollTimer = window.setTimeout(async () => { pollTimer = null; await loadTask(true) }, 2500)
 }
 
@@ -553,6 +610,7 @@ function selectDefaultScope() {
 }
 
 async function ensureComparisonLoaded() {
+  if (isIncremental.value) return
   selectDefaultScope()
   if (!selectedScopeKey.value) return
   const key = `${selectedScopeKey.value}:${task.value?.status || ''}`
@@ -562,11 +620,14 @@ async function ensureComparisonLoaded() {
 }
 
 async function loadTask(silent = false) {
-  if (!taskId.value) { requestError.value = '缺少任务编号，无法加载详情'; task.value = null; return }
+  const requestedTaskId = taskId.value
+  const requestRevision = ++taskLoadRevision
+  if (!requestedTaskId) { requestError.value = '缺少任务编号，无法加载详情'; task.value = null; return }
   if (!silent) loading.value = true
   requestError.value = ''
   try {
-    const result = unwrapSyncTask(await getQuestionSyncTask(taskId.value), 'question')
+    const result = unwrapSyncTask(await getQuestionSyncTask(requestedTaskId), 'question')
+    if (requestRevision !== taskLoadRevision || requestedTaskId !== taskId.value) return
     if (!result) throw new Error('未找到同步题库任务')
     task.value = result
     selectDefaultScope()
@@ -574,10 +635,12 @@ async function loadTask(silent = false) {
     // requests finish; each comparison section has its own loading/error UI.
     void ensureComparisonLoaded()
   } catch (error) {
-    requestError.value = syncTaskErrorMessage(error, '同步题库任务详情加载失败')
+    if (requestRevision === taskLoadRevision && requestedTaskId === taskId.value) requestError.value = syncTaskErrorMessage(error, '同步题库任务详情加载失败')
   } finally {
-    if (!silent) loading.value = false
-    schedulePoll()
+    if (requestRevision === taskLoadRevision) {
+      if (!silent) loading.value = false
+      schedulePoll()
+    }
   }
 }
 
@@ -755,16 +818,17 @@ async function resumeTask() {
   if (!task.value || acting.value || !canResumeSyncTask(task.value)) return
   try {
     await ElMessageBox.confirm(
-      `将继续同一个任务“${task.value.taskNo || task.value.taskId}”。Collector 新 run 会继承旧快照并从断点继续，不会直接应用正式库。${task.value.status === 'blocked' ? '请先确认风控已解除。' : ''}确定断点续采吗？`,
+      task.value.workflowVersion === 2 ? `将为任务“${task.value.taskNo || task.value.taskId}”创建关联的补采任务，保留已有成果，核对当前页面后补齐；合格题目自动分批入库。` : `将继续同一个任务“${task.value.taskNo || task.value.taskId}”。Collector 新 run 会继承旧快照并从断点继续，不会直接应用正式库。${task.value.status === 'blocked' ? '请先确认风控已解除。' : ''}确定断点续采吗？`,
       '断点续采',
       { type: 'warning', confirmButtonText: '确认续采', cancelButtonText: '取消' },
     )
     acting.value = true
     const resumed = unwrapSyncTask(await resumeQuestionSyncTask(task.value.taskId), 'question')
-    if (resumed?.taskId && String(resumed.taskId) !== String(task.value.taskId)) throw new Error('服务端返回了不同的任务编号')
-    ElMessage.success('断点续采已提交，仍将继续原任务')
+    if (!resumed?.taskId) throw new Error('服务端未返回任务编号')
+    ElMessage.success(task.value.workflowVersion === 2 ? '补采任务已提交' : '原任务续采已提交')
     loadedScopeKey = ''
-    await loadTask()
+    if (String(resumed.taskId) !== String(task.value.taskId)) await router.push(`/bank/sync-question/${encodeURIComponent(resumed.taskId)}`)
+    else await loadTask()
   } catch (error) {
     if (error !== 'cancel' && error !== 'close') ElMessage.error(syncTaskErrorMessage(error, '断点续采失败'))
   } finally { acting.value = false }
@@ -773,7 +837,7 @@ async function resumeTask() {
 async function stopTask() {
   if (!task.value) return
   try {
-    await ElMessageBox.confirm('停止后保留任务记录和日志，但不能进入发布批次。确定停止吗？', '停止任务', { type: 'warning', confirmButtonText: '停止', cancelButtonText: '取消' })
+    await ElMessageBox.confirm('停止后保留任务记录、日志和已采集成果；合格题仍可分批入库。确定停止吗？', '停止任务', { type: 'warning', confirmButtonText: '停止', cancelButtonText: '取消' })
     acting.value = true
     await cancelQuestionSyncTask(task.value.taskId)
     ElMessage.success('停止请求已提交')
@@ -841,12 +905,43 @@ async function applyTask() {
   } finally { acting.value = false }
 }
 
+async function requestImport() {
+  const targetTaskId = task.value?.taskId
+  if (!targetTaskId || acting.value) return
+  acting.value = true
+  try {
+    const response = await requestQuestionIncrementalImport(targetTaskId)
+    if (task.value?.taskId !== targetTaskId) return
+    const result = response?.data || response
+    task.value.incrementalImport = result
+    ElMessage.success(`已提交后台入库，编号 ${result.importId}`)
+    schedulePoll()
+  } catch (error) {
+    if (task.value?.taskId === targetTaskId) ElMessage.error(syncTaskErrorMessage(error, '提交入库失败，请刷新后重试'))
+  } finally { acting.value = false }
+}
+
+async function retryIntake() {
+  const targetTaskId = task.value?.taskId
+  if (!targetTaskId || acting.value) return
+  acting.value = true
+  try {
+    const response = await retryQuestionImportIntake(targetTaskId)
+    if (task.value?.taskId !== targetTaskId) return
+    task.value.importIntake = response?.data || response
+    ElMessage.success('已重新安排封存核验')
+    schedulePoll()
+  } catch (error) {
+    if (task.value?.taskId === targetTaskId) ElMessage.error(syncTaskErrorMessage(error, '重试核验失败'))
+  } finally { acting.value = false }
+}
+
 watch(taskId, () => {
   clearPoll(); loadedScopeKey = ''; task.value = null; resetComparisonState(); loadTask()
 })
 
 onMounted(() => { mounted = true; loadTask() })
-onBeforeUnmount(() => { mounted = false; clearPoll() })
+onBeforeUnmount(() => { mounted = false; taskLoadRevision++; clearPoll() })
 </script>
 
 <style scoped>
@@ -856,6 +951,7 @@ onBeforeUnmount(() => { mounted = false; clearPoll() })
 .heading-copy p { max-width: 760px; margin: 6px 0 0; color: var(--el-text-color-secondary); font-size: 13px; line-height: 1.6; }
 .heading-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
 .state-alert { margin-bottom: 14px; }
+.import-summary { margin-top: 16px; }
 .panel { min-width: 0; padding: 16px; border: 1px solid var(--el-border-color-light); border-radius: 8px; background: var(--el-bg-color); }
 .live-catalog-panel { margin-bottom: 16px; }
 .task-summary { margin-bottom: 16px; }

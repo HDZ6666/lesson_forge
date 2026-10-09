@@ -25,6 +25,8 @@ const MAX_PAYLOAD_CHARS = 512 * 1024;
 const LIVE_OWNER_TOKENS = new Set();
 
 const PERSISTED_FIELDS = [
+  'requestDigest',
+  'workflowVersion', 'sourceNamespace',
   'id', 'runType', 'status', 'phase', 'metadataRunId', 'collectorRunId',
   'textbookExternalIds', 'scopeItems', 'maxPages', 'limitTo1000Pages', 'totalVersions',
   'completedVersions', 'totalTextbooks', 'completedTextbooks', 'catalogCount',
@@ -38,6 +40,11 @@ const PERSISTED_FIELDS = [
 
 function ensureJobSchema(db) {
   db.exec(`
+    CREATE TABLE IF NOT EXISTS collector_job_requests (
+      id TEXT PRIMARY KEY,
+      request_digest TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
     CREATE TABLE IF NOT EXISTS ${JOB_TABLE} (
       id TEXT PRIMARY KEY,
       run_type TEXT NOT NULL,
@@ -185,11 +192,18 @@ class JobStore {
     values.active_slot = 1;
     const columns = Object.keys(values);
     try {
+      this.db.exec('BEGIN IMMEDIATE');
       this.db.prepare(`
         INSERT INTO ${JOB_TABLE} (${columns.join(', ')})
         VALUES (${columns.map(() => '?').join(', ')})
       `).run(...columns.map((column) => values[column]));
+      if (job.requestDigest) {
+        this.db.prepare('INSERT INTO collector_job_requests (id, request_digest, created_at) VALUES (?, ?, ?)')
+          .run(job.id, job.requestDigest, values.created_at);
+      }
+      this.db.exec('COMMIT');
     } catch (error) {
+      try { this.db.exec('ROLLBACK'); } catch {}
       if (isUniqueViolation(error)) {
         const conflict = new Error('采集器已有任务正在运行');
         conflict.statusCode = 409;
@@ -227,6 +241,18 @@ class JobStore {
     if (this.closed) return null;
     const row = this.db.prepare(`SELECT * FROM ${JOB_TABLE} WHERE id = ?`).get(String(jobId));
     return deserializeJob(row);
+  }
+
+  requestDigest(jobId) {
+    if (this.closed) return null;
+    return this.db.prepare('SELECT request_digest FROM collector_job_requests WHERE id = ?')
+      .get(String(jobId))?.request_digest || null;
+  }
+
+  reserveCancelledRequest(jobId) {
+    this.db.prepare('INSERT OR IGNORE INTO collector_job_requests (id, request_digest, created_at) VALUES (?, ?, ?)')
+      .run(String(jobId), 'cancelled', new Date().toISOString());
+    return this.load(jobId);
   }
 
   loadRecent(limit = MAX_LOADED_JOBS) {

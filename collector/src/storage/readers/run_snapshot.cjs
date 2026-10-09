@@ -50,6 +50,7 @@ const {
   assertRunCatalog,
 } = require('./common.cjs');
 const { snapshotRowObject } = require('./snapshot_page.cjs');
+const { readRunCoverage } = require('./run_coverage.cjs');
 
 function readRunSnapshot(dbPath, runId, options = {}) {
   const requestedTextbookId = optionalExternalId(
@@ -253,7 +254,8 @@ function readRunSnapshotSummary(dbPath, runId, expectedTextbookExternalId = null
     expected = config.textbookExternalId ?? config.externalTextbookId ?? null;
   }
   const textbookExternalId = optionalExternalId(expected, 'textbookExternalId');
-  const allowIncomplete = config.allowIncomplete === true || config.requireComplete === false;
+  const sealedForImport = config.sealedForImport === true;
+  const allowIncomplete = config.allowIncomplete === true || config.requireComplete === false || sealedForImport;
   const db = openReadOnly(dbPath);
   if (!db) {
     if (allowIncomplete) return null;
@@ -261,10 +263,10 @@ function readRunSnapshotSummary(dbPath, runId, expectedTextbookExternalId = null
   }
   try {
     const run = resolveContentRun(db, runId);
-    assertSnapshotTables(db, { all: !allowIncomplete });
+    assertSnapshotTables(db, { all: sealedForImport || !allowIncomplete });
 
-    if (!allowIncomplete) {
-      assertApplyableSnapshotRun(db, run);
+    if (sealedForImport || !allowIncomplete) {
+      assertApplyableSnapshotRun(db, run, { sealedForImport });
     }
 
     // Scope is derived from the run declaration plus immutable rows.  A
@@ -431,6 +433,7 @@ function readRunSnapshotSummary(dbPath, runId, expectedTextbookExternalId = null
       run: snapshotRun,
       scoped,
       counts,
+      coverage: snapshotLockPresent(run.snapshotLockedAt) ? readRunCoverage(db, run, scopeId, scopeIds) : null,
     };
     if (allowIncomplete) {
       const errorTableAvailable = tableNames(db).has('sync_errors');

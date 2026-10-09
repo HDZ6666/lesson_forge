@@ -8,6 +8,7 @@
 const {
   PROVIDER,
 } = require('../sources/zujuan/constants.cjs');
+const { assertMathSource } = require('../sources/registry.cjs');
 
 function buildScope(options, catalogCount = 0, selectedCount = 0, summaryInfo = {}) {
   const effectiveCatalogLevels = options.catalogLevels.length > 0
@@ -36,6 +37,8 @@ function buildScope(options, catalogCount = 0, selectedCount = 0, summaryInfo = 
     : [];
   return {
     provider: PROVIDER,
+    sourceNamespace: assertMathSource(options),
+    coverageFormat: 'run-coverage-v1',
     bankId: options.bankId,
     bankPath: options.bankPath,
     textbookId: options.textbookId,
@@ -55,10 +58,15 @@ function buildScope(options, catalogCount = 0, selectedCount = 0, summaryInfo = 
     },
     availableCatalogCount: catalogCount,
     selectedCatalogCount: selectedCount,
+    scanCatalogIds: !Array.isArray(summaryInfo) && Array.isArray(summaryInfo?.scanCatalogIds)
+      ? summaryInfo.scanCatalogIds.map(String) : [],
     // This is the provider's textbook-root total.  It is intentionally kept
     // separate from each catalog progress row, whose counts are page
     // occurrences and whose expected_total is only that node's total.
     textbookExpectedTotal,
+    textbookExpectedTotalObservedAt: !Array.isArray(summaryInfo)
+      && typeof summaryInfo?.textbookExpectedTotalObservedAt === 'string'
+      ? summaryInfo.textbookExpectedTotalObservedAt : null,
     summaryStrategy,
     summaryCatalogIds,
     summaryCatalogLevel: summaryLevels.length > 0 ? Math.min(...summaryLevels) : null,
@@ -80,6 +88,7 @@ function buildScope(options, catalogCount = 0, selectedCount = 0, summaryInfo = 
     requireDetails: false,
     requireAssets: options.downloadAssets,
     resumeFromRunId: options.resumeRunId,
+    resumeStrategy: 'head_and_verified_frontier',
   };
 }
 

@@ -2,7 +2,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Annotated, Literal
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
 from pydantic.alias_generators import to_camel
 
 from common.vo import ResponseBaseModel
@@ -35,7 +35,27 @@ class BankPageQueryModel(BankModel):
     page_size: PageSize = Field(default=10, description='每页数量')
 
 
+class ImportResultQueryModel(BankModel):
+    cursor: str | None = Field(default=None, max_length=512)
+    page_size: int = Field(default=20, ge=1, le=50)
+
+
+class SubjectModel(BankModel):
+    subject_id: int | None = Field(default=None, gt=0)
+    stage_code: Literal['primary', 'junior', 'senior']
+    subject_code: str = Field(min_length=1, max_length=30, pattern=r'^[a-z][a-z0-9_]*$')
+    subject_name: str = Field(min_length=1, max_length=50)
+    source_profile: str | None = Field(default=None, max_length=64)
+    status: Literal['0', '1'] = '0'
+    sort_order: int = Field(default=0, ge=0)
+
+
+class SubjectQueryModel(BankModel):
+    include_disabled: bool = False
+
+
 class TextbookVersionModel(BankModel):
+    subject_id: int | None = Field(default=None, gt=0)
     version_id: int | None = Field(default=None, description='版本主键')
     source_provider: str | None = Field(default=None, description='来源提供方')
     external_version_id: str | None = Field(default=None, description='来源版本 ID')
@@ -52,6 +72,7 @@ class TextbookVersionModel(BankModel):
 
 
 class TextbookVersionQueryModel(BankPageQueryModel):
+    subject_id: int | None = Field(default=None, gt=0)
     version_name: str | None = Field(default=None, description='版本名称')
     source_provider: str | None = Field(default=None, description='来源提供方')
     status: Literal['0', '1'] | None = Field(default=None, description='显式状态筛选')
@@ -59,6 +80,7 @@ class TextbookVersionQueryModel(BankPageQueryModel):
 
 
 class TextbookModel(BankModel):
+    subject_id: int | None = Field(default=None, gt=0)
     textbook_id: int | None = Field(default=None, description='教材主键')
     version_id: int | None = Field(default=None, description='版本主键')
     source_provider: str | None = Field(default=None, description='来源提供方')
@@ -78,6 +100,7 @@ class TextbookModel(BankModel):
 
 
 class TextbookQueryModel(BankPageQueryModel):
+    subject_id: int | None = Field(default=None, gt=0)
     version_id: int | None = Field(default=None, description='版本主键')
     textbook_name: str | None = Field(default=None, alias='textbookName', max_length=100, description='教材名称')
     grade: str | None = Field(default=None, max_length=20, description='年级中文原值')
@@ -87,7 +110,29 @@ class TextbookQueryModel(BankPageQueryModel):
     include_disabled: bool = Field(default=False, alias='includeDisabled', description='是否包含停用教材')
 
 
+class SourceObservationModel(BankModel):
+    count: int = Field(ge=0, description='来源在整本教材入口报告的题数，不表示精确缺口')
+    observed_at: datetime | None = Field(description='实际来源观察时刻；历史未记录时为 null')
+    basis: Literal['textbook_root_probe']
+    task_id: int = Field(gt=0)
+    import_id: int = Field(gt=0)
+    collector_run_id: int = Field(gt=0)
+    snapshot_locked_at: datetime
+
+
+class TextbookCoverageModel(TextbookModel):
+    """Read projection only; management writes still use TextbookModel."""
+
+    formal_question_count: int = Field(ge=0, description='按题目 ID 去重，包含停用题目和停用目录')
+    active_question_count: int = Field(ge=0, description='启用题目在启用目录中的去重数量，不代表已检查可用')
+    usable_question_count: int = Field(ge=0, description='启用范围内通过题干和必要素材检查的去重题数')
+    unchecked_question_count: int = Field(ge=0, description='启用范围内尚无当前有效检查事实的去重题数')
+    unusable_question_count: int = Field(ge=0, description='启用范围内当前检查不通过的去重题数')
+    latest_source_observation: SourceObservationModel | None = None
+
+
 class CatalogNodeModel(BankModel):
+    subject_id: int | None = Field(default=None, gt=0)
     catalog_id: int | None = Field(default=None, description='目录主键')
     textbook_id: int | None = Field(default=None, description='教材主键')
     parent_id: int | None = Field(default=None, description='父节点主键')
@@ -107,6 +152,8 @@ class CatalogNodeModel(BankModel):
 
 
 class CatalogTreeModel(CatalogNodeModel):
+    direct_usable_question_count: int = Field(default=0, ge=0)
+    descendant_usable_question_count: int = Field(default=0, ge=0)
     children: list['CatalogTreeModel'] = Field(default_factory=list, description='子节点')
 
 
@@ -120,6 +167,7 @@ class CatalogTreeQueryModel(BankModel):
 
 
 class CatalogPageQueryModel(BankPageQueryModel):
+    subject_id: int | None = Field(default=None, gt=0)
     textbook_id: int | None = Field(default=None, alias='textbookId', gt=0, description='教材主键')
     node_name: str | None = Field(default=None, alias='nodeName', max_length=300, description='目录名称')
     source_provider: str | None = Field(default=None, alias='sourceProvider', max_length=64, description='来源提供方')
@@ -128,6 +176,7 @@ class CatalogPageQueryModel(BankPageQueryModel):
 
 
 class QuestionModel(BankModel):
+    subject_id: int | None = Field(default=None, gt=0)
     question_id: int | None = Field(default=None, description='题目主键')
     source_provider: str | None = Field(default=None, description='来源提供方')
     external_question_id: str | None = Field(default=None, description='来源题目 ID')
@@ -213,6 +262,8 @@ class QuestionWriteModel(QuestionModel):
 
 
 class QuestionPageQueryModel(BankPageQueryModel):
+    usable_only: bool = Field(default=False, alias="usableOnly", description="只查询启用范围内已检查可用题")
+    subject_id: int | None = Field(default=None, gt=0)
     textbook_id: int | None = Field(default=None, alias='textbookId', gt=0, description='教材主键')
     catalog_id: int | None = Field(default=None, alias='catalogId', gt=0, description='目录主键')
     keyword: str | None = Field(default=None, max_length=200, description='关键词')
@@ -645,7 +696,18 @@ class QuestionTaskCreateModel(BankModel):
     )
 
     version_id: int = Field(alias='versionId', gt=0)
-    textbook_ids: list[int] = Field(alias='textbookIds', min_length=1, max_length=200)
+    textbook_ids: list[Annotated[int, Field(gt=0)]] = Field(alias='textbookIds', min_length=1, max_length=1)
+
+    @model_validator(mode='before')
+    @classmethod
+    def accept_single_textbook(cls, value):
+        # Accept the old single-element payload while rejecting ambiguity.
+        if isinstance(value, dict) and ('textbookId' in value or 'textbook_id' in value):
+            value = dict(value)
+            if 'textbookIds' in value or 'textbook_ids' in value:
+                raise ValueError('只能提供 textbookId 或单元素 textbookIds，不能同时提供')
+            value['textbookIds'] = [value.pop('textbookId', value.pop('textbook_id', None))]
+        return value
     limit_to_1000_pages: bool = Field(
         default=False,
         alias='limitTo1000Pages',
@@ -654,6 +716,7 @@ class QuestionTaskCreateModel(BankModel):
 
 
 class SyncTaskPageQueryModel(BankPageQueryModel):
+    subject_id: int | None = Field(default=None, gt=0)
     """Filters shared by the two independent task list pages."""
 
     model_config = ConfigDict(
@@ -669,6 +732,7 @@ class SyncTaskPageQueryModel(BankPageQueryModel):
 
 
 class SyncTaskScopeModel(BankModel):
+    subject_id: int = 1
     """One immutable textbook scope belonging to a task."""
 
     model_config = ConfigDict(
@@ -716,6 +780,7 @@ class SyncTaskScopeModel(BankModel):
 
 
 class SyncTaskModel(BankModel):
+    subject_id: int = 1
     """Public task status used by the independent task pages."""
 
     model_config = ConfigDict(
@@ -725,6 +790,9 @@ class SyncTaskModel(BankModel):
     )
 
     task_id: int = Field(alias='taskId', gt=0)
+    queue_state: Literal['waiting', 'dispatched', 'settling', 'closed'] | None = None
+    queue_not_before: datetime | None = None
+    queue_reason: str | None = None
     task_no: str | None = Field(default=None, alias='taskNo')
     task_module: SyncTaskModule = Field(default='center', alias='taskModule')
     run_type: SyncRunType = Field(default='metadata', alias='runType')
@@ -934,7 +1002,7 @@ class SyncContentRunStartRequestModel(BankModel):
     textbook_external_ids: list[str] = Field(
         alias='textbookExternalIds',
         min_length=1,
-        max_length=200,
+        max_length=1,
         description='用户明确选择的教材来源 ID，不能重复',
     )
 

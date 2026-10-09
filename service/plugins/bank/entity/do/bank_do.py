@@ -1,3 +1,5 @@
+from uuid import uuid4
+
 from sqlalchemy import (
     CHAR,
     JSON,
@@ -10,21 +12,46 @@ from sqlalchemy import (
     Numeric,
     SmallInteger,
     String,
+    event,
+    inspect,
+    update,
 )
-from sqlalchemy.dialects.mysql import LONGTEXT
+from sqlalchemy.dialects.mysql import DATETIME, LONGTEXT
+from sqlalchemy.orm import Session, attributes
 
 from config.database import Base
+
+
+class QbSubject(Base):
+    __tablename__ = 'qb_subject'
+    __table_args__ = (
+        Index('uk_qb_subject_stage_code', 'stage_code', 'subject_code', unique=True),
+        Index('uk_qb_subject_source_profile', 'source_profile', unique=True),
+        {'comment': '学段学科及经过验证的采集来源映射'},
+    )
+
+    subject_id = Column(BigInteger, primary_key=True, autoincrement=True)
+    stage_code = Column(String(30), nullable=False)
+    subject_code = Column(String(30), nullable=False)
+    subject_name = Column(String(50), nullable=False)
+    source_profile = Column(String(64), nullable=True)
+    sort_order = Column(Integer, nullable=False, server_default='0')
+    status = Column(CHAR(1), nullable=False, server_default='0')
+    create_time = Column(DateTime, nullable=False)
+    update_time = Column(DateTime, nullable=False)
 
 
 class QbTextbookVersion(Base):
     __tablename__ = 'qb_textbook_version'
     __table_args__ = (
-        Index('uk_qb_version_provider_external', 'source_provider', 'external_version_id', unique=True),
+        Index('uk_qb_version_provider_external', 'source_provider', 'subject_id', 'external_version_id', unique=True),
+        Index('idx_qb_version_subject', 'subject_id', 'status'),
         Index('idx_qb_version_status', 'status'),
         {'comment': '题库版本当前数据'},
     )
 
     version_id = Column(BigInteger, primary_key=True, autoincrement=True, nullable=False)
+    subject_id = Column(BigInteger, nullable=False, server_default='1')
     source_provider = Column(String(64), nullable=False)
     external_version_id = Column(String(64), nullable=True)
     version_name = Column(String(100), nullable=False)
@@ -41,13 +68,15 @@ class QbTextbookVersion(Base):
 class QbTextbook(Base):
     __tablename__ = 'qb_textbook'
     __table_args__ = (
-        Index('uk_qb_textbook_provider_external', 'source_provider', 'external_textbook_id', unique=True),
+        Index('uk_qb_textbook_provider_external', 'source_provider', 'subject_id', 'external_textbook_id', unique=True),
+        Index('idx_qb_textbook_subject', 'subject_id', 'status'),
         Index('idx_qb_textbook_version', 'version_id'),
         Index('idx_qb_textbook_status', 'status'),
         {'comment': '题库教材当前数据'},
     )
 
     textbook_id = Column(BigInteger, primary_key=True, autoincrement=True, nullable=False)
+    subject_id = Column(BigInteger, nullable=False, server_default='1')
     version_id = Column(BigInteger, nullable=False)
     source_provider = Column(String(64), nullable=False)
     external_textbook_id = Column(String(64), nullable=True)
@@ -66,13 +95,15 @@ class QbTextbook(Base):
 class QbCatalogNode(Base):
     __tablename__ = 'qb_catalog_node'
     __table_args__ = (
-        Index('uk_qb_catalog_provider_external', 'source_provider', 'external_node_id', unique=True),
+        Index('uk_qb_catalog_provider_external', 'source_provider', 'subject_id', 'external_node_id', unique=True),
+        Index('idx_qb_catalog_subject', 'subject_id', 'status'),
         Index('idx_qb_catalog_parent', 'textbook_id', 'parent_id'),
         Index('idx_qb_catalog_status', 'status'),
         {'comment': '题库目录节点当前数据'},
     )
 
     catalog_id = Column(BigInteger, primary_key=True, autoincrement=True, nullable=False)
+    subject_id = Column(BigInteger, nullable=False, server_default='1')
     textbook_id = Column(BigInteger, nullable=False)
     parent_id = Column(BigInteger, nullable=True)
     source_provider = Column(String(64), nullable=False)
@@ -91,7 +122,8 @@ class QbCatalogNode(Base):
 class QbQuestion(Base):
     __tablename__ = 'qb_question'
     __table_args__ = (
-        Index('uk_qb_question_provider_external', 'source_provider', 'external_question_id', unique=True),
+        Index('uk_qb_question_provider_external', 'source_provider', 'subject_id', 'external_question_id', unique=True),
+        Index('idx_qb_question_subject', 'subject_id', 'status'),
         Index('idx_qb_question_grade_term', 'grade', 'term'),
         Index('idx_qb_question_type_difficulty', 'question_type', 'difficulty'),
         Index('idx_qb_question_status', 'status'),
@@ -99,6 +131,7 @@ class QbQuestion(Base):
     )
 
     question_id = Column(BigInteger, primary_key=True, autoincrement=True, nullable=False)
+    subject_id = Column(BigInteger, nullable=False, server_default='1')
     source_provider = Column(String(64), nullable=False)
     external_question_id = Column(String(64), nullable=True)
     source_url = Column(String(500), nullable=True)
@@ -131,6 +164,9 @@ class QbQuestion(Base):
     reference_papers_json = Column(JSON, nullable=True)
     is_fresh = Column(CHAR(1), nullable=True)
     content_hash = Column(CHAR(64), nullable=True)
+    # A cache revision covers stem and asset changes even when content_hash
+    # is missing (manual questions) or an image changes without new HTML.
+    readiness_revision = Column(CHAR(32), nullable=True, default=lambda: uuid4().hex)
     raw_data_json = Column(JSON, nullable=True)
     last_sync_batch_id = Column(BigInteger, nullable=True)
     last_seen_at = Column(DateTime, nullable=True)
@@ -237,6 +273,77 @@ class QbQuestionAsset(Base):
     last_seen_at = Column(DateTime, nullable=True)
     create_time = Column(DateTime, nullable=False)
     update_time = Column(DateTime, nullable=False)
+
+
+class QbQuestionReadiness(Base):
+    __tablename__ = 'qb_question_readiness'
+    __table_args__ = (Index('idx_qb_readiness_status', 'status', 'question_id'),)
+
+    question_id = Column(BigInteger, primary_key=True, nullable=False)
+    subject_id = Column(BigInteger, nullable=False)
+    source_provider = Column(String(64), nullable=False)
+    external_question_id = Column(String(64), nullable=True)
+    question_revision = Column(CHAR(32), nullable=False)
+    content_hash = Column(CHAR(64), nullable=True)
+    stem_hash = Column(CHAR(64), nullable=False)
+    asset_signature = Column(CHAR(64), nullable=False)
+    has_image = Column(SmallInteger, nullable=False)
+    has_table = Column(SmallInteger, nullable=False)
+    stem_valid = Column(SmallInteger, nullable=False)
+    assets_ready = Column(SmallInteger, nullable=False)
+    status = Column(String(20), nullable=False)
+    reason = Column(String(500), nullable=True)
+    checked_at = Column(DATETIME(fsp=6), nullable=False)
+
+
+class QbQuestionReadinessSweep(Base):
+    __tablename__ = 'qb_question_readiness_sweep'
+
+    sweep_id = Column(Integer, primary_key=True, nullable=False)
+    last_question_id = Column(BigInteger, nullable=False, server_default='0')
+    worker_token = Column(CHAR(32), nullable=True)
+    lease_until = Column(DATETIME(fsp=6), nullable=True)
+    next_check_at = Column(DATETIME(fsp=6), nullable=True)
+
+
+@event.listens_for(Session, 'before_flush')
+def _invalidate_stem_readiness(session, _flush_context, _instances):
+    """No file IO: ORM stem/asset edits invalidate cached facts in the same transaction.
+
+    Core initial inserts have no existing facts. Publisher resets candidate
+    revisions before table swaps; Core deletes remove their derived facts.
+    """
+    stem_fields = ('content_html', 'plain_text', 'content_hash', 'subject_id',
+                   'source_provider', 'external_question_id')
+    asset_fields = ('question_id', 'asset_key', 'asset_type', 'file_hash', 'storage_path',
+                    'download_status', 'mime_type', 'width', 'height', 'source_provider')
+    asset_question_ids = set()
+    objects = session.new | session.dirty | session.deleted
+    for row in objects:
+        state = inspect(row)
+        if isinstance(row, QbQuestion) and row in session.dirty:
+            if any(state.attrs[name].history.has_changes() for name in stem_fields):
+                row.readiness_revision = uuid4().hex
+        elif isinstance(row, QbQuestionAsset) and (
+            row in session.new or row in session.deleted
+            or any(state.attrs[name].history.has_changes() for name in asset_fields)
+        ):
+            asset_question_ids.update(value for value in (
+                row.question_id, *state.attrs.question_id.history.deleted,
+            ) if value is not None)
+    if not asset_question_ids:
+        return
+    loaded = {row.question_id: row for row in session.identity_map.values() if isinstance(row, QbQuestion)}
+    loaded.update({row.question_id: row for row in session.new if isinstance(row, QbQuestion)})
+    ids = sorted(asset_question_ids)
+    for offset in range(0, len(ids), 1000):
+        chunk, token = ids[offset:offset + 1000], uuid4().hex
+        session.connection().execute(update(QbQuestion.__table__).where(
+            QbQuestion.question_id.in_(chunk),
+        ).values(readiness_revision=token))
+        for value in chunk:
+            if value in loaded:
+                attributes.set_committed_value(loaded[value], 'readiness_revision', token)
 
 
 class QbSyncBatch(Base):
@@ -361,6 +468,7 @@ class QbSyncJob(Base):
     """Persistent state for the backend-triggered source crawler."""
 
     __tablename__ = 'qb_sync_job'
+    subject_id = Column(BigInteger, nullable=False, server_default='1')
     __table_args__ = (
         Index('uk_qb_sync_job_active_slot', 'active_slot', unique=True),
         Index('idx_qb_sync_job_status', 'status'),
@@ -369,6 +477,8 @@ class QbSyncJob(Base):
         Index('idx_qb_sync_job_source_task', 'source_task_id'),
         Index('idx_qb_sync_job_retry_of', 'retry_of_run_id'),
         Index('idx_qb_sync_job_collector_job', 'collector_job_id'),
+        Index('uk_qb_sync_job_dispatch_book', 'dispatch_book_key', unique=True),
+        Index('idx_qb_sync_job_dispatch_due', 'status', 'active_slot', 'dispatch_not_before', 'run_id'),
         CheckConstraint(
             "status IN ('queued', 'starting', 'running', 'cancelling', 'completed', 'failed', 'blocked', 'cancelled', 'interrupted')",
             name='chk_qb_sync_job_status',
@@ -422,6 +532,12 @@ class QbSyncJob(Base):
     process_id = Column(BigInteger, nullable=True)
     worker_token = Column(String(64), nullable=True)
     active_slot = Column(CHAR(1), nullable=True)
+    # A pending single-book task has no active_slot. The book key remains
+    # reserved through intake/import and bounded automatic resume.
+    dispatch_book_key = Column(CHAR(64), nullable=True)
+    dispatch_job_id = Column(CHAR(36), nullable=True)
+    dispatch_not_before = Column(DateTime().with_variant(DATETIME(fsp=6), 'mysql'), nullable=True)
+    dispatch_error = Column(String(500), nullable=True)
     created_by = Column(String(64), nullable=True)
     started_at = Column(DateTime, nullable=True)
     finished_at = Column(DateTime, nullable=True)
@@ -433,6 +549,7 @@ class QbSyncJobScope(Base):
     """Immutable local/external task scope plus per-textbook run status."""
 
     __tablename__ = 'qb_sync_job_scope'
+    subject_id = Column(BigInteger, nullable=False, server_default='1')
     __table_args__ = (
         Index(
             'uk_qb_sync_scope_identity',
@@ -482,12 +599,108 @@ class QbSyncJobScope(Base):
     question_tag_count = Column(Integer, nullable=False, server_default='0')
     question_asset_count = Column(Integer, nullable=False, server_default='0')
     snapshot_complete = Column(SmallInteger, nullable=False, server_default='0')
-    snapshot_locked_at = Column(DateTime, nullable=True)
+    snapshot_locked_at = Column(DateTime().with_variant(DATETIME(fsp=6), 'mysql'), nullable=True)
     error_message = Column(String(2000), nullable=True)
     started_at = Column(DateTime, nullable=True)
     finished_at = Column(DateTime, nullable=True)
     create_time = Column(DateTime, nullable=False)
     update_time = Column(DateTime, nullable=False)
+
+
+class QbQuestionImportIntake(Base):
+    """Recoverable verification of one terminal Collector run, before QC."""
+
+    __tablename__ = 'qb_question_import_intake'
+    __table_args__ = (
+        Index('uk_qb_import_intake_scope_run', 'scope_id', 'collector_run_id', unique=True),
+        Index('idx_qb_import_intake_due', 'status', 'next_attempt_at', 'lease_until'),
+        Index('idx_qb_import_intake_task', 'task_id', 'intake_id'),
+        CheckConstraint(
+            "status IN ('pending','probing','retry','ready','blocked','discarded')",
+            name='chk_qb_import_intake_status',
+        ),
+        {'comment': '采集终态封存核验与自动入库提交'},
+    )
+
+    intake_id = Column(BigInteger, primary_key=True, autoincrement=True)
+    task_id = Column(BigInteger, nullable=False)
+    scope_id = Column(BigInteger, nullable=False)
+    collector_run_id = Column(BigInteger, nullable=False)
+    binding_hash = Column(CHAR(64), nullable=False)
+    status = Column(String(20), nullable=False)
+    attempt_count = Column(Integer, nullable=False, server_default='0')
+    attempt_limit = Column(Integer, nullable=False, server_default='3')
+    next_attempt_at = Column(DateTime, nullable=True)
+    worker_token = Column(CHAR(64), nullable=True)
+    lease_until = Column(DateTime, nullable=True)
+    error_kind = Column(String(32), nullable=True)
+    error_message = Column(String(2000), nullable=True)
+    import_id = Column(BigInteger, nullable=True)
+    create_time = Column(DateTime, nullable=False)
+    update_time = Column(DateTime, nullable=False)
+
+
+class QbQuestionImport(Base):
+    """One durable incremental import of a sealed task scope."""
+
+    __tablename__ = 'qb_question_import'
+    __table_args__ = (
+        Index('uk_qb_question_import_scope_run', 'scope_id', 'collector_run_id', unique=True),
+        Index('idx_qb_question_import_task', 'task_id', 'import_id'),
+        Index('idx_qb_question_import_lease', 'status', 'lease_until'),
+        Index('uk_qb_question_import_source_slot', 'active_source_slot', unique=True),
+        CheckConstraint("status IN ('queued','preparing','running','completed','partial','failed')", name='chk_qb_question_import_status'),
+        CheckConstraint('committed_cursor >= 0 AND committed_cursor <= question_count', name='chk_qb_question_import_cursor'),
+        {'comment': '封存题库结果的增量入库断点与租约'},
+    )
+
+    import_id = Column(BigInteger, primary_key=True, autoincrement=True)
+    task_id = Column(BigInteger, nullable=False)
+    scope_id = Column(BigInteger, nullable=False)
+    subject_id = Column(BigInteger, nullable=False)
+    source_provider = Column(String(64), nullable=False)
+    local_textbook_id = Column(BigInteger, nullable=False)
+    external_textbook_id = Column(String(64), nullable=False)
+    collector_run_id = Column(BigInteger, nullable=False)
+    snapshot_locked_at = Column(DateTime().with_variant(DATETIME(fsp=6), 'mysql'), nullable=False)
+    snapshot_complete = Column(SmallInteger, nullable=False)
+    quality_hash = Column(CHAR(64), nullable=True)
+    run_coverage_json = Column(JSON, nullable=True)
+    identity_hash = Column(CHAR(64), nullable=False)
+    question_count = Column(Integer, nullable=False)
+    cursor = Column('committed_cursor', Integer, nullable=False, server_default='0')
+    batch_no = Column(Integer, nullable=False, server_default='0')
+    accepted_count = Column(Integer, nullable=False, server_default='0')
+    quarantined_count = Column(Integer, nullable=False, server_default='0')
+    stats_json = Column(JSON, nullable=False)
+    status = Column(String(20), nullable=False)
+    stage = Column(String(20), nullable=False, server_default='importing')
+    active_source_slot = Column(String(64), nullable=True)
+    worker_token = Column(CHAR(64), nullable=True)
+    lease_until = Column(DateTime, nullable=True)
+    error_message = Column(String(2000), nullable=True)
+    finished_at = Column(DateTime, nullable=True)
+    create_time = Column(DateTime, nullable=False)
+    update_time = Column(DateTime, nullable=False)
+
+
+class QbQuestionImportBatch(Base):
+    __tablename__ = 'qb_question_import_batch'
+    __table_args__ = (
+        Index('uk_qb_import_batch_cursor', 'import_id', 'start_cursor', unique=True),
+        {'comment': '与正式题目同事务提交的增量批次结果'},
+    )
+
+    import_id = Column(BigInteger, primary_key=True)
+    batch_no = Column(Integer, primary_key=True)
+    start_cursor = Column(Integer, nullable=False)
+    next_cursor = Column(Integer, nullable=False)
+    batch_hash = Column(CHAR(64), nullable=False)
+    accepted_count = Column(Integer, nullable=False)
+    quarantined_count = Column(Integer, nullable=False)
+    stats_json = Column(JSON, nullable=False)
+    issues_json = Column(JSON, nullable=False)
+    create_time = Column(DateTime, nullable=False)
 
 
 class QbTextbookApplyState(Base):
@@ -587,3 +800,89 @@ class QbQuestionApplyHistory(Base):
     applied_at = Column(DateTime, nullable=False)
     create_time = Column(DateTime, nullable=False)
     update_time = Column(DateTime, nullable=False)
+
+
+class QbSyncControl(Base):
+    __tablename__ = 'qb_sync_control'
+    control_id = Column(Integer, primary_key=True)
+    paused = Column(SmallInteger, nullable=False, server_default='0')
+    reason = Column(String(500), nullable=True)
+    revision = Column(Integer, nullable=False, server_default='1')
+    issue_cursor = Column(BigInteger, nullable=False, server_default='0')
+    updated_by = Column(String(64), nullable=True)
+    update_time = Column(DateTime, nullable=False)
+
+
+class QbSyncPlan(Base):
+    __tablename__ = 'qb_sync_plan'
+    __table_args__ = (Index('uk_qb_sync_plan_subject', 'subject_id', unique=True),)
+    plan_id = Column(BigInteger, primary_key=True, autoincrement=True)
+    subject_id = Column(BigInteger, nullable=False)
+    enabled = Column(SmallInteger, nullable=False, server_default='0')
+    refresh_days = Column(Integer, nullable=False, server_default='7')
+    refill_hours = Column(Integer, nullable=False, server_default='24')
+    discovery_days = Column(Integer, nullable=False, server_default='7')
+    cycle_no = Column(Integer, nullable=False, server_default='0')
+    cycle_targets = Column(JSON, nullable=False)
+    cycle_started_at = Column(DateTime, nullable=True)
+    next_check_at = Column(DateTime, nullable=True)
+    discovery_task_id = Column(BigInteger, nullable=True)
+    discovery_processed_task_id = Column(BigInteger, nullable=False, server_default='0')
+    discovery_next_at = Column(DateTime, nullable=True)
+    discovery_error = Column(String(500), nullable=True)
+    worker_token = Column(CHAR(32), nullable=True)
+    lease_until = Column(DateTime, nullable=True)
+    revision = Column(Integer, nullable=False, server_default='1')
+    update_time = Column(DateTime, nullable=False)
+
+
+class QbSyncBookState(Base):
+    __tablename__ = 'qb_sync_book_state'
+    __table_args__ = (Index('uk_qb_sync_book_state', 'plan_id', 'textbook_id', unique=True),)
+    state_id = Column(BigInteger, primary_key=True, autoincrement=True)
+    plan_id = Column(BigInteger, nullable=False)
+    textbook_id = Column(BigInteger, nullable=False)
+    enabled = Column(SmallInteger, nullable=False, server_default='1')
+    exception_kind = Column(String(30), nullable=True)
+    operator_note = Column(String(500), nullable=True)
+    last_task_id = Column(BigInteger, nullable=True)
+    last_cycle_no = Column(Integer, nullable=False, server_default='0')
+    next_due_at = Column(DateTime, nullable=True)
+    last_finished_at = Column(DateTime, nullable=True)
+    revision = Column(Integer, nullable=False, server_default='1')
+
+
+class QbSyncIssue(Base):
+    __tablename__ = 'qb_sync_issue'
+    __table_args__ = (
+        Index('uk_qb_sync_issue_identity', 'identity_key', unique=True),
+        Index('idx_qb_sync_issue_book_status', 'textbook_id', 'status', 'issue_id'),
+    )
+    issue_id = Column(BigInteger, primary_key=True, autoincrement=True)
+    identity_key = Column(CHAR(64), nullable=False)
+    subject_id = Column(BigInteger, nullable=False)
+    source_provider = Column(String(64), nullable=False)
+    textbook_id = Column(BigInteger, nullable=False)
+    object_kind = Column(String(30), nullable=False)
+    object_key = Column(String(100), nullable=False)
+    error_type = Column(String(50), nullable=False)
+    status = Column(String(20), nullable=False, server_default='open')
+    reason = Column(String(2000), nullable=False)
+    first_task_id = Column(BigInteger, nullable=False)
+    latest_task_id = Column(BigInteger, nullable=False)
+    resolved_task_id = Column(BigInteger, nullable=True)
+    attempts = Column(Integer, nullable=False, server_default='1')
+    evidence_json = Column(JSON, nullable=False)
+    operator_note = Column(String(500), nullable=True)
+    revision = Column(Integer, nullable=False, server_default='1')
+    first_seen_at = Column(DateTime, nullable=False)
+    last_seen_at = Column(DateTime, nullable=False)
+    resolved_at = Column(DateTime, nullable=True)
+
+
+class QbSyncIssueTask(Base):
+    __tablename__ = 'qb_sync_issue_task'
+    issue_id = Column(BigInteger, primary_key=True)
+    task_id = Column(BigInteger, primary_key=True)
+    evidence_json = Column(JSON, nullable=False)
+    observed_at = Column(DateTime, nullable=False)

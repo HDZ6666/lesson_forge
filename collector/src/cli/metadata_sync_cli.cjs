@@ -14,6 +14,7 @@ const { DEFAULT_BASE_URL, DEFAULT_SEED_URL } = require('../sources/zujuan/consta
 const { MetadataStore, buildReport, formatReport, writeJsonOutput } = require('../storage/metadata_store.cjs');
 const { createProcessEventEmitter } = require('../jobs/events.cjs');
 const { runDiscovery } = require('../jobs/metadata_run.cjs');
+const { assertMathSource } = require('../sources/registry.cjs');
 
 function usage() {
   return `
@@ -142,7 +143,9 @@ function parseArgs(argv) {
   options.seedUrl = parsedSeed.href;
   options.baseUrl = parsedSeed.origin;
   const bank = parsedSeed.pathname.match(/^\/([^/]+)\//);
-  if (bank) options.bankPath = bank[1];
+  if (!bank) throw new Error('--seed-url 必须指向已接入的初中数学题库入口。');
+  options.bankPath = bank[1];
+  options.sourceNamespace = assertMathSource(options);
   return options;
 }
 

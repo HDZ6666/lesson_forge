@@ -280,7 +280,7 @@ function resumeSourceError(message, code = 'resume_source_invalid') {
  * Validate a sealed partial run before any of its rows are copied.  This is
  * intentionally usable by the API manager as well as the standalone CLI.
  */
-function validateResumeSourceRunInDb(db, sourceRunId, targetScope) {
+function validateResumeSourceRunInDb(db, sourceRunId, targetScope, { sealedRefill = false } = {}) {
   const parsedRunId = Number(sourceRunId);
   if (!Number.isSafeInteger(parsedRunId) || parsedRunId < 1) {
     throw resumeSourceError('resume-run-id 必须是正整数');
@@ -341,17 +341,16 @@ function validateResumeSourceRunInDb(db, sourceRunId, targetScope) {
 
   const errors = sourceRunErrors(db, parsedRunId);
   const status = String(run.status || '').trim().toLowerCase();
-  // Naming a blocked run on the CLI is an explicit operator action.  Its
-  // completed pages are still immutable and safe to inherit after the
-  // operator has resolved/cool-downed the challenge.  Automatic retry code
-  // must never select a blocked run; it only selects `interrupted` runs.
+  // Refills discard old scan evidence and check observations again. They
+  // may retain valid pages from a failed run; legacy in-place recovery only
+  // accepts transient failures. Source/host pause gates still apply.
   if (!['interrupted', 'failed', 'blocked'].includes(status)) {
     throw resumeSourceError(`来源运行 ${parsedRunId} 状态 ${status || 'unknown'} 不允许续采`);
   }
-  if (status === 'failed' && !isTransientResumeError(run, errors)) {
+  if (!sealedRefill && status === 'failed' && !isTransientResumeError(run, errors)) {
     throw resumeSourceError(`来源运行 ${parsedRunId} 不是可续采的瞬时错误`);
   }
-  if (status === 'interrupted' && hasDeterministicResumeError(run, errors)) {
+  if (!sealedRefill && status === 'interrupted' && hasDeterministicResumeError(run, errors)) {
     throw resumeSourceError(`来源运行 ${parsedRunId} 包含确定性失败，不能续采`);
   }
 
@@ -415,11 +414,11 @@ function validateResumeSourceRunInDb(db, sourceRunId, targetScope) {
   };
 }
 
-function validateResumeSourceRun(dbPath, sourceRunId, targetScope) {
+function validateResumeSourceRun(dbPath, sourceRunId, targetScope, options = {}) {
   let db;
   try {
     db = new DatabaseSync(path.resolve(dbPath), { readOnly: true });
-    return validateResumeSourceRunInDb(db, sourceRunId, targetScope);
+    return validateResumeSourceRunInDb(db, sourceRunId, targetScope, options);
   } finally {
     try { db?.close(); } catch {}
   }
@@ -668,7 +667,7 @@ function validateQuestionListResumeSourceRun(dbPath, sourceRunId, targetScope) {
     ...targetScope,
     maxPages: sourceScope.maxPages ?? targetScope.maxPages,
     limit: sourceScope.limit ?? targetScope.limit,
-  });
+  }, { sealedRefill: true });
 }
 
 module.exports = {

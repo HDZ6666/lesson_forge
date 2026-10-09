@@ -11,6 +11,8 @@ import {
   formatQuestionApplyStats,
   formatTextbookApplyStats,
   isActiveSyncTask,
+  isActiveImportIntake,
+  incrementalImportMeta,
   normalizeSyncTaskStatus,
   normalizeQuestionSyncOptions,
   normalizeSyncTask,
@@ -61,7 +63,7 @@ assert.match(textbookDetail, /该任务抓取的完整版本与教材/)
 assert.match(textbookDetail, /:description="applySuccess"/)
 assert.match(textbookDetail, /formatTextbookApplyStats\(result\)/)
 assert.match(questionList, /versionId: createForm\.versionId/)
-assert.match(questionList, /textbookIds: \[\.\.\.new Set\(createForm\.textbookIds\)\]/)
+assert.match(questionList, /textbookId: createForm\.textbookId/)
 assert.match(questionList, /缺少采集来源标识/)
 assert.match(questionDetail, /本次抓取题目/)
 assert.doesNotMatch(questionDetail, /label="题目对比"/)
@@ -82,7 +84,7 @@ assert.match(questionDetail, /currentFormalSummary/)
 // names/order stable so an installed plugin can upgrade without duplicate
 // routes, while the old list permissions remain the menu visibility gates.
 assert.match(manifest, /- name: 同步教材\n\s+path: sync-textbook[\s\S]*?routeName: BankSyncTextbookOverview[\s\S]*?perms: bank:sync:textbook:list[\s\S]*?orderNum: 8/)
-assert.match(manifest, /- name: 同步题库\n\s+path: sync-question\n\s+component: plugin\/bank\/sync-question\/index\n\s+routeName: BankSyncQuestionOverview[\s\S]*?perms: bank:sync:question:list[\s\S]*?orderNum: 9/)
+assert.match(manifest, /- name: 同步题库\n\s+path: sync-question\n\s+visible: \'1\'\n\s+component: plugin\/bank\/sync-question\/index\n\s+routeName: BankSyncQuestionOverview[\s\S]*?perms: bank:sync:question:list[\s\S]*?orderNum: 9/)
 for (const permission of [
   'bank:sync:textbook:query',
   'bank:sync:textbook:add',
@@ -125,7 +127,7 @@ assert.match(questionList, /await loadTasks\(true\)/)
 assert.match(questionDetail, /canResumeSyncTask\(task\.value\)/)
 assert.match(questionDetail, /bank:sync:question:resume/)
 assert.match(questionDetail, /resumeQuestionSyncTask\(task\.value\.taskId\)/)
-assert.match(questionDetail, /已有快照和断点保留，可断点续采；也可重试从头创建新任务/)
+assert.match(questionDetail, /已有成果和日志保留，可创建补采任务；也可从头重跑/)
 assert.match(questionList, /继续同一个任务、?[^\n]*Collector 新 run 会继承旧快照并从断点继续，不会直接应用正式库/)
 assert.match(questionDetail, /继续同一个任务、?[^\n]*Collector 新 run 会继承旧快照并从断点继续，不会直接应用正式库/)
 assert.match(questionDetail, /await resumeQuestionSyncTask\(task\.value\.taskId\)/)
@@ -150,7 +152,7 @@ assert.equal(canResumeSyncTask({ status: 'failed', resumeAvailable: true }), fal
 
 // Creation payloads must not leak collector-owned IDs, URLs or view state.
 assert.match(api, /acknowledgeSourcePolicy: data\?\.acknowledgeSourcePolicy === true/)
-assert.match(api, /data: \{\n\s+versionId: data\?\.versionId,\n\s+textbookIds,\n\s+\}/)
+assert.match(api, /data: \{\n\s+versionId: data\?\.versionId,\n\s+textbookId: Number\(textbookIds\[0\]\),\n\s+\}/)
 assert.doesNotMatch(api, /createQuestionSyncTask\(data\)[\s\S]{0,500}data:\s*data[\s,}]/)
 
 const task = normalizeSyncTask({
@@ -418,4 +420,27 @@ assert.equal(unclassifiedQuestion.rows[0].fetched.analysisHtml, '')
 assert.equal(unclassifiedQuestion.rows[0].current.answerHtml, '<p>B</p>')
 assert.equal(unclassifiedQuestion.rows[0].current.analysisHtml, '<p>因为……</p>')
 
+assert.equal(isActiveImportIntake({ awaitingImportIntake: true }), true)
+for (const status of ['pending', 'probing', 'retry']) {
+  assert.equal(isActiveImportIntake({ importIntake: { status } }), true)
+}
+assert.equal(isActiveImportIntake({ importIntake: { status: 'blocked' } }), false)
+assert.equal(incrementalImportMeta({ importIntake: { status: 'probing' } }).label, '封存核验中')
+assert.equal(incrementalImportMeta({ importIntake: { status: 'blocked' } }).label, '核验待处理')
+assert.equal(incrementalImportMeta({ incrementalImport: { status: 'partial' }, importIntake: { status: 'ready' } }).label, '部分成果已保留')
+
 console.log('sync task module assertions passed')
+
+const waiting = normalizeSyncTask({
+  taskId: 55, status: 'queued', queueState: 'waiting', queueReason: '采集器暂不可用',
+  queueNotBefore: '2026-10-02T10:00:00', workflowVersion: 2,
+}, 'question')
+assert.equal(waiting.queueState, 'waiting')
+assert.equal(waiting.queueReason, '采集器暂不可用')
+assert.equal(canCancelSyncTask(waiting.status), true)
+assert.equal(canRetrySyncTask(waiting.status), false)
+
+assert.equal(canResumeSyncTask({workflowVersion:2, status:'completed', resumeAvailable:true}), true)
+assert.equal(canResumeSyncTask({workflowVersion:2, status:'completed', resumeAvailable:false}), false)
+assert.equal(canResumeSyncTask({workflowVersion:2, status:'running', resumeAvailable:true}), false)
+assert.equal(canResumeSyncTask({workflowVersion:2, status:'cancelled', resumeAvailable:true}), true)

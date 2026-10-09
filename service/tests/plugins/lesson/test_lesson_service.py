@@ -246,7 +246,7 @@ def test_manifest_is_valid_and_declares_menu_permissions() -> None:
     assert manifest.id == 'lesson'
     assert manifest.backend.module == 'plugins.lesson'
     assert 'lesson:plan:list' in manifest.permission_codes
-    assert manifest.frontend.menus[0].children[0].component == 'plugin/lesson/plan/index'
+    assert manifest.frontend.menus[0].children[0].component == 'plugin/lesson/editor/index'
     assert [plugin.id for plugin in manifest.dependencies.plugins] == ['bank']
     assert any(item.startswith('python-docx') for item in manifest.dependencies.python)
 

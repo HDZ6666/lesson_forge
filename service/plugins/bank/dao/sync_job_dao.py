@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import desc, select, update
+from sqlalchemy import desc, or_, select, update
 from sqlalchemy.exc import SQLAlchemyError
 
 from plugins.bank.entity.do.bank_do import QbSyncJob, QbSyncJobScope
@@ -31,7 +31,8 @@ class SyncJobDao:
     @staticmethod
     async def get_current(db: AsyncSession) -> QbSyncJob | None:
         result = await db.execute(
-            select(QbSyncJob).where(QbSyncJob.status.in_(_ACTIVE_STATUSES)).order_by(desc(QbSyncJob.run_id)).limit(1)
+            select(QbSyncJob).where(QbSyncJob.status.in_(_ACTIVE_STATUSES), QbSyncJob.active_slot.is_not(None))
+            .order_by(desc(QbSyncJob.run_id)).limit(1)
         )
         return result.scalars().first()
 
@@ -40,7 +41,8 @@ class SyncJobDao:
         """Return all non-terminal jobs for startup recovery."""
 
         result = await db.execute(
-            select(QbSyncJob).where(QbSyncJob.status.in_(_ACTIVE_STATUSES)).order_by(QbSyncJob.run_id)
+            select(QbSyncJob).where(QbSyncJob.status.in_(_ACTIVE_STATUSES), QbSyncJob.active_slot.is_not(None))
+            .order_by(QbSyncJob.run_id)
         )
         return list(result.scalars().all())
 
@@ -67,6 +69,7 @@ class SyncJobDao:
         values: dict[str, Any],
         *,
         expected_statuses: tuple[str, ...] | None = None,
+        expected_worker_token: str | None = None,
     ) -> int:
         if not values:
             return 0
@@ -75,6 +78,10 @@ class SyncJobDao:
         statement = update(QbSyncJob).where(QbSyncJob.run_id == run_id)
         if expected_statuses:
             statement = statement.where(QbSyncJob.status.in_(expected_statuses))
+        if expected_worker_token:
+            statement = statement.where(or_(
+                QbSyncJob.dispatch_job_id.is_(None), QbSyncJob.worker_token == expected_worker_token,
+            ))
         result = await db.execute(statement.values(**values))
         return int(result.rowcount or 0)
 
@@ -93,6 +100,7 @@ class SyncJobDao:
         stale_result = await db.execute(
             select(QbSyncJob).where(
                 QbSyncJob.status.in_(_ACTIVE_STATUSES),
+                QbSyncJob.active_slot.is_not(None),
                 QbSyncJob.update_time < stale_before,
             )
         )

@@ -204,6 +204,9 @@ class RecordingPublisher(MySQLPublisher):
         self.executed: list[str] = []
         self.statuses: list[tuple[int, str]] = []
 
+    def _table_exists(self, name: str) -> bool:
+        return False
+
     def acquire_lock(self) -> None:
         return None
 
@@ -306,7 +309,12 @@ def test_rollback_uses_request_id_and_does_not_modify_target_batch() -> None:
     publisher._existing_group = lambda _kind, _bid: [  # type: ignore[method-assign]
         f'{base}_old_1' for base in DATASET_TABLES
     ]
+    publisher._table_exists = lambda _name: True
+    publisher._fetchall = lambda _sql: [{'Field': 'question_id'}]
     result = publisher.rollback(9)
+    reset = 'UPDATE `qb_question_old_1` SET readiness_revision=NULL'
+    rename_position = next(i for i, sql in enumerate(publisher.executed) if sql.startswith('RENAME TABLE'))
+    assert publisher.executed.index(reset) < rename_position
     rename_statements = [sql for sql in publisher.executed if sql.startswith('RENAME TABLE')]
     assert result == {
         'pass': True,
@@ -345,3 +353,20 @@ def test_run_pending_routes_full_and_rollback_requests() -> None:
     assert publisher.run_pending(limit=2) == {'completed': [7, 8], 'failed': []}
     assert published == [7]
     assert rolled_back == [8]
+
+
+def test_candidate_readiness_reset_repairs_old_schema_before_swap(monkeypatch):
+    publisher = RecordingPublisher()
+    monkeypatch.setattr(publisher, '_table_exists', lambda _name: True)
+    monkeypatch.setattr(publisher, '_fetchall', lambda _sql: [{'Field': 'question_id'}])
+    publisher._reset_candidate_readiness('qb_question_old_1')
+    assert publisher.executed == [
+        'ALTER TABLE `qb_question_old_1` ADD COLUMN readiness_revision CHAR(32) NULL',
+        'UPDATE `qb_question_old_1` SET readiness_revision=NULL',
+    ]
+    monkeypatch.setattr(publisher, '_fetchall', lambda _sql: [{'Field': 'readiness_revision'}])
+    publisher.executed.clear()
+    publisher._reset_candidate_readiness('qb_question_next_2')
+    assert publisher.executed == ['UPDATE `qb_question_next_2` SET readiness_revision=NULL']
+    with pytest.raises(PackageError, match='候选表'):
+        publisher._reset_candidate_readiness('qb_question')

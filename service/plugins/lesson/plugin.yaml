@@ -1,7 +1,7 @@
 manifestVersion: 1
 id: lesson
 name: 教案生成
-version: 0.1.1
+version: 0.2.0
 description: 基于正式题库按知识点、课型与规则确定性抽题，生成可编辑、可导出 Word 的教案初稿。
 
 metadata:
@@ -22,6 +22,7 @@ backend:
   migrations:
     - migrations/mysql/001_init.sql
     - migrations/mysql/002_generation_snapshot.py
+    - migrations/mysql/003_draft_editor.py
   seeds: []
   hooks: {}
   jobs: []
@@ -43,9 +44,9 @@ frontend:
       orderNum: 11
       icon: edit
       children:
-        - name: 抽题生成
+        - name: 教案编辑
           path: plan
-          component: plugin/lesson/plan/index
+          component: plugin/lesson/editor/index
           routeName: LessonPlan
           query: ''
           isFrame: 1
@@ -72,6 +73,7 @@ permissions:
 dependencies:
   python:
     - python-docx>=1.1.0
+    - CairoSVG>=2.7.1
   npm: []
   npmDev: []
   plugins:

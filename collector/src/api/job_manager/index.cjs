@@ -10,7 +10,7 @@
  */
 
 const path = require('node:path');
-const { randomUUID } = require('node:crypto');
+const { createHash, randomUUID } = require('node:crypto');
 const { spawn } = require('node:child_process');
 
 const {
@@ -45,6 +45,9 @@ const { MAX_ASSET_CONCURRENCY, MAX_LIST_CONCURRENCY } = require('../../sources/z
 const { ExecutionMethods } = require('./execution.cjs');
 const { EventMethods } = require('./events.cjs');
 const { LifecycleMethods } = require('./lifecycle.cjs');
+const { SourceControl } = require('../../policies/source_control.cjs');
+const { SourceBudget } = require('../../policies/source_budget.cjs');
+const { ResourceGuard } = require('../../policies/resource_guard.cjs');
 
 function positiveDuration(value, fallback, name) {
   if (value == null || value === '') return fallback;
@@ -96,6 +99,11 @@ class CollectorJobManager {
     // This is additive and preserves all existing candidate/run rows.
     ensureMetadataSnapshotSchema(this.dbPath);
     ensureRunSnapshotSchema(this.dbPath);
+    this.sourceControl = new SourceControl(this.dbPath);
+    this.sourceBudget = new SourceBudget(this.dbPath, options.sourceBudgetOptions);
+    this.resourceGuard = new ResourceGuard({ ...options.resourceGuardOptions, paths: {
+      database: path.dirname(this.dbPath), data: this.dataDir, profile: this.profileDir,
+    } });
     this.jobTimeoutMs = positiveDuration(
       options.jobTimeoutMs ?? process.env.COLLECTOR_JOB_TIMEOUT_MS,
       DEFAULT_JOB_TIMEOUT_MS,
@@ -251,18 +259,20 @@ class CollectorJobManager {
       error.statusCode = 503;
       throw error;
     }
-    if (this.activeJob && ACTIVE_STATUSES.has(this.activeJob.status)) {
-      const error = new Error('采集器已有任务正在运行');
-      error.statusCode = 409;
-      error.code = 'job_conflict';
-      throw error;
-    }
     if (payload.acknowledgeSourcePolicy !== true) {
       throw new Error('开始同步前必须确认已核对来源站规则、授权范围和内容使用边界');
     }
     const runType = String(payload.runType || '');
     if (!['metadata', 'content'].includes(runType)) throw new Error('不支持的同步任务类型');
     const maxPages = intInRange(payload.maxPages ?? SITE_PAGE_LIMIT, 'maxPages', 1, SITE_PAGE_LIMIT);
+    const workflowVersion = intInRange(payload.workflowVersion ?? 2, 'workflowVersion', 1, 2);
+    const requestedId = payload.jobId == null ? null : String(payload.jobId).toLowerCase();
+    if (requestedId && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(requestedId)) {
+      throw new Error('jobId 必须是 UUID');
+    }
+    if (payload.sourceNamespace != null && payload.sourceNamespace !== 'zujuan:junior:math') {
+      throw new Error('该来源学段学科的采集适配尚未验证');
+    }
     const limitTo1000Pages = requestBoolean(payload.limitTo1000Pages, 'limitTo1000Pages', false);
     const hasIndependentScopes = runType === 'content'
       && Object.prototype.hasOwnProperty.call(payload, 'textbookScopes');
@@ -279,7 +289,6 @@ class CollectorJobManager {
         const normalized = normalizeIndependentTextbookScopes(payload);
         textbookExternalIds = normalized.textbookExternalIds;
         independentScopes = normalized.scopes;
-        validateIndependentResumeScopes(this.dbPath, independentScopes, maxPages, limitTo1000Pages);
       } else {
         metadataRunId = intInRange(payload.metadataRunId, 'metadataRunId', 1, Number.MAX_SAFE_INTEGER);
         textbookExternalIds = (Array.isArray(payload.textbookExternalIds)
@@ -288,6 +297,9 @@ class CollectorJobManager {
           .map((value) => String(value == null ? '' : value).trim());
         if (!textbookExternalIds.length || textbookExternalIds.length > MAX_SELECTED_TEXTBOOKS) {
           throw new Error(`教材选择数量必须在 1 到 ${MAX_SELECTED_TEXTBOOKS} 之间`);
+        }
+        if (workflowVersion === 2 && textbookExternalIds.length !== 1) {
+          throw new Error('新同步任务必须且只能选择一本教材');
         }
         if (new Set(textbookExternalIds).size !== textbookExternalIds.length) throw new Error('教材选择列表不能包含重复 ID');
         if (textbookExternalIds.some((value) => !safeExternalId(value))) throw new Error('教材来源 ID 不安全');
@@ -298,9 +310,44 @@ class CollectorJobManager {
         ).textbooks;
       }
     }
+    const requestDigest = createHash('sha256').update(JSON.stringify({
+      runType, workflowVersion, maxPages, limitTo1000Pages, metadataRunId,
+      textbookExternalIds, independentScopes, sourceNamespace: 'zujuan:junior:math',
+    })).digest('hex');
+    const replay = () => {
+      if (!requestedId) return null;
+      // Read the store first: another manager may have advanced the job.
+      const previous = this.store?.load(requestedId) || this.jobs.get(requestedId);
+      const digest = this.store?.requestDigest(requestedId) || previous?.requestDigest;
+      if (!previous && !digest) return null;
+      if (digest !== requestDigest || !previous) {
+        const error = new Error(previous ? 'jobId 已绑定不同采集范围' : '派发记录已归档，请核对原任务，不能重复启动');
+        error.statusCode = 409;
+        error.code = previous ? 'job_identity_conflict' : 'job_request_expired';
+        throw error;
+      }
+      return publicJob(previous);
+    };
+    const existing = replay();
+    if (existing) return existing;
+    this.sourceControl.assertAllowed();
+    this.sourceBudget.assertCanStart(runType);
+    this.resourceGuard.assertAllowed();
+    if (this.activeJob && ACTIVE_STATUSES.has(this.activeJob.status)) {
+      const error = new Error('采集器已有任务正在运行');
+      error.statusCode = 409;
+      error.code = 'job_conflict';
+      throw error;
+    }
+    if (hasIndependentScopes) {
+      validateIndependentResumeScopes(this.dbPath, independentScopes, maxPages, limitTo1000Pages);
+    }
     const job = {
-      id: randomUUID(),
+      id: requestedId || randomUUID(),
+      requestDigest: requestedId ? requestDigest : null,
       runType,
+      workflowVersion,
+      sourceNamespace: 'zujuan:junior:math',
       status: 'queued',
       phase: runType === 'metadata' ? 'metadata' : 'catalogs_questions',
       metadataRunId,
@@ -380,7 +427,16 @@ class CollectorJobManager {
     };
     // Durable mutex: the unique active_slot rejects a second active job even
     // when it belongs to another manager or process.
-    if (this.store) this.store.insertActive(job, this.owner);
+    if (this.store) {
+      try {
+        this.store.insertActive(job, this.owner);
+      } catch (error) {
+        // Concurrent insert of the same UUID returns its durable result.
+        const concurrent = replay();
+        if (concurrent) return concurrent;
+        throw error;
+      }
+    }
     this.jobs.set(job.id, job);
     this.activeJobId = job.id;
     this.trimJobs();

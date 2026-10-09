@@ -25,7 +25,7 @@ const SORT_PRESETS = Object.freeze({
 
 /** Build the exact query contract supported by the bank list endpoint. */
 export function buildBrowseQuery(state) {
-  const query = {}
+  const query = { usableOnly: true }
   for (const field of API_QUERY_FIELDS) {
     const value = state?.[field]
     if (Array.isArray(value)) {

@@ -44,7 +44,7 @@ async def capture_review(db, task_id, scopes, *, origin='task_start'):
     counts = dict((await db.execute(select(QbQuestionCatalog.catalog_id, func.count(func.distinct(QbQuestionCatalog.question_id)))
         .join(QbQuestion, QbQuestion.question_id == QbQuestionCatalog.question_id)
         .where(QbQuestionCatalog.catalog_id.in_(ids), QbQuestionCatalog.relation_type == 'query_catalog',
-               QbQuestion.source_provider == 'zujuan', QbQuestion.status == '0')
+               QbQuestion.subject_id == 1, QbQuestion.source_provider == 'zujuan', QbQuestion.status == '0')
         .group_by(QbQuestionCatalog.catalog_id))).all()) if ids else {}
     parents = {node.catalog_id: node.external_node_id for node in catalogs}
     baseline = [{
@@ -88,7 +88,7 @@ async def _current_catalogs(db, scope):
         return []
     nodes = list((await db.execute(select(QbCatalogNode).where(
         QbCatalogNode.textbook_id == int(scope.local_textbook_id),
-        QbCatalogNode.source_provider == 'zujuan',
+        QbCatalogNode.subject_id == 1, QbCatalogNode.source_provider == 'zujuan',
     ))).scalars().all())
     if not nodes:
         return []
@@ -98,7 +98,7 @@ async def _current_catalogs(db, scope):
         .join(QbQuestion, QbQuestion.question_id == QbQuestionCatalog.question_id)
         .where(QbQuestionCatalog.catalog_id.in_(ids),
                QbQuestionCatalog.relation_type == 'query_catalog',
-               QbQuestion.source_provider == 'zujuan', QbQuestion.status == '0')
+               QbQuestion.subject_id == 1, QbQuestion.source_provider == 'zujuan', QbQuestion.status == '0')
         .group_by(QbQuestionCatalog.catalog_id)
     )).all())
     external_by_id = {node.catalog_id: node.external_node_id for node in nodes}
@@ -202,7 +202,7 @@ class QuestionReviewService:
         ids = [value['externalQuestionId'] for value, _row in fetched]
         formal_rows = (
             (await db.execute(select(QbQuestion).where(
-                QbQuestion.source_provider == 'zujuan', QbQuestion.external_question_id.in_(ids)
+                QbQuestion.subject_id == 1, QbQuestion.source_provider == 'zujuan', QbQuestion.external_question_id.in_(ids)
             ))).scalars().all() if ids else []
         )
         formal = {str(row.external_question_id): row for row in formal_rows}
@@ -235,7 +235,7 @@ class QuestionReviewService:
         if not item or item['externalQuestionId'] != external_id:
             raise ServiceException(message='题目预览 ID 不一致')
         current_row = (await db.execute(select(QbQuestion).where(
-            QbQuestion.source_provider == 'zujuan', QbQuestion.external_question_id == external_id
+            QbQuestion.subject_id == 1, QbQuestion.source_provider == 'zujuan', QbQuestion.external_question_id == external_id
         ))).scalars().first()
         current = _formal_question_value(current_row) if current_row else None
         if current is not None:

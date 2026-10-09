@@ -21,6 +21,7 @@ const { normalizeHeaders, responseHeaders, responseStatus } = require('../source
 const { normalizeAssetType } = require('../sources/zujuan/question_parser.cjs');
 const { assetKey: canonicalAssetKey } = require('../../lib/qbpkg/normalize.cjs');
 const { retryDelay } = require('../policies/retry.cjs');
+const { openAssetResponse } = require('./request.cjs');
 
 const assertAllowedUrl = (value, hosts) => assertAllowedUrlShared(
   value,
@@ -115,12 +116,10 @@ async function downloadAsset(context, options, asset) {
     for (let retryIndex = 0; retryIndex <= MAX_RETRIES; retryIndex += 1) {
       let response = null;
       try {
-        response = await context.request.get(requestUrl, {
-        timeout: options.timeout,
-        failOnStatusCode: false,
-        });
+        response = await openAssetResponse(context, requestUrl, options);
         const status = responseStatus(response);
         const headers = responseHeaders(response);
+        options.sourceControl?.observe(status, headers, { verification: false });
         lastHeaders = headers;
         if (status < 200 || status >= 300) {
           throw new QuestionSyncError(`素材请求返回 HTTP ${status || '未知状态'}`, `asset_http_${status || 0}`, {
@@ -158,7 +157,8 @@ async function downloadAsset(context, options, asset) {
       } catch (error) {
         await disposeResponse(response);
         response = null;
-        const retryable = !['host_not_allowed', 'asset_too_large', 'asset_storage_error', 'asset_http_404'].includes(
+        if (error.blocked) throw error;
+        const retryable = !['host_not_allowed', 'asset_redirect', 'asset_too_large', 'asset_storage_error', 'asset_http_404'].includes(
           String(error?.code || ''),
         );
         if (!retryable || retryIndex >= MAX_RETRIES) throw error;
@@ -198,12 +198,12 @@ async function downloadAsset(context, options, asset) {
         // A provider occasionally leaves a zero-sized SVG marker where a
         // formula was removed.  Ignore only that exact, non-graphical marker.
         try {
-          const probe = await context.request.get(fallbackUrl, {
-            timeout: options.timeout,
-            failOnStatusCode: false,
-          });
-          const probeBody = typeof probe?.body === 'function' ? await probe.body() : null;
-          await disposeResponse(probe);
+          const probe = await openAssetResponse(context, fallbackUrl, options);
+          let probeBody;
+          try {
+            options.sourceControl?.observe(responseStatus(probe), responseHeaders(probe), { verification: false });
+            probeBody = typeof probe?.body === 'function' ? await probe.body() : null;
+          } finally { await disposeResponse(probe); }
           if (isEmptySvgPlaceholder(probeBody)) {
             return {
               ...asset,
@@ -215,7 +215,7 @@ async function downloadAsset(context, options, asset) {
               fallbackSourceUrl: fallbackUrl,
             };
           }
-        } catch {}
+        } catch (error) { if (error.blocked) throw error; }
       }
       throw fallbackError;
     }
@@ -290,7 +290,7 @@ async function prefetchAssets(assets, {
         if (result?.contentSha256) downloaded += 1;
         if (onSuccess) onSuccess(result, asset);
       } catch (error) {
-        if (String(error?.code || '') === 'asset_storage_error') {
+        if (error.blocked || String(error?.code || '') === 'asset_storage_error') {
           fatal = fatal || error;
           break;
         }

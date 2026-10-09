@@ -63,6 +63,10 @@ class LpGeneration(Base):
     generation_id = Column(BigInteger, primary_key=True, autoincrement=True, nullable=False)
     scheme_id = Column(BigInteger, nullable=False)
     seed = Column(BigInteger, nullable=False)
+    editor_schema_version = Column(Integer, nullable=False, server_default='1')
+    revision = Column(Integer, nullable=False, server_default='1')
+    editor_json = Column(JSON, nullable=True)
+    source_generation_id = Column(BigInteger, nullable=True)
     status = Column(String(20), nullable=False, server_default='ready')
     rule_snapshot_json = Column(JSON, nullable=True)
     scheme_snapshot_json = Column(JSON, nullable=True)
@@ -84,8 +88,10 @@ class LpGenerationItem(Base):
 
     item_id = Column(BigInteger, primary_key=True, autoincrement=True, nullable=False)
     generation_id = Column(BigInteger, nullable=False)
-    rule_id = Column(BigInteger, nullable=False)
-    phase = Column(String(20), nullable=False)
+    rule_id = Column(BigInteger, nullable=True)
+    phase = Column(String(20), nullable=True)
+    group_key = Column(String(64), nullable=True)
+    rule_key = Column(String(64), nullable=True)
     sort_no = Column(Integer, nullable=False, server_default='0')
     question_id = Column(BigInteger, nullable=False)
     score = Column(Numeric(8, 3), nullable=True)
@@ -96,3 +102,18 @@ class LpGenerationItem(Base):
     question_snapshot_json = Column(JSON, nullable=True)
     create_time = Column(DateTime, nullable=False)
     update_time = Column(DateTime, nullable=False)
+
+
+class LpEditorOperation(Base):
+    __tablename__ = 'lp_editor_operation'
+    __table_args__ = (Index('uk_lp_editor_operation_request', 'operator', 'request_id', unique=True),)
+    operation_id = Column(BigInteger, primary_key=True, autoincrement=True)
+    operator = Column(String(64), nullable=False)
+    request_id = Column(String(64), nullable=False)
+    generation_id = Column(BigInteger, nullable=False)
+    request_hash = Column(CHAR(64), nullable=False)
+    result_json = Column(JSON, nullable=False)
+    undo_json = Column(JSON, nullable=True)
+    undo_until = Column(DateTime, nullable=True)
+    undone = Column(SmallInteger, nullable=False, server_default='0')
+    create_time = Column(DateTime, nullable=False)

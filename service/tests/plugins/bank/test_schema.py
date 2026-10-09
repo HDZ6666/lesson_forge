@@ -63,6 +63,15 @@ def test_bank_manifest_is_mysql_only_and_references_real_resources() -> None:
         'migrations/mysql/010_question_resume.py',
         'migrations/mysql/011_remove_local_collector_options.py',
         'migrations/mysql/012_question_task_review.sql',
+        'migrations/mysql/013_subject_scope.py',
+        'migrations/mysql/014_incremental_import.sql',
+        'migrations/mysql/015_snapshot_lock_precision.py',
+        'migrations/mysql/016_import_preparation.py',
+        'migrations/mysql/017_import_intake.sql',
+        'migrations/mysql/018_run_coverage.py',
+        'migrations/mysql/019_question_readiness.py',
+        'migrations/mysql/020_sync_dispatch.py',
+        'migrations/mysql/021_sync_plans_and_issues.py',
     ]
     assert plugin.manifest.backend.seeds == ['seeds/mysql/001_dict.sql']
     assert plugin.manifest.compatibility.databases == ['mysql']
@@ -82,6 +91,7 @@ def test_bank_manifest_has_management_and_sync_menus_and_declared_permissions() 
 
     assert root_menu.name == '题库管理'
     assert [menu.name for menu in children] == [
+        '学科管理',
         '版本管理',
         '教材管理',
         '目录管理',
@@ -93,6 +103,7 @@ def test_bank_manifest_has_management_and_sync_menus_and_declared_permissions() 
         '同步题库',
     ]
     assert [menu.component for menu in children] == [
+        'plugin/bank/subject/index',
         'plugin/bank/version/index',
         'plugin/bank/textbook/index',
         'plugin/bank/catalog/index',
@@ -103,6 +114,8 @@ def test_bank_manifest_has_management_and_sync_menus_and_declared_permissions() 
         'plugin/bank/sync-textbook/index',
         'plugin/bank/sync-question/index',
     ]
+    assert [menu.name for menu in plugin.manifest.frontend.menus[1].children] == ['同步总览', '教材发现', '自动同步计划', '同步任务']
+    assert all(menu.visible == '1' for menu in children[-4:])
     assert children[-3].route_name == 'BankSyncCenter'
     assert children[-3].order_num == SYNC_CENTER_ORDER
     assert children[-2].route_name == 'BankSyncTextbookOverview'

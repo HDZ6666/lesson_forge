@@ -186,6 +186,41 @@ test('snapshot-page rejects an unfinished run before returning any collection ro
   }
 });
 
+test('sealed import pages expose partial results without weakening the default API', async () => {
+  const fixture = seedRun({ status: 'failed', errors: 1 });
+  const server = createCollectorServer({ dbPath: fixture.dbPath, dataDir: fixture.dataDir, token: 'snapshot-page-token' });
+  const baseUrl = await listen(server);
+  try {
+    const options = { headers: authHeaders() };
+    const suffix = '?collection=questions&textbookExternalId=tb1&pageSize=2';
+    assert.equal((await fetch(`${baseUrl}/v1/runs/${fixture.runId}/snapshot-page${suffix}`, options)).status, 409);
+    const response = await fetch(`${baseUrl}/v1/runs/${fixture.runId}/snapshot-page${suffix}&sealedForImport=true`, options);
+    assert.equal(response.status, 200);
+    const page = await response.json();
+    assert.equal(page.snapshotComplete, false);
+    assert.equal(page.run.status, 'failed');
+    assert.equal(page.items.length, 2);
+    const summaryResponse = await fetch(`${baseUrl}/v1/runs/${fixture.runId}/snapshot-summary?textbookExternalId=tb1&sealedForImport=true`, options);
+    assert.equal(summaryResponse.status, 200);
+    assert.equal((await summaryResponse.json()).snapshotComplete, false);
+    assert.equal((await fetch(`${baseUrl}/v1/runs/${fixture.runId}/snapshot-page${suffix}&sealedForImport=1`, options)).status, 400);
+  } finally { await close(server); fs.rmSync(fixture.directory, { recursive: true, force: true }); }
+});
+
+test('sealed import mode still rejects running or unlocked results', () => {
+  const fixture = seedRun({ status: 'failed', errors: 1 });
+  const { DatabaseSync } = require('node:sqlite');
+  const db = new DatabaseSync(fixture.dbPath);
+  db.exec('DROP TRIGGER trg_sync_runs_no_reopen');
+  db.prepare('UPDATE sync_runs SET status = ?, finished_at = NULL WHERE id = ?').run('running', fixture.runId);
+  db.close();
+  try {
+    assert.throws(() => readRunSnapshotPage(fixture.dbPath, fixture.runId, {
+      collection: 'questions', textbookExternalId: 'tb1', sealedForImport: true,
+    }), /未成功完成/);
+  } finally { fs.rmSync(fixture.directory, { recursive: true, force: true }); }
+});
+
 test('snapshot-page rechecks the sealed run header on its own connection', () => {
   const fixture = seedRun({ prefix: 'collector-page-header-drift-' });
   const { DatabaseSync } = require('node:sqlite');
@@ -219,7 +254,7 @@ test('snapshot-page shrinks a large requested page by actual JSON byte size', as
     questionText: () => '大'.repeat(250000),
     prefix: 'collector-page-large-',
   });
-  const server = createCollectorServer({ dbPath: fixture.dbPath, dataDir: fixture.dataDir });
+  const server = createCollectorServer({ dbPath: fixture.dbPath, dataDir: fixture.dataDir, token: '' });
   const baseUrl = await listen(server);
   try {
     let cursor = 0;

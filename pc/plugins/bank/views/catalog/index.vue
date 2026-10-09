@@ -4,6 +4,7 @@
     <el-alert v-if="errorMessage" class="state-alert" type="error" :closable="false" show-icon>{{ errorMessage }}</el-alert>
     <section class="panel context-panel">
       <el-form :inline="true" :model="context" class="filter-form">
+        <el-form-item label="学科"><SubjectSelect v-model="context.subjectId" @change="handleSubjectChange" /></el-form-item>
         <el-form-item label="版本"><el-select v-model="context.versionId" clearable filterable placeholder="请选择版本" class="context-select" @change="handleVersionChange"><el-option v-for="item in versions" :key="idOf(item,'versionId')" :label="item.versionName" :value="idOf(item,'versionId')" /></el-select></el-form-item>
         <el-form-item label="教材"><el-select v-model="context.textbookId" clearable filterable placeholder="请选择教材" class="context-select" :disabled="!context.versionId" @change="handleTextbookChange"><el-option v-for="item in textbooks" :key="idOf(item,'textbookId')" :label="item.textbookName" :value="idOf(item,'textbookId')" /></el-select></el-form-item>
         <el-form-item label="节点名称"><el-input v-model="filters.nodeName" clearable placeholder="目录名称" @keyup.enter="loadTree" /></el-form-item>
@@ -33,6 +34,10 @@
 </template>
 
 <script setup>
+let scopeReadRevision = 0
+let versionsReadRevision = 0
+let textbooksReadRevision = 0
+import SubjectSelect from "../../components/SubjectSelect.vue"
 import { computed, getCurrentInstance, onMounted, reactive, ref } from 'vue'
 import { Delete, Edit, Plus, Refresh, RefreshLeft, Search } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -40,19 +45,59 @@ import { addCatalog, deleteCatalogs, listCatalog, listTextbooks, listVersions, u
 import { unwrapList, unwrapTree } from '../../utils/response'
 const { proxy } = getCurrentInstance(); const { qb_catalog_node_type, sys_normal_disable } = proxy.useDict('qb_catalog_node_type', 'sys_normal_disable')
 const versions = ref([]); const textbooks = ref([]); const tree = ref([]); const selected = ref([]); const loading = ref(false); const submitting = ref(false); const dialogVisible = ref(false); const errorMessage = ref(''); const formRef = ref()
-const context = reactive({ versionId: undefined, textbookId: undefined }); const filters = reactive({ nodeName: '', status: undefined }); const form = reactive({})
+const context = reactive({ subjectId: undefined, versionId: undefined, textbookId: undefined }); const filters = reactive({ nodeName: '', status: undefined }); const form = reactive({})
 const rules = { nodeName: [{ required: true, message: '目录名称不能为空', trigger: 'blur' }], nodeType: [{ required: true, message: '目录类型不能为空', trigger: 'change' }] }
 const idOf = (item, key) => item?.[key] ?? item?.[key.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`)]; const isManual = (row) => String(row?.sourceProvider || '').toLowerCase() === 'manual'; const deletableSelected = computed(() => selected.value.length > 0 && selected.value.every(isManual))
 function descendants(nodes) { return nodes.flatMap((node) => [node, ...descendants(Array.isArray(node.children) ? node.children : [])]) }
 const allRows = computed(() => descendants(tree.value)); const visibleRows = computed(() => { const name = filters.nodeName.trim().toLowerCase(); const status = filters.status; if (!name && !status) return tree.value; const matched = new Set(allRows.value.filter((row) => (!name || String(row.nodeName || '').toLowerCase().includes(name)) && (!status || String(row.status) === String(status))).map((row) => row.catalogId)); return allRows.value.filter((row) => matched.has(row.catalogId)).map((row) => ({ ...row, children: [] })) })
 const parentOptions = computed(() => { const currentId = form.catalogId; const excluded = new Set(); if (currentId) { const visit = (rows) => rows.forEach((row) => { if (row.catalogId === currentId) descendants([row]).forEach((item) => excluded.add(item.catalogId)); else visit(row.children || []) }); visit(tree.value) } const clone = (rows) => rows.filter((row) => !excluded.has(row.catalogId)).map((row) => ({ ...row, children: clone(row.children || []) })); return clone(tree.value) })
 function unwrapOne(result) { return result?.data && !result.catalogId ? result.data : result }
-function resetForm() { Object.assign(form, { catalogId: undefined, textbookId: context.textbookId, parentId: null, sourceProvider: 'manual', externalNodeId: undefined, nodeName: '', nodeType: qb_catalog_node_type.value?.[0]?.value || 'chapter', sourceUrl: '', sortOrder: 0, status: '0' }); formRef.value?.clearValidate() }
-async function loadVersions() { try { versions.value = unwrapList(await listVersions({ pageNum: 1, pageSize: 100, includeDisabled: true })) } catch (error) { errorMessage.value = error?.message || '版本加载失败，请稍后重试' } }
-async function loadTextbooks(versionId) { textbooks.value = []; if (!versionId) return; try { textbooks.value = unwrapList(await listTextbooks({ versionId, pageNum: 1, pageSize: 100, includeDisabled: true })) } catch (error) { errorMessage.value = error?.message || '教材加载失败，请稍后重试' } }
-async function handleVersionChange(versionId) { context.textbookId = undefined; tree.value = []; selected.value = []; await loadTextbooks(versionId) }
+function resetForm() { Object.assign(form, { catalogId: undefined, subjectId: undefined, textbookId: context.textbookId, parentId: null, sourceProvider: 'manual', externalNodeId: undefined, nodeName: '', nodeType: qb_catalog_node_type.value?.[0]?.value || 'chapter', sourceUrl: '', sortOrder: 0, status: '0' }); formRef.value?.clearValidate() }
+async function handleSubjectChange() {
+  scopeReadRevision += 1; textbooksReadRevision += 1
+  context.versionId = undefined; context.textbookId = undefined
+  tree.value = []; versions.value = []; textbooks.value = []; selected.value = []; loading.value = false
+  await loadVersions()
+}
+async function loadVersions() {
+  const revision = ++versionsReadRevision
+  try {
+    const result = unwrapList(await listVersions({ subjectId: context.subjectId, pageNum: 1, pageSize: 100, includeDisabled: true }))
+    if (revision === versionsReadRevision) versions.value = result
+  } catch (error) {
+    if (revision === versionsReadRevision) errorMessage.value = error?.message || '版本加载失败，请稍后重试'
+  }
+}
+async function loadTextbooks(versionId) {
+  const revision = ++textbooksReadRevision
+  textbooks.value = []
+  if (!versionId) return
+  try {
+    const result = unwrapList(await listTextbooks({ versionId, pageNum: 1, pageSize: 100, includeDisabled: true }))
+    if (revision === textbooksReadRevision) textbooks.value = result
+  } catch (error) {
+    if (revision === textbooksReadRevision) errorMessage.value = error?.message || '教材加载失败，请稍后重试'
+  }
+}
+async function handleVersionChange(versionId) {
+  scopeReadRevision += 1; loading.value = false
+  context.textbookId = undefined; tree.value = []; selected.value = []
+  await loadTextbooks(versionId)
+}
 async function handleTextbookChange() { tree.value = []; selected.value = []; await loadTree() }
-async function loadTree() { if (!context.textbookId) { tree.value = []; return } loading.value = true; errorMessage.value = ''; try { tree.value = unwrapTree(await listCatalog({ textbookId: context.textbookId, includeDisabled: true })) } catch (error) { tree.value = []; errorMessage.value = error?.message || '目录加载失败，请稍后重试' } finally { loading.value = false } }
+async function loadTree() {
+  const revision = ++scopeReadRevision
+  const textbookId = context.textbookId
+  if (!textbookId) { tree.value = []; loading.value = false; return }
+  loading.value = true; errorMessage.value = ''
+  try {
+    const result = unwrapTree(await listCatalog({ textbookId, includeDisabled: true }))
+    if (revision === scopeReadRevision) tree.value = result
+  } catch (error) {
+    if (revision !== scopeReadRevision) return
+    tree.value = []; errorMessage.value = error?.message || '目录加载失败，请稍后重试'
+  } finally { if (revision === scopeReadRevision) loading.value = false }
+}
 function resetFilters() { filters.nodeName = ''; filters.status = undefined; loadTree() }
 function openAdd(parent) { if (!context.textbookId) return; resetForm(); if (parent) { form.parentId = parent.catalogId; form.textbookId = parent.textbookId } dialogVisible.value = true }
 function openEdit(row) { resetForm(); Object.assign(form, row); dialogVisible.value = true }

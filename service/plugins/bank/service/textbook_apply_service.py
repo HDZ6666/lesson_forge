@@ -11,7 +11,9 @@ import asyncio
 import hashlib
 import json
 from collections.abc import Mapping
+from contextlib import AsyncExitStack
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import select
@@ -28,6 +30,7 @@ from plugins.bank.entity.do.bank_do import (
     QbTextbookVersion,
 )
 from plugins.bank.service.collector_client import CollectorClient
+from plugins.bank.service.source_write_lock import source_write_lock
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -226,20 +229,45 @@ def _task_value(row: object, *names: str, default: Any = None) -> Any:
     return _pick(row, *names, default=default)
 
 
-async def _load_task_and_scopes(db: AsyncSession, task_id: int) -> tuple[QbSyncJob, list[QbSyncJobScope]]:
+async def _load_task_and_scopes(db: AsyncSession, task_id: int, *, for_update: bool = False) -> tuple[QbSyncJob, list[QbSyncJobScope]]:
+    task_query = select(QbSyncJob).where(QbSyncJob.run_id == int(task_id), QbSyncJob.task_module == 'textbook')
+    if for_update:
+        task_query = task_query.with_for_update().execution_options(populate_existing=True)
     result = await db.execute(
-        select(QbSyncJob).where(QbSyncJob.run_id == int(task_id), QbSyncJob.task_module == 'textbook')
+        task_query
     )
     scalars = getattr(result, 'scalars', None)
     task = next(iter(scalars().all()), None) if callable(scalars) else None
     if task is None:
         raise ServiceException(message='同步教材任务不存在')
-    scope_result = await db.execute(
-        select(QbSyncJobScope).where(QbSyncJobScope.run_id == int(task_id)).order_by(QbSyncJobScope.scope_id)
-    )
+    scope_query = select(QbSyncJobScope).where(QbSyncJobScope.run_id == int(task_id)).order_by(QbSyncJobScope.scope_id)
+    if for_update:
+        scope_query = scope_query.with_for_update().execution_options(populate_existing=True)
+    scope_result = await db.execute(scope_query)
     scope_scalars = getattr(scope_result, 'scalars', None)
     scopes = list(scope_scalars().all()) if callable(scope_scalars) else []
     return task, scopes
+
+
+def _snapshot_binding(task: Any, scopes: list[Any]) -> dict[str, Any]:
+    """Copy scalars before rollback expires ORM instances; bind unlocked IO."""
+    return {
+        'task': {
+            field: _task_value(task, field)
+            for field in ('run_id', 'task_module', 'run_type', 'subject_id', 'status', 'metadata_run_id')
+        },
+        'scopes': [
+            {
+                field: _task_value(scope, field)
+                for field in (
+                    'scope_id', 'run_id', 'subject_id', 'status', 'source_provider',
+                    'external_textbook_id', 'external_version_id', 'local_textbook_id',
+                    'local_version_id', 'metadata_run_id',
+                )
+            }
+            for scope in scopes
+        ],
+    }
 
 
 async def _validate_task_snapshot(db: AsyncSession, task: QbSyncJob, scopes: list[QbSyncJobScope]) -> dict[str, Any]:
@@ -361,7 +389,18 @@ class TextbookApplyService:
         expected_current_task_id: int | None = None,
         operator: str | None = None,
     ) -> dict[str, Any]:
+        write_stack = AsyncExitStack()
         try:
+            task, scopes = await _load_task_and_scopes(db, task_id)
+            binding = _snapshot_binding(task, scopes)
+            await db.rollback()
+            # Validate remote data without holding a database transaction.
+            normalized = await _validate_task_snapshot(
+                db, SimpleNamespace(**binding['task']),
+                [SimpleNamespace(**scope) for scope in binding['scopes']],
+            )
+            metadata_run_id = int(binding['task']['metadata_run_id'])
+            await write_stack.enter_async_context(source_write_lock(db))
             state = await TextbookApplyDao.get_state(db, PROVIDER, for_update=True)
             if state is None:
                 state = await TextbookApplyDao.add_state(db, PROVIDER)
@@ -378,9 +417,9 @@ class TextbookApplyService:
             # The provider lock also serializes task deletion.  Load the
             # task only after acquiring it so a non-current task cannot be
             # deleted while this request waits for the lock.
-            task, scopes = await _load_task_and_scopes(db, task_id)
-            normalized = await _validate_task_snapshot(db, task, scopes)
-            metadata_run_id = int(_task_value(task, 'metadata_run_id'))
+            task, scopes = await _load_task_and_scopes(db, task_id, for_update=True)
+            if _snapshot_binding(task, scopes) != binding:
+                raise ServiceException(message='同步教材任务或教材范围在快照读取期间发生变化，请刷新后重试')
             snapshot_hash = str(normalized['snapshot_hash'])
             if (
                 current_task_id == int(task_id)
@@ -436,9 +475,11 @@ class TextbookApplyService:
                 snapshot_hash=snapshot_hash,
                 stats=stats,
             )
-        except Exception:
+        except BaseException:
             await db.rollback()
             raise
+        finally:
+            await write_stack.aclose()
 
     @staticmethod
     def _empty_stats() -> dict[str, Any]:
@@ -451,8 +492,8 @@ class TextbookApplyService:
     async def _upsert_formal(cls, db: AsyncSession, snapshot: Mapping[str, Any]) -> dict[str, Any]:  # noqa: PLR0912, PLR0915
         now = datetime.now()
         stats = cls._empty_stats()
-        version_rows_result = await db.execute(select(QbTextbookVersion).where(QbTextbookVersion.source_provider == PROVIDER))
-        textbook_rows_result = await db.execute(select(QbTextbook).where(QbTextbook.source_provider == PROVIDER))
+        version_rows_result = await db.execute(select(QbTextbookVersion).where(QbTextbookVersion.subject_id == 1, QbTextbookVersion.source_provider == PROVIDER))
+        textbook_rows_result = await db.execute(select(QbTextbook).where(QbTextbook.subject_id == 1, QbTextbook.source_provider == PROVIDER))
         scalar_versions = getattr(version_rows_result, 'scalars', None)
         scalar_textbooks = getattr(textbook_rows_result, 'scalars', None)
         versions = list(scalar_versions().all()) if callable(scalar_versions) else []

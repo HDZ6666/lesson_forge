@@ -181,6 +181,16 @@ class ExecutionMethods {
     job._watchdog = setInterval(() => {
       if (!job.child || TERMINAL_STATUSES.has(String(job.status))) return;
       const now = Date.now();
+      const resources = this.resourceGuard?.status();
+      if (resources?.paused && !job.abortCode && !job.cancelRequested) {
+        this.abortJob(job, 'resource_pressure', resources.reason);
+        return;
+      }
+      const budget = this.sourceBudget?.status('metadata');
+      if (budget?.paused && !job.abortCode && !job.cancelRequested) {
+        this.abortJob(job, 'source_budget', budget.reason);
+        return;
+      }
       if (job._startedAtMs && now - job._startedAtMs > this.jobTimeoutMs) {
         this.abortJob(job, 'job_timeout', `采集任务超过总时限 ${Math.round(this.jobTimeoutMs / 1000)} 秒，已终止子进程`);
         return;

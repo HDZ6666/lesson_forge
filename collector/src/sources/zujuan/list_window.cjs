@@ -77,9 +77,14 @@ async function postQuestionList(page, options, catalog, pageNumber, {
   let verificationCycles = 0;
   let verificationStartedAt = null;
   while (true) {
+    options.sourceControl?.assertAllowed();
+    options.resourceGuard?.assertAllowed();
+    options.sourceBudget?.request();
     const result = await evaluateFetch(page, request.url, request);
+    options.sourceControl?.observe(Number(result.status || 0), result.headers);
     const classification = classifyQuestionResponse(result);
     if (classification.kind === 'verification') {
+      options.sourceControl?.requireManual('题目列表返回验证/防护，请人工核对后恢复');
       if (!allowVerificationWait) {
         throw new VerificationRequiredError(
           `题目列表返回验证/防护：目录 ${catalog?.externalId || ''} 第 ${pageNumber} 页`,
@@ -192,14 +197,18 @@ async function fetchCatalogTree(page, options) {
   if (!page || typeof page.evaluate !== 'function') {
     throw new QuestionSyncError('缺少读取目录 JSON 的采集页面。', 'page_unavailable');
   }
+  options.sourceControl?.assertAllowed();
+  options.resourceGuard?.assertAllowed();
+  options.sourceBudget?.request();
   const result = await page.evaluate(async (target) => {
     try {
       const response = await fetch(target, { method: 'GET', credentials: 'omit', cache: 'no-store' });
-      return { status: response.status, text: await response.text() };
+      return { status: response.status, headers: Object.fromEntries(response.headers), text: await response.text() };
     } catch (error) {
       return { status: 0, text: '', networkError: String(error?.message || error) };
     }
   }, url);
+  options.sourceControl?.observe(Number(result?.status || 0), result?.headers, { verification: false });
   if (result && typeof result === 'object' && Array.isArray(result.children)) return result;
   if (Array.isArray(result)) return result;
   if (result?.networkError) {
@@ -210,16 +219,22 @@ async function fetchCatalogTree(page, options) {
     try {
       const context = typeof page.context === 'function' ? page.context() : null;
       if (context?.request?.get) {
+        options.sourceControl?.assertAllowed();
+        options.resourceGuard?.assertAllowed();
+        options.sourceBudget?.request();
         const response = await context.request.get(url, {
           timeout: options.timeout,
           failOnStatusCode: false,
         });
         const status = responseStatus(response);
-        const text = status < 400 ? await response.text() : null;
-        try { await response.dispose?.(); } catch {}
+        let text;
+        try {
+          options.sourceControl?.observe(status, responseHeaders(response), { verification: false });
+          text = status < 400 ? await response.text() : null;
+        } finally { try { await response.dispose?.(); } catch {} }
         if (text != null) return JSON.parse(text);
       }
-    } catch {}
+    } catch (error) { if (error.blocked) throw error; }
     throw new QuestionSyncError(`目录请求失败：${result.networkError}`, 'tree_network_error');
   }
   if (Number(result?.status || 0) >= 400) {
@@ -239,6 +254,9 @@ async function navigateToTextbook(page, url, options) {
   const wait = options.sleepFn || sleep;
   while (true) {
     let response;
+    options.sourceControl?.assertAllowed();
+    options.resourceGuard?.assertAllowed();
+    options.sourceBudget?.request();
     try {
       response = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: options.timeout });
     } catch (error) {
@@ -248,6 +266,7 @@ async function navigateToTextbook(page, url, options) {
       continue;
     }
     const status = responseStatus(response);
+    options.sourceControl?.observe(status, responseHeaders(response));
     if (status === 401 || status === 403) {
       if (verificationStartedAt == null) verificationStartedAt = Date.now();
       const configuredTimeout = Number(options.verificationTimeout ?? DEFAULT_VERIFICATION_TIMEOUT);

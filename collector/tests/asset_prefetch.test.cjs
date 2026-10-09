@@ -156,6 +156,9 @@ test('服务端：未配置节奏变量时不向子进程传任何节奏参数�
   let seenArgs = null;
   const manager = new CollectorJobManager({
     dbPath: path.join(directory, 'collector.sqlite3'),
+    // Explicitly model an unconfigured deployment, regardless of the test
+    // runner's real operator settings.
+    listConcurrency: '', assetConcurrency: '', delayMinMs: '', delayMaxMs: '',
     spawnImpl(_node, args) {
       seenArgs = args;
       const { EventEmitter } = require('node:events');

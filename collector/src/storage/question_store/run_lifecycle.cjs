@@ -12,6 +12,8 @@ const { QuestionSyncError } = require('../../shared/errors.cjs');
 const { jsonStringify, nowIso, quoteIdentifier } = require('../../shared/utils.cjs');
 const { PROVIDER } = require('../../sources/zujuan/constants.cjs');
 const { completionQualityFor, resolveFinalRunState } = require('../../policies/completeness.cjs');
+const { captureRunCoverage } = require('../readers/run_coverage.cjs');
+const { scopeTextbookIds, snapshotScopeIds } = require('../readers/common.cjs');
 
 class RunLifecycleMethods {
   beginRun(scope, { resume = true, resumeRunId = null } = {}) {
@@ -61,6 +63,11 @@ class RunLifecycleMethods {
             'sync_run_catalog_pages',
           ]) this._copyTableRows(table, sourceId, runId);
           clonedFrom = sourceId;
+          const priorScope = JSON.parse(source.scope_json || '{}');
+          this.db.prepare('UPDATE sync_runs SET scope_json=? WHERE id=?').run(jsonStringify({
+            ...normalized, resumeScanHints: priorScope.resumeScanHints || {},
+            scanCatalogIds: priorScope.scanCatalogIds || [],
+          }), runId);
           this.db.prepare('UPDATE sync_runs SET message = ? WHERE id = ?')
             .run(`续采来源 run=${sourceId}`, runId);
         }
@@ -78,9 +85,49 @@ class RunLifecycleMethods {
     return this.db.prepare('SELECT * FROM sync_runs WHERE id = ?').get(Number(runId)) || null;
   }
 
+  resetRunScan(runId) {
+    const run = this.getRun(runId);
+    if (!run || run.status !== 'running' || run.snapshot_locked_at) {
+      throw new QuestionSyncError('只能重置当前未封存运行的扫描证据', 'resume_source_invalid');
+    }
+    // Latest-first pagination has no provider change cursor. Retain cloned
+    // question observations, but do not treat old page numbers as current
+    // scan coverage. A fresh scan is the supported fallback.
+    const oldScope = JSON.parse(run.scope_json || '{}');
+    const hints = { ...(oldScope.resumeScanHints || {}) };
+    const rows = this.db.prepare(`SELECT catalog_external_id, MAX(page_number) AS last_page
+      FROM sync_run_catalog_pages WHERE run_id=? AND result_type='success' AND question_count>0
+      GROUP BY catalog_external_id`).all(Number(runId));
+    for (const row of rows) {
+      const id = String(row.catalog_external_id);
+      const last = this.db.prepare(`SELECT question_ids_json FROM sync_run_catalog_pages
+        WHERE run_id=? AND catalog_external_id=? AND page_number=?`).get(Number(runId), id, row.last_page);
+      const progress = this.getRunCatalogProgress(runId, oldScope.textbookId, id);
+      // A head refresh must not move an inherited deeper frontier backwards.
+      if (Number(row.last_page) >= Number(hints[id]?.lastPage || 0)) {
+        const ids = JSON.parse(last.question_ids_json || '[]').map(String);
+        hints[id] = { lastPage: Number(row.last_page), anchorId: ids.at(-1),
+          total: progress?.expectedTotal ?? null, finished: Boolean(hints[id]?.finished || progress?.scanComplete) };
+      }
+    }
+    // Once a refill pass reaches every observed tail, the next pass starts a
+    // fresh audit. Hints never turn inherited pages into current scan proof.
+    const values = Object.values(hints);
+    const targets = oldScope.scanCatalogIds || [];
+    const result = values.length && targets.length && targets.every(id => hints[String(id)]?.finished) ? {} : hints;
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      for (const table of ['sync_run_checkpoints', 'sync_run_catalog_progress', 'sync_run_catalog_pages']) {
+        this.db.prepare(`DELETE FROM ${table} WHERE run_id=?`).run(Number(runId));
+      }
+      this.db.exec('COMMIT');
+    } catch (error) { this.db.exec('ROLLBACK'); throw error; }
+    return result;
+  }
+
   updateRunScope(runId, scope) {
     this.db.prepare('UPDATE sync_runs SET scope_json = ? WHERE id = ? AND status = \'running\'')
-      .run(jsonStringify(scope), Number(runId));
+      .run(jsonStringify(this._scopeObject(scope)), Number(runId));
   }
 
 
@@ -105,6 +152,7 @@ class RunLifecycleMethods {
     const textbookId = String(value.textbookId || '');
     const counts = this.runSnapshotCounts(runId, textbookId);
     const scanReasons = [];
+    if ((value.resumeCoverageGaps || []).length) scanReasons.push('补采已复核断点并继续尾段，中间旧页尚未在本轮连续核对');
     const dataReasons = [];
     const availableCount = Number(value.availableCatalogCount || catalogs.length);
     const selectedCount = Number(value.selectedCatalogCount || catalogs.length);
@@ -209,6 +257,16 @@ class RunLifecycleMethods {
       : null;
     const counts = this.runSnapshotCounts(runId, completeness?.scope?.textbookId || null);
     const finishedAt = nowIso();
+    const scope = JSON.parse(current.scope_json || '{}');
+    // Freeze actual scan metrics in the same terminal row update. Progress
+    // projections are mutable and must never be read as sealed evidence.
+    const declaredIds = scopeTextbookIds(scope);
+    if (scope.coverageFormat === 'run-coverage-v1' && declaredIds.length === 1) {
+      const run = { id: Number(runId), scope, textbookExternalIds: declaredIds };
+      scope.sealedCoverageEvidence = captureRunCoverage(
+        this.db, run, declaredIds[0], snapshotScopeIds(this.db, run),
+      );
+    }
     this.db.prepare(`
       UPDATE sync_runs SET finished_at = ?, status = ?, pages_ok = ?,
         questions_seen = ?, questions_inserted = ?, questions_updated = ?,
@@ -216,7 +274,7 @@ class RunLifecycleMethods {
         message = ?, catalog_item_count = ?, question_item_count = ?,
         question_catalog_count = ?, question_tag_count = ?, question_asset_count = ?,
         snapshot_complete = ?, snapshot_locked_at = ?,
-        scan_complete = ?, data_complete = ?, completion_quality = ?
+        scan_complete = ?, data_complete = ?, completion_quality = ?, scope_json = ?
       WHERE id = ? AND status = 'running' AND snapshot_locked_at IS NULL
     `).run(
       finishedAt, effectiveStatus, Number(counters.pagesOk || 0), Number(counters.questionsSeen || 0),
@@ -227,7 +285,7 @@ class RunLifecycleMethods {
         : (completeness?.reasons || []).join('；') || null),
       counts.catalogCount, counts.questionCount, counts.questionCatalogCount,
       counts.questionTagCount, counts.questionAssetCount, snapshotComplete ? 1 : 0, finishedAt,
-      scanComplete ? 1 : 0, dataComplete ? 1 : 0, completionQuality,
+      scanComplete ? 1 : 0, dataComplete ? 1 : 0, completionQuality, jsonStringify(scope),
       Number(runId),
     );
     return effectiveStatus;

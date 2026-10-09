@@ -910,7 +910,7 @@ test('最多 1000 页策略不会洗掉失败页，且失败页进度目标仍�
   }
 });
 
-test('旧断点从最后成功保存的非空页继续，且不信任旧 completed', async () => {
+test('最新排序续采重新扫描首屏，保留旧成果并补齐分页漂移的新题', async () => {
   const { directory, dbPath } = tempDb();
   const firstPage = mockSyncPage(({ categoryId }) => ({
     status: 200,
@@ -951,7 +951,7 @@ test('旧断点从最后成功保存的非空页继续，且不信任旧 complet
       catalogPages.push(curPage);
       if (curPage === 2) return { status: 200, headers: {}, text: listApiText(10013, ['94000002']) };
       if (curPage >= 3) return { status: 200, headers: {}, text: listApiText(10013, []) };
-      return { status: 200, headers: {}, text: listApiText(10013, ['94000001']) };
+      return { status: 200, headers: {}, text: listApiText(10013, ['94000003']) };
     });
     const second = await runSync(baseSyncOptions(directory, dbPath, { resume: true }), {
       context: {},
@@ -959,9 +959,9 @@ test('旧断点从最后成功保存的非空页继续，且不信任旧 complet
       catalogTree: SAMPLE_TREE,
     });
     assert.equal(second.status, 'success');
-    assert.equal(Math.min(...catalogPages), 2);
-    assert.ok(!catalogPages.includes(1));
-    assert.equal(second.completeness.counts.questionCount, 2);
+    assert.equal(Math.min(...catalogPages), 1);
+    assert.ok(catalogPages.includes(1));
+    assert.equal(second.completeness.counts.questionCount, 3);
     const replay = new QuestionSyncStore(dbPath, { dataDir: directory });
     try {
       const progress = replay.getRunCatalogProgress(second.runId, '260617', '261285');
@@ -1168,7 +1168,7 @@ test('列表默认 8 路并发请求，空页仍结束目录', async () => {
   }
 });
 
-test('风控页会保存此前成功页，并打开全新无痕会话继续剩余页', async () => {
+test('风控页触发公共暂停，保留同窗口成功页，后续教材也不能换会话继续', async () => {
   const { directory, dbPath } = tempDb();
   let persistentLaunches = 0;
   let freshLaunches = 0;
@@ -1176,11 +1176,12 @@ test('风控页会保存此前成功页，并打开全新无痕会话继续剩�
     if (categoryId !== '261285') {
       return { status: 200, headers: {}, text: listApiText(20, ['35020603']) };
     }
-    if (blocked && curPage >= 2) {
+    if (blocked && curPage === 2) {
       return { status: 403, headers: {}, text: '<html>验证码</html>' };
     }
-    if (curPage === 1) return { status: 200, headers: {}, text: listApiText(20, ['99000001']) };
+    if (curPage === 1) return { status: 200, headers: {}, text: listApiText(30, ['99000001']) };
     if (curPage === 2) return { status: 200, headers: {}, text: listApiText(20, ['99000002']) };
+    if (curPage === 3) return { status: 200, headers: {}, text: listApiText(30, ['99000003']) };
     return { status: 200, headers: {}, text: listApiText(20, []) };
   });
   const firstPage = makePage(true);
@@ -1208,21 +1209,64 @@ test('风控页会保存此前成功页，并打开全新无痕会话继续剩�
     },
   };
   try {
-    const result = await runSync(baseSyncOptions(directory, dbPath, {
+    await assert.rejects(runSync(baseSyncOptions(directory, dbPath, {
       profileDir: path.join(directory, 'main-profile'),
     }), {
       playwright,
       catalogTree: SAMPLE_TREE,
-    });
-    assert.equal(result.status, 'success');
+    }), (error) => error.code === 'source_verification');
     assert.equal(persistentLaunches, 1);
-    assert.equal(freshLaunches, 1);
-    assert.equal(result.completeness.counts.questionCount, 2);
+    assert.equal(freshLaunches, 0);
+    const replay = new QuestionSyncStore(dbPath, { dataDir: directory });
+    try {
+      const run = replay.db.prepare('SELECT * FROM sync_runs ORDER BY id DESC LIMIT 1').get();
+      assert.equal(run.status, 'blocked');
+      assert.equal(replay.db.prepare('SELECT COUNT(*) AS n FROM sync_run_question_items').get().n, 2);
+    } finally { replay.close(); }
+    await assert.rejects(runSync(baseSyncOptions(directory, dbPath), { playwright }), (error) => error.code === 'source_verification');
+    assert.equal(persistentLaunches, 1);
     assert.equal(isCookieSwitchError(new VerificationRequiredError('x')), true);
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });
+
+for (const mode of ['source_budget', 'resource_pressure']) {
+  test(`${mode} 暂停会封存同窗口成功页和后续失败页`, async () => {
+    const { directory, dbPath } = tempDb();
+    let memory = 100 * 1024 * 1024;
+    let clock = Date.now();
+    let listCalls = 0;
+    const page = mockSyncPage(({ curPage, categoryId }) => {
+      if (categoryId !== '261285') return { status: 200, headers: {}, text: listApiText(30, ['35020603']) };
+      listCalls += 1;
+      if (curPage === 1) {
+        if (mode === 'resource_pressure') memory = 0;
+        return { status: 200, headers: {}, text: listApiText(30, ['99000101']) };
+      }
+      throw new Error('额度/水位暂停后不应继续请求后续页');
+    });
+    try {
+      await assert.rejects(runSync(baseSyncOptions(directory, dbPath, { concurrency: 8 }), {
+        context: {}, page, catalogTree: SAMPLE_TREE,
+        sourceBudgetOptions: { requestLimit: mode === 'source_budget' ? 3 : 0 },
+        resourceGuardOptions: { minMemoryMiB: 1, memoryReader: () => memory, clock: () => (clock += 1001) },
+      }), (error) => error.code === mode);
+      assert.equal(listCalls, 1);
+      const replay = new QuestionSyncStore(dbPath, { dataDir: directory });
+      try {
+        const run = replay.db.prepare('SELECT * FROM sync_runs ORDER BY id DESC LIMIT 1').get();
+        assert.equal(run.status, 'blocked');
+        assert.ok(run.snapshot_locked_at);
+        const ids = replay.db.prepare('SELECT question_external_id FROM sync_run_question_items').all();
+        assert.deepEqual(ids.map((row) => row.question_external_id), ['99000101']);
+        const pages = replay.db.prepare('SELECT page_number, result_type FROM sync_run_catalog_pages ORDER BY page_number').all();
+        assert.equal(pages[0].result_type, PAGE_RESULT.SUCCESS);
+        assert.ok(pages.some((row) => row.page_number > 1 && row.result_type !== PAGE_RESULT.SUCCESS));
+      } finally { replay.close(); }
+    } finally { fs.rmSync(directory, { recursive: true, force: true }); }
+  });
+}
 
 test('安全页数上限只标记知识点异常并继续，不作为正常完成', async () => {
   const { directory, dbPath } = tempDb();
@@ -1475,4 +1519,97 @@ test('sealing refuses incomplete list content even when catalog scan is complete
     assert.equal(result.complete, false);
     assert.ok(result.dataReasons.includes('列表题干不完整'));
   } finally { store.close(); fs.rmSync(directory, {recursive: true, force: true}); }
+});
+
+test('补采核对当前边界题 ID 后继续尾段，保留累计题且不冒充连续完整扫描', async () => {
+  const { directory, dbPath } = tempDb();
+  try {
+    const first = await runSync(baseSyncOptions(directory, dbPath, {
+      maxPages: 3, maxPagesProvided: true, concurrency: 1,
+    }), { context: {}, catalogTree: SAMPLE_TREE,
+      page: mockSyncPage(({curPage}) => ({status:200, headers:{}, text:listApiText(50,[`9600000${curPage}`])})),
+    });
+    const pages = [];
+    const resumed = await runSync(baseSyncOptions(directory, dbPath, {
+      resume:true, resumeRunId:first.runId, maxPages:8, concurrency:1,
+    }), {context:{}, catalogTree:SAMPLE_TREE,
+      page:mockSyncPage(({curPage,categoryId}) => {
+        if(categoryId==='261285') pages.push(curPage);
+        const ids=curPage===1 ? ['96000100'] : curPage===4 ? ['96000003'] : curPage===5 ? ['96000101'] : [];
+        return {status:200,headers:{},text:listApiText(60,ids)};
+      }),
+    });
+    assert.ok(pages.includes(1) && pages.includes(4) && pages.includes(5));
+    assert.ok(!pages.includes(2) && !pages.includes(3));
+    const store = new QuestionSyncStore(dbPath,{dataDir:directory});
+    try {
+      const row=store.getRun(resumed.runId);
+      const scope=JSON.parse(row.scope_json);
+      assert.equal(row.snapshot_complete,0);
+      const { validateQuestionListResumeSourceRun } = require('../src/storage/resume.cjs');
+      assert.equal(validateQuestionListResumeSourceRun(dbPath,resumed.runId,buildScope(baseSyncOptions(directory,dbPath,{resume:true}))).resumable,true);
+      assert.deepEqual(scope.resumeCoverageGaps,['261285']);
+      assert.equal(scope.resumeScanHints['261285'].finished,true);
+      assert.equal(store.runSnapshotCounts(resumed.runId).questionCount,5);
+      const next=store.beginRun(buildScope(baseSyncOptions(directory,dbPath,{resume:true})),{resume:true,resumeRunId:resumed.runId});
+      assert.deepEqual(store.resetRunScan(next),{});
+    } finally { store.close(); }
+  } finally { fs.rmSync(directory,{recursive:true,force:true}); }
+});
+
+test('旧边界题不在当前页时回到前部扫描，不能盲目跳过页码', async () => {
+  const {directory,dbPath}=tempDb();
+  try {
+    const first=await runSync(baseSyncOptions(directory,dbPath,{maxPages:3,maxPagesProvided:true,concurrency:1}),{
+      context:{},catalogTree:SAMPLE_TREE,
+      page:mockSyncPage(({curPage})=>({status:200,headers:{},text:listApiText(50,[`9700000${curPage}`])})),
+    });
+    const pages=[];
+    const second=await runSync(baseSyncOptions(directory,dbPath,{resume:true,resumeRunId:first.runId,concurrency:1}),{
+      context:{},catalogTree:SAMPLE_TREE,
+      page:mockSyncPage(({curPage,categoryId})=>{
+        if(categoryId==='261285')pages.push(curPage);
+        return {status:200,headers:{},text:listApiText(50,curPage<=4?[`9700010${curPage}`]:[])};
+      }),
+    });
+    assert.ok(pages.includes(2) && pages.includes(3));
+    const store=new QuestionSyncStore(dbPath,{dataDir:directory});
+    try { assert.deepEqual(JSON.parse(store.getRun(second.runId).scope_json).resumeCoverageGaps,[]); }
+    finally { store.close(); }
+  } finally { fs.rmSync(directory,{recursive:true,force:true}); }
+});
+
+test('其他教材超过 50 次运行后仍能找到本教材旧成果', () => {
+  const {directory,dbPath}=tempDb();
+  const store=new QuestionSyncStore(dbPath,{dataDir:directory});
+  try {
+    const scope={textbookId:'book-a',bankId:2,bankPath:'czsx',downloadAssets:false};
+    const old=store.beginRun(scope,{resume:false});
+    store.finishRun(old,'interrupted',{},'budget');
+    for(let i=0;i<60;i++) {
+      const other=store.beginRun({...scope,textbookId:`book-${i}`},{resume:false});
+      store.finishRun(other,'interrupted',{},'budget');
+    }
+    store.beginRun(scope,{resume:true});
+    assert.equal(store.lastBeginMeta.clonedFrom,old);
+  } finally {store.close();fs.rmSync(directory,{recursive:true,force:true});}
+});
+
+test('封存部分成果的补采可以保留非瞬时失败的有效页，旧就地恢复仍拒绝该失败', () => {
+  const {directory,dbPath}=tempDb();
+  const store=new QuestionSyncStore(dbPath,{dataDir:directory});
+  try {
+    const scope=buildScope(baseSyncOptions(directory,dbPath));
+    const runId=store.beginRun(scope,{resume:false});
+    const tree=normalizeCatalogTree(SAMPLE_TREE).nodes;
+    const catalog={...tree[0],chapterExternalId:'261285'};
+    store.saveCatalogTree(runId,'260617',tree);
+    store.savePage({runId,textbookExternalId:'260617',catalog,nodes:tree,pageNumber:1,
+      expectedTotal:50,expectedPages:5,queryFingerprint:'refill',
+      questions:parseQuestionListPayload({code:'0',data:{total:50,html:listHtml('98000001')}}).questions});
+    store.finishRun(runId,'failed',{pagesOk:1},'parse_error');
+    const {validateQuestionListResumeSourceRun,validateResumeSourceRun}=require('../src/storage/resume.cjs');
+    assert.throws(()=>validateResumeSourceRun(dbPath,runId,scope),/不是可续采的瞬时错误/);
+    assert.equal(validateQuestionListResumeSourceRun(dbPath,runId,scope).resumable,true);
+  } finally {store.close();fs.rmSync(directory,{recursive:true,force:true});}
 });

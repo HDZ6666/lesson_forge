@@ -17,7 +17,8 @@ from typing import Any
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.image.image import Image
-from docx.shared import Cm, Pt
+from docx.oxml.ns import qn
+from docx.shared import Cm, Pt, RGBColor
 
 from exceptions.exception import ServiceException
 
@@ -136,17 +137,61 @@ def html_blocks(html: str | None) -> list[tuple[str, Any]]:
     return parser.blocks
 
 
-def _add_runs(paragraph: Any, runs: list[_Run], question_id: int, resolver: AssetResolver | None, max_width_cm: float = 6.0) -> None:
+def _word_picture(path: Path):
+    """Keep native PNG/JPEG editable as normal Word images; convert formula
+    SVG and other supported raster formats to a portable embedded PNG."""
+    if path.suffix.lower() == '.svg':
+        from cairosvg import svg2png
+        from defusedxml.ElementTree import fromstring
+
+        source = path.read_bytes()
+        root = fromstring(source)
+        for element in root.iter():
+            if element.tag.rsplit('}', 1)[-1] in ('script', 'foreignObject'):
+                raise ValueError('不支持包含脚本或外部内容的 SVG')
+            for name, value in element.attrib.items():
+                if name.rsplit('}', 1)[-1] == 'href' and not value.startswith('#'):
+                    raise ValueError('SVG 不允许外部引用')
+                if any(
+                    not ref.strip().strip('"\'').startswith('#') for ref in re.findall(r'url\((.*?)\)', value, re.I)
+                ):
+                    raise ValueError('SVG 不允许外部素材')
+            if element.tag.rsplit('}', 1)[-1] == 'style' and re.search(r'@import|url\(', element.text or '', re.I):
+                raise ValueError('SVG 样式不允许外部引用')
+        return io.BytesIO(svg2png(bytestring=source, unsafe=False))
+    if path.suffix.lower() in ('.webp', '.avif', '.gif', '.bmp'):
+        from PIL import Image as PillowImage
+
+        with PillowImage.open(path) as image:
+            if image.width * image.height > 20_000_000:
+                raise ValueError('图片像素数超过导出上限')
+            result = io.BytesIO()
+            image.convert('RGBA').save(result, format='PNG')
+            result.seek(0)
+            return result
+    return str(path)
+
+
+def _add_runs(
+    paragraph: Any, runs: list[_Run], question_id: int, resolver: AssetResolver | None, max_width_cm: float = 6.0
+) -> None:
     for run in runs:
         if run.kind == 'image':
             path = resolver(question_id, run.asset_key) if resolver and run.asset_key else None
             if path is None:
-                raise ServiceException(message=f'题目 {question_id} 的素材 {run.asset_key or "（无素材编号）"} 不可用，无法完整导出')
+                raise ServiceException(
+                    message=f'题目 {question_id} 的素材 {run.asset_key or "（无素材编号）"} 不可用，无法完整导出'
+                )
             try:
-                natural_width = Image.from_file(str(path)).width
-                paragraph.add_run().add_picture(str(path), width=min(natural_width, Cm(max_width_cm)))
+                picture = _word_picture(path)
+                natural_width = Image.from_file(picture).width
+                if hasattr(picture, 'seek'):
+                    picture.seek(0)
+                paragraph.add_run().add_picture(picture, width=min(natural_width, Cm(max_width_cm)))
             except Exception as exc:
-                raise ServiceException(message=f'题目 {question_id} 的素材 {run.asset_key} 无法写入 Word，请检查图片格式') from exc
+                raise ServiceException(
+                    message=f'题目 {question_id} 的素材 {run.asset_key} 无法写入 Word，请检查图片格式'
+                ) from exc
             continue
         docx_run = paragraph.add_run(run.text)
         if run.sub:
@@ -285,3 +330,36 @@ def build_lesson_docx(detail: dict[str, Any], resolver: AssetResolver | None = N
     buffer = io.BytesIO()
     document.save(buffer)
     return buffer.getvalue()
+
+
+def build_question_docx(model: dict[str, Any], resolver: AssetResolver | None = None) -> bytes:
+    """Question-only print model shared with the web preview."""
+    document = Document()
+    section = document.sections[0]
+    section.page_width, section.page_height = Cm(21), Cm(29.7)
+    section.top_margin = section.bottom_margin = Cm(2)
+    section.left_margin = section.right_margin = Cm(2)
+    style = document.styles['Normal']
+    style.font.name, style.font.size = '宋体', Pt(11)
+    style.element.rPr.rFonts.set(qn('w:eastAsia'), '宋体')
+    for name in ('Title', 'Heading 1', 'Heading 2'):
+        document.styles[name].font.color.rgb = RGBColor(0, 0, 0)
+    title = document.add_heading(model['title'], level=0)
+    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    settings = model['printSettings']
+    number = 0
+    for group in model['groups']:
+        if settings['showGroupTitles']:
+            document.add_heading(group['name'], level=2)
+        for item in group['items']:
+            number += 1
+            q = item['question']
+            # The shared renderer adds metadata only when these fields exist.
+            _render_question(
+                document, number, {name: q.get(name) for name in ('questionId', 'contentHtml', 'plainText')}, resolver
+            )
+            for _ in range(settings['blankLines']):
+                document.add_paragraph()
+    output = io.BytesIO()
+    document.save(output)
+    return output.getvalue()

@@ -73,10 +73,12 @@ def spool_snapshot(
     *,
     page_size: int = DEFAULT_SNAPSHOT_PAGE_SIZE,
     on_progress: Any = None,
+    sealed_for_import: bool = False,
 ) -> dict[str, int]:
     """Copy validated immutable pages to local SQLite with resumable cursors."""
-    raw = client.run_snapshot_summary(run_id, textbook_external_id=textbook_id)
-    summary = _normalise_snapshot_summary(raw, 0, textbook_id)
+    policy = {'sealed_for_import': True} if sealed_for_import else {}
+    raw = client.run_snapshot_summary(run_id, textbook_external_id=textbook_id, **policy)
+    summary = _normalise_snapshot_summary(raw, 0, textbook_id, **policy)
     if int(summary['collector_run_id']) != run_id:
         raise ServiceException(message='collector 运行 ID 与暂存任务不一致')
     counts = summary['counts']
@@ -92,6 +94,9 @@ def spool_snapshot(
         'snapshotLockedAt': str(run.get('snapshotLockedAt') or run.get('snapshot_locked_at')),
         'counts': counts,
     }
+    if sealed_for_import:
+        identity['policy'] = 'sealed-incremental-v2'
+        identity['snapshotComplete'] = summary['snapshot_complete']
     db = _open_spool(path, identity)
     started = time.monotonic()
     try:
@@ -105,10 +110,12 @@ def spool_snapshot(
                 page = client.run_snapshot_page(
                     run_id, collection, textbook_external_id=textbook_id,
                     cursor=cursor, page_size=page_size,
+                    **policy,
                 )
                 client._validate_snapshot_page(
                     page, run_id, textbook_id, collection, counts, run, cursor,
                     page_size=page_size,
+                    **policy,
                 )
                 items = page['items']
                 if not items:
@@ -134,10 +141,11 @@ def spool_snapshot(
         # Recheck the immutable run header after the last page. A changed
         # source cannot silently produce a mixed spool across a resume.
         final = _normalise_snapshot_summary(
-            client.run_snapshot_summary(run_id, textbook_external_id=textbook_id), 0, textbook_id,
+            client.run_snapshot_summary(run_id, textbook_external_id=textbook_id, **policy), 0, textbook_id,
+            **policy,
         )
         final_run = final['run']
-        if final['counts'] != counts or str(
+        if final['collector_run_id'] != run_id or final['snapshot_complete'] != summary['snapshot_complete'] or final['counts'] != counts or str(
             final_run.get('snapshotLockedAt') or final_run.get('snapshot_locked_at')
         ) != identity['snapshotLockedAt']:
             raise ServiceException(message='collector 快照在暂存期间发生变化')

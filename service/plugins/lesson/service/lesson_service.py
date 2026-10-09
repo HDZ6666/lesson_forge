@@ -530,6 +530,8 @@ class LessonService:
         generation = await LessonDao.get_generation(db, generation_id)
         if generation is None:
             raise ServiceException(message='生成记录不存在')
+        if getattr(generation, 'editor_schema_version', 1) == 2:
+            raise ServiceException(message='新版教案请使用草稿编辑接口')
         return generation
 
     @classmethod
@@ -663,6 +665,8 @@ class LessonService:
 
     @classmethod
     async def delete_generations(cls, db: AsyncSession, generation_ids: list[int]) -> int:
+        for generation_id in generation_ids:
+            await cls._require_generation(db, generation_id)
         try:
             deleted = await LessonDao.delete_generations(db, generation_ids)
             await db.commit()

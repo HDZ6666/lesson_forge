@@ -26,6 +26,7 @@ from plugins.bank.entity.vo.bank_vo import (
     CatalogPageQueryModel,
     CatalogTreeModel,
     CatalogTreeQueryModel,
+    ImportResultQueryModel,
     QuestionApplyRequestModel,
     QuestionApplyResponseModel,
     QuestionAssetModel,
@@ -54,6 +55,7 @@ from plugins.bank.entity.vo.bank_vo import (
     TaskOptionsModel,
     TextbookApplyRequestModel,
     TextbookApplyResponseModel,
+    TextbookCoverageModel,
     TextbookModel,
     TextbookQueryModel,
     TextbookVersionModel,
@@ -82,20 +84,23 @@ _SYNC_RUN_READ_PERMISSIONS = [
     'bank:sync:catalog:list',
     'bank:sync:question:list',
 ]
-_TEXTBOOK_TASK_READ_PERMISSIONS = ['bank:sync:center:list', 'bank:sync:textbook:list']
-_QUESTION_TASK_READ_PERMISSIONS = ['bank:sync:center:list', 'bank:sync:question:list']
+_TEXTBOOK_TASK_READ_PERMISSIONS = ['bank:sync:discovery:list', 'bank:sync:center:list', 'bank:sync:textbook:list']
+_QUESTION_TASK_READ_PERMISSIONS = ['bank:sync:tasks:list', 'bank:sync:center:list', 'bank:sync:question:list']
 _QUESTION_OPTIONS_READ_PERMISSIONS = [
+    'bank:sync:tasks:list',
     'bank:sync:center:list',
     'bank:sync:question:list',
     'bank:sync:version:list',
     'bank:sync:textbook:list',
 ]
 _TEXTBOOK_TASK_QUERY_PERMISSIONS = [
+    'bank:sync:discovery:list',
     'bank:sync:center:list',
     'bank:sync:textbook:list',
     'bank:sync:textbook:query',
 ]
 _QUESTION_TASK_QUERY_PERMISSIONS = [
+    'bank:sync:tasks:list',
     'bank:sync:center:list',
     'bank:sync:question:list',
     'bank:sync:question:query',
@@ -453,6 +458,85 @@ async def apply_question_sync_task(
     return ResponseUtil.success(data=result)
 
 
+@bank_controller.post(
+    '/sync/question/tasks/{task_id}/import',
+    dependencies=[UserInterfaceAuthDependency('bank:sync:question:apply')],
+)
+@ApiRateLimit(namespace=ApiNamespace.BANK_SYNC_RUN, preset=ApiRateLimitPreset.USER_RESOURCE_SYNC)
+@Log(title='提交分批题库入库', business_type=BusinessType.UPDATE)
+async def request_question_incremental_import(
+    request: Request,
+    task_id: Annotated[int, Path(gt=0)],
+    db: Annotated[AsyncSession, DBSessionDependency()],
+) -> Response:
+    from plugins.bank.service.incremental_import import request_incremental_import
+
+    await db.rollback()
+    return ResponseUtil.success(data=await request_incremental_import(db, task_id))
+
+
+@bank_controller.post(
+    '/sync/question/tasks/{task_id}/import-intake/retry',
+    dependencies=[UserInterfaceAuthDependency('bank:sync:question:apply')],
+)
+@ApiRateLimit(namespace=ApiNamespace.BANK_SYNC_RUN, preset=ApiRateLimitPreset.USER_RESOURCE_SYNC)
+@Log(title='重试题库封存核验', business_type=BusinessType.UPDATE)
+async def retry_question_import_intake(
+    request: Request,
+    task_id: Annotated[int, Path(gt=0)],
+    db: Annotated[AsyncSession, DBSessionDependency()],
+) -> Response:
+    from plugins.bank.service.import_intake import retry_import_intake
+
+    await db.rollback()
+    return ResponseUtil.success(data=await retry_import_intake(db, task_id))
+
+
+@bank_controller.get(
+    '/sync/question/tasks/{task_id}/imports',
+    dependencies=[UserInterfaceAuthDependency(_QUESTION_TASK_READ_PERMISSIONS)],
+)
+async def question_import_history(
+    task_id: Annotated[int, Path(gt=0)],
+    db: Annotated[AsyncSession, DBSessionDependency()],
+    before_id: Annotated[int | None, Query(alias='beforeId', gt=0)] = None,
+    page_size: Annotated[int, Query(alias='pageSize', ge=1, le=50)] = 20,
+) -> Response:
+    from plugins.bank.service.import_results import list_import_history
+
+    return ResponseUtil.success(data=await list_import_history(db, task_id, before_id=before_id, page_size=page_size))
+
+
+@bank_controller.get(
+    '/sync/question/tasks/{task_id}/imports/{import_id}/batches',
+    dependencies=[UserInterfaceAuthDependency(_QUESTION_TASK_READ_PERMISSIONS)],
+)
+async def question_import_batches(
+    task_id: Annotated[int, Path(gt=0)],
+    import_id: Annotated[int, Path(gt=0)],
+    query: Annotated[ImportResultQueryModel, Query()],
+    db: Annotated[AsyncSession, DBSessionDependency()],
+) -> Response:
+    from plugins.bank.service.import_results import batch_results
+
+    return ResponseUtil.success(data=await batch_results(db, task_id, import_id, cursor=query.cursor, page_size=query.page_size))
+
+
+@bank_controller.get(
+    '/sync/question/tasks/{task_id}/imports/{import_id}/issues',
+    dependencies=[UserInterfaceAuthDependency(_QUESTION_TASK_READ_PERMISSIONS)],
+)
+async def question_import_issues(
+    task_id: Annotated[int, Path(gt=0)],
+    import_id: Annotated[int, Path(gt=0)],
+    query: Annotated[ImportResultQueryModel, Query()],
+    db: Annotated[AsyncSession, DBSessionDependency()],
+) -> Response:
+    from plugins.bank.service.import_results import issue_results
+
+    return ResponseUtil.success(data=await issue_results(db, task_id, import_id, cursor=query.cursor, page_size=query.page_size))
+
+
 @bank_controller.delete(
     '/sync/question/tasks/{task_id}',
     response_model=ResponseBaseModel,
@@ -674,7 +758,7 @@ async def delete_versions(
 
 @bank_controller.get(
     '/textbook/list',
-    response_model=PageResponseModel[TextbookModel],
+    response_model=PageResponseModel[TextbookCoverageModel],
     dependencies=[UserInterfaceAuthDependency(['bank:textbook:list', 'bank:browse:list'])],
 )
 async def list_textbooks(
@@ -686,8 +770,8 @@ async def list_textbooks(
 
 @bank_controller.get(
     '/textbook/{textbook_id}',
-    response_model=DataResponseModel[TextbookModel],
-    dependencies=[UserInterfaceAuthDependency('bank:textbook:query')],
+    response_model=DataResponseModel[TextbookCoverageModel],
+    dependencies=[UserInterfaceAuthDependency(['bank:textbook:query', 'bank:browse:list'])],
 )
 async def textbook_detail(
     textbook_id: Annotated[int, Path(gt=0)], db: Annotated[AsyncSession, DBSessionDependency()]

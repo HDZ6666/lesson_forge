@@ -4,6 +4,7 @@
     <el-alert v-if="errorMessage" class="state-alert" type="error" :closable="false" show-icon>{{ errorMessage }}</el-alert>
     <section class="panel">
       <el-form ref="queryRef" :model="query" :inline="true" class="filter-form" @submit.prevent="search">
+        <el-form-item label="学科"><SubjectSelect v-model="context.subjectId" @change="handleSubjectChange" /></el-form-item>
         <el-form-item label="版本"><el-select v-model="context.versionId" clearable filterable placeholder="版本" class="context-select" @change="handleVersionChange"><el-option v-for="item in versions" :key="idOf(item,'versionId')" :label="item.versionName" :value="idOf(item,'versionId')" /></el-select></el-form-item>
         <el-form-item label="教材"><el-select v-model="context.textbookId" clearable filterable placeholder="教材" class="context-select" :disabled="!context.versionId" @change="handleTextbookChange"><el-option v-for="item in textbooks" :key="idOf(item,'textbookId')" :label="item.textbookName" :value="idOf(item,'textbookId')" /></el-select></el-form-item>
         <el-form-item label="目录"><el-select v-model="query.catalogId" clearable filterable placeholder="全部目录" class="context-select" :disabled="!context.textbookId"><el-option v-for="item in catalogOptions" :key="idOf(item,'catalogId')" :label="item.nodeName" :value="idOf(item,'catalogId')" /></el-select></el-form-item>
@@ -35,11 +36,16 @@
       </el-form><template #footer><el-button @click="dialogVisible = false">取消</el-button><el-button type="primary" :loading="submitting" @click="submit">保存</el-button></template>
     </el-dialog>
 
-    <el-drawer v-model="detailVisible" title="题目详情" direction="rtl" size="min(720px, 94vw)" append-to-body><el-skeleton v-if="detailLoading" :rows="10" animated /><el-empty v-else-if="!detail" description="未找到题目" /><div v-else class="detail-content"><div class="detail-meta"><el-tag v-if="detail.questionType" size="small">{{ detail.questionType }}</el-tag><el-tag v-if="detail.difficulty" size="small" type="warning">{{ detail.difficulty }}</el-tag><span>{{ detail.sourceProvider || '未知来源' }}</span><span>来源 ID：{{ detail.externalQuestionId || '未采集' }}</span></div><section class="detail-section"><h3>题干</h3><div class="rich-text" v-html="safeHtml(detail.contentHtml || detail.plainText)" /></section><section v-if="detail.answerHtml" class="detail-section"><h3>答案</h3><div class="rich-text" v-html="safeHtml(detail.answerHtml)" /></section><section v-if="detail.analysisHtml" class="detail-section"><h3>解析</h3><div class="rich-text" v-html="safeHtml(detail.analysisHtml)" /></section><section class="detail-section"><h3>素材</h3><el-empty v-if="!assets.length" :image-size="48" description="暂无素材或素材未下载" /><div v-else class="asset-list"><div v-for="asset in assets" :key="asset.assetKey" class="asset-item"><a v-if="resolveAsset(asset)" :href="resolveAsset(asset)" target="_blank" rel="noopener noreferrer">{{ asset.fileName || asset.assetKey }}</a><span v-else>{{ asset.fileName || asset.assetKey }}（未下载）</span></div></div></section></div></el-drawer>
+    <el-drawer v-model="detailVisible" title="题目详情" direction="rtl" size="min(720px, 94vw)" append-to-body><el-skeleton v-if="detailLoading" :rows="10" animated /><el-empty v-else-if="!detail" description="未找到题目" /><div v-else class="detail-content"><div class="detail-meta"><el-tag v-if="detail.questionType" size="small">{{ detail.questionType }}</el-tag><el-tag v-if="detail.difficulty" size="small" type="warning">{{ detail.difficulty }}</el-tag><span>{{ detail.sourceProvider || '未知来源' }}</span><span>来源 ID：{{ detail.externalQuestionId || '未采集' }}</span></div><section class="detail-section"><h3>题干</h3><div class="rich-text" v-html="safeHtml(detail.contentHtml || detail.plainText)" /></section><section v-if="detail.answerHtml" class="detail-section"><h3>答案</h3><div class="rich-text" v-html="safeHtml(detail.answerHtml)" /></section><section v-if="detail.analysisHtml" class="detail-section"><h3>解析</h3><div class="rich-text" v-html="safeHtml(detail.analysisHtml)" /></section><section class="detail-section"><h3>素材</h3><el-empty v-if="!assets.length" :image-size="48" description="暂无素材或素材未下载" /><div v-else class="asset-list"><div v-for="asset in assets" :key="asset.assetKey" class="asset-item"><a v-if="resolveAsset(asset)" :href="resolveAsset(asset)" target="_blank" rel="noopener noreferrer">{{ asset.fileName || asset.assetKey }}</a><span v-else>{{ asset.fileName || asset.assetKey }}</span><small>{{ assetStore.label(asset) }}</small><el-button v-if="assetStore.state(asset).status === 'failed'" link type="primary" @click="assetStore.retry(asset)">重试加载</el-button></div></div></section></div></el-drawer>
   </div>
 </template>
 
 <script setup>
+let scopeReadRevision = 0
+let versionsReadRevision = 0
+let textbooksReadRevision = 0
+let catalogsReadRevision = 0
+import SubjectSelect from "../../components/SubjectSelect.vue"
 import { computed, getCurrentInstance, onMounted, reactive, ref, watch } from 'vue'
 import { Delete, Edit, Plus, Refresh, RefreshLeft, Search, View } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -51,15 +57,56 @@ const { proxy } = getCurrentInstance(); const { qb_question_type, qb_difficulty,
 const versions = ref([]); const textbooks = ref([]); const catalogOptions = ref([]); const rows = ref([]); const selected = ref([]); const total = ref(0); const loading = ref(false); const submitting = ref(false); const dialogVisible = ref(false); const detailVisible = ref(false); const detailLoading = ref(false); const detail = ref(null); const assets = ref([]); const errorMessage = ref(''); const queryRef = ref(); const formRef = ref(); const isSyncForm = ref(false)
 const assetStore = useQuestionAssetStore(getQuestionAsset)
 let detailRequestId = 0
-const context = reactive({ versionId: undefined, textbookId: undefined }); const query = reactive({ pageNum: 1, pageSize: 10, catalogId: undefined, keyword: '', questionType: undefined, difficulty: undefined, sourceProvider: '', status: undefined, sort: 'questionId', order: 'desc' }); const form = reactive({})
+const context = reactive({ subjectId: undefined, versionId: undefined, textbookId: undefined }); const query = reactive({ pageNum: 1, pageSize: 10, catalogId: undefined, keyword: '', questionType: undefined, difficulty: undefined, sourceProvider: '', status: undefined, sort: 'questionId', order: 'desc' }); const form = reactive({})
 const rules = { contentHtml: [{ validator: (_rule, _value, callback) => { if (isSyncForm.value || String(form.contentHtml || '').trim() || String(form.plainText || '').trim()) callback(); else callback(new Error('题干 HTML 与纯文本至少填写一个')) }, trigger: 'blur' }], catalogIds: [{ validator: (_rule, _value, callback) => { if (isSyncForm.value || (Array.isArray(form.catalogIds) && form.catalogIds.length)) callback(); else callback(new Error('人工题目至少关联一个目录')) }, trigger: 'change' }] }
 const idOf = (item, key) => item?.[key] ?? item?.[key.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`)]; const isManual = (row) => String(row?.sourceProvider || '').toLowerCase() === 'manual'; const deletableSelected = computed(() => selected.value.length > 0 && selected.value.every(isManual)); function rowText(row) { return row?.plainText || row?.sourceText || row?.paperName || '题目内容未采集' } function flatten(nodes) { return nodes.flatMap((node) => [node, ...flatten(node.children || [])]) }
 function unwrapOne(result) { return result?.data && !result.questionId ? result.data : result }
-function resetForm() { Object.assign(form, { questionId: undefined, textbookId: context.textbookId, catalogIds: [], sourceProvider: 'manual', externalQuestionId: undefined, sourceQuestionNo: '', sourceText: '', paperName: '', sourceUrl: '', questionType: undefined, difficulty: undefined, contentHtml: '', plainText: '', answerHtml: '', analysisHtml: '', status: '0' }); isSyncForm.value = false; formRef.value?.clearValidate() }
-async function loadVersions() { try { versions.value = unwrapList(await listVersions({ pageNum: 1, pageSize: 100, includeDisabled: true })) } catch (error) { errorMessage.value = error?.message || '版本加载失败，请稍后重试' } }
-async function handleVersionChange(versionId) { context.textbookId = undefined; query.catalogId = undefined; catalogOptions.value = []; textbooks.value = []; rows.value = []; total.value = 0; if (!versionId) { await loadQuestions(); return } try { textbooks.value = unwrapList(await listTextbooks({ versionId, pageNum: 1, pageSize: 100, includeDisabled: true })) } catch (error) { errorMessage.value = error?.message || '教材加载失败，请稍后重试' } }
-async function handleTextbookChange(textbookId) { query.catalogId = undefined; catalogOptions.value = []; rows.value = []; total.value = 0; if (!textbookId) { await loadQuestions(); return } try { catalogOptions.value = flatten(unwrapTree(await listCatalog({ textbookId, includeDisabled: true }))) } catch (error) { errorMessage.value = error?.message || '目录加载失败，请稍后重试' } await loadQuestions() }
-async function loadQuestions() { loading.value = true; errorMessage.value = ''; try { const page = unwrapPage(await listQuestions({ ...query, textbookId: context.textbookId, includeDisabled: true })); rows.value = page.rows; total.value = page.total; selected.value = [] } catch (error) { rows.value = []; total.value = 0; errorMessage.value = error?.message || '题目加载失败，请稍后重试' } finally { loading.value = false } }
+function resetForm() { Object.assign(form, { questionId: undefined, subjectId: undefined, textbookId: context.textbookId, catalogIds: [], sourceProvider: 'manual', externalQuestionId: undefined, sourceQuestionNo: '', sourceText: '', paperName: '', sourceUrl: '', questionType: undefined, difficulty: undefined, contentHtml: '', plainText: '', answerHtml: '', analysisHtml: '', status: '0' }); isSyncForm.value = false; formRef.value?.clearValidate() }
+async function handleSubjectChange() {
+  scopeReadRevision += 1; textbooksReadRevision += 1; catalogsReadRevision += 1
+  context.versionId = undefined; context.textbookId = undefined; query.catalogId = undefined
+  catalogOptions.value = []; textbooks.value = []; versions.value = []; selected.value = []
+  rows.value = []; total.value = 0; loading.value = false; query.pageNum = 1
+  await Promise.all([loadVersions(), loadQuestions()])
+}
+async function loadVersions() {
+  const revision = ++versionsReadRevision
+  try {
+    const result = unwrapList(await listVersions({ subjectId: context.subjectId, pageNum: 1, pageSize: 100, includeDisabled: true }))
+    if (revision === versionsReadRevision) versions.value = result
+  } catch (error) {
+    if (revision === versionsReadRevision) errorMessage.value = error?.message || '版本加载失败，请稍后重试'
+  }
+}
+async function handleVersionChange(versionId) {
+  const revision = ++textbooksReadRevision
+  scopeReadRevision += 1; catalogsReadRevision += 1; loading.value = false
+  context.textbookId = undefined; query.catalogId = undefined; catalogOptions.value = []; textbooks.value = []
+  rows.value = []; total.value = 0
+  if (!versionId) { await loadQuestions(); return }
+  try {
+    const result = unwrapList(await listTextbooks({ versionId, pageNum: 1, pageSize: 100, includeDisabled: true }))
+    if (revision === textbooksReadRevision) textbooks.value = result
+  } catch (error) {
+    if (revision === textbooksReadRevision) errorMessage.value = error?.message || '教材加载失败，请稍后重试'
+  }
+}
+async function handleTextbookChange(textbookId) {
+  const revision = ++catalogsReadRevision
+  scopeReadRevision += 1; loading.value = false
+  query.catalogId = undefined; catalogOptions.value = []; rows.value = []; total.value = 0
+  if (!textbookId) { await loadQuestions(); return }
+  try {
+    const result = flatten(unwrapTree(await listCatalog({ textbookId, includeDisabled: true })))
+    if (revision !== catalogsReadRevision) return
+    catalogOptions.value = result
+  } catch (error) {
+    if (revision !== catalogsReadRevision) return
+    errorMessage.value = error?.message || '目录加载失败，请稍后重试'
+  }
+  await loadQuestions()
+}
+async function loadQuestions() { const revision = ++scopeReadRevision; loading.value = true; errorMessage.value = ''; try { const page = unwrapPage(await listQuestions({ ...query, subjectId: context.subjectId, textbookId: context.textbookId, includeDisabled: true })); if (revision !== scopeReadRevision) return; rows.value = page.rows; total.value = page.total; selected.value = [] } catch (error) { if (revision !== scopeReadRevision) return; rows.value = []; total.value = 0; errorMessage.value = error?.message || '题目加载失败，请稍后重试' } finally { if (revision === scopeReadRevision) loading.value = false } }
 function search() { query.pageNum = 1; loadQuestions() } function resetQuery() { queryRef.value?.resetFields(); query.pageNum = 1; loadQuestions() }
 function openAdd() { resetForm(); dialogVisible.value = true }
 async function openEdit(row) { resetForm(); Object.assign(form, row); isSyncForm.value = !isManual(row); dialogVisible.value = true; if (!isSyncForm.value) { try { const result = await getQuestion(row.questionId); const value = unwrapOne(result); Object.assign(form, value || {}); form.textbookId = context.textbookId; if (!catalogOptions.value.length && form.textbookId) await handleFormTextbookChange(form.textbookId) } catch (error) { ElMessage.error(error?.message || '题目详情加载失败') } } }

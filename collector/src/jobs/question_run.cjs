@@ -96,12 +96,22 @@ const acquireLock = (lockPath) => acquireSharedLock(lockPath, {
 });
 
 const { buildScope } = require('./question_scope.cjs');
+const { assertMathSource } = require('../sources/registry.cjs');
+const { SourceControl } = require('../policies/source_control.cjs');
+const { SourceBudget } = require('../policies/source_budget.cjs');
+const { ResourceGuard } = require('../policies/resource_guard.cjs');
 
 async function runSync(options, dependencies = {}) {
   const opts = { ...options };
+  opts.sourceNamespace = assertMathSource(opts);
   ensureDir(opts.dataDir);
   ensureDir(opts.profileDir);
   const store = dependencies.store || new QuestionSyncStore(opts.dbPath, { dataDir: opts.dataDir });
+  opts.sourceControl = new SourceControl(opts.dbPath);
+  opts.sourceBudget = new SourceBudget(opts.dbPath, dependencies.sourceBudgetOptions);
+  opts.resourceGuard = new ResourceGuard({ ...dependencies.resourceGuardOptions, paths: {
+    database: path.dirname(opts.dbPath), data: opts.dataDir, profile: opts.profileDir,
+  } });
   const release = acquireLock(`${opts.dbPath}${LOCK_SUFFIX}`);
   const initialScope = buildScope(opts);
   let runId;
@@ -165,6 +175,7 @@ async function runSync(options, dependencies = {}) {
   });
   const unregisterStop = registerStop(stopHandlers) || (() => {});
   const assertNotStopped = () => {
+    opts.sourceBudget.assertRunning();
     if (!stopSignal) return;
     throw new QuestionSyncError(`收到 ${stopSignal}，采集在安全点停止`, 'stop_requested');
   };
@@ -236,6 +247,18 @@ async function runSync(options, dependencies = {}) {
       resume: opts.resume,
       resumeRunId: opts.resumeRunId,
     });
+    let resumeHints = {};
+    if (store.lastBeginMeta?.reused || store.lastBeginMeta?.clonedFrom) {
+      resumeHints = store.resetRunScan(runId);
+      console.log('[续采] 保留旧成果，刷新首屏；按来源题 ID 核对旧边界后继续未覆盖尾段');
+    }
+    const resumeCoverageGaps = [];
+    const persistResumeScope = () => {
+      scope.resumeScanHints = resumeHints;
+      scope.resumeCoverageGaps = resumeCoverageGaps;
+      store.updateRunScope(runId, scope);
+    };
+    persistResumeScope();
     console.log(`run=${runId}`);
     events.emit('run_created', {
       runId,
@@ -243,6 +266,10 @@ async function runSync(options, dependencies = {}) {
       textbookExternalId: opts.textbookId,
       resumedFromRunId: opts.resumeRunId,
     });
+    opts.sourceControl.assertAllowed();
+    opts.resourceGuard.assertAllowed();
+    opts.sourceBudget.startRun(`content:${runId}`, 'content');
+    opts.sourceBudget.startTiming();
     if (!context) {
       playwrightRef = playwrightRef || await loadPlaywright();
       if (opts.cdpUrl) {
@@ -293,12 +320,14 @@ async function runSync(options, dependencies = {}) {
         opts,
         eligibleCatalogs.length,
         selectedCatalogs.length,
-        { textbookExpectedTotal: null, summaryStrategy: 'unknown_limited_run' },
+        { textbookExpectedTotal: null, summaryStrategy: 'unknown_limited_run',
+          scanCatalogIds: selectedCatalogs.map((catalog) => String(catalog.externalId)) },
       );
-      store.updateRunScope(runId, scope);
+      persistResumeScope();
       console.log('[统计] --limit 运行跳过教材根目录 total 探针');
     } else {
       let textbookExpectedTotal = null;
+      let textbookExpectedTotalObservedAt = null;
       let summaryStrategy = 'textbook_root_probe_unavailable';
       try {
         await requestGate(opts.sleepFn || sleep);
@@ -313,6 +342,7 @@ async function runSync(options, dependencies = {}) {
           console.warn('[统计] 教材根目录 total 不可用，继续采集');
         } else {
           summaryStrategy = 'textbook_root_probe';
+          textbookExpectedTotalObservedAt = new Date().toISOString();
           console.log(`[统计] 教材根目录 total=${textbookExpectedTotal}`);
         }
       } catch (error) {
@@ -322,9 +352,10 @@ async function runSync(options, dependencies = {}) {
         opts,
         eligibleCatalogs.length,
         selectedCatalogs.length,
-        { textbookExpectedTotal, summaryStrategy },
+        { textbookExpectedTotal, textbookExpectedTotalObservedAt, summaryStrategy,
+          scanCatalogIds: selectedCatalogs.map((catalog) => String(catalog.externalId)) },
       );
-      store.updateRunScope(runId, scope);
+      persistResumeScope();
     }
 
     const safetyPageLimit = catalogSafetyPageLimit(opts);
@@ -382,11 +413,14 @@ async function runSync(options, dependencies = {}) {
         zeroNewWindows: 0,
         boundaryProbe: false,
         finished: false,
+        resumeHint: resumeHints[String(catalog.externalId)] || null,
+        resumeChecked: false,
         // A node with no persisted page 1 must start at page 1 in its normal
         // turn. Resumed nodes with cloned pages continue from checkpoint+1.
         nextPage: hasPageOne ? Math.max(opts.startPage, checkpoint + 1, 2) : 1,
       };
     });
+    catalogStates.sort((a, b) => Number(Boolean(a.resumeHint?.finished)) - Number(Boolean(b.resumeHint?.finished)));
     for (const state of catalogStates) {
       store.reopenCatalogProgress(runId, opts.textbookId, state.catalog.externalId);
     }
@@ -435,6 +469,14 @@ async function runSync(options, dependencies = {}) {
         pageLimitReached,
       });
       state.finished = true;
+      const id = String(state.catalog.externalId);
+      if (resumeHints[id]) resumeHints[id].finished = !stalled && !pageLimitReached;
+      persistResumeScope();
+      if (resumeCoverageGaps.includes(id)) {
+        store.db.prepare(`UPDATE sync_run_catalog_progress SET scan_complete=0, data_complete=0,
+          completion_quality='completed_with_issues', stall_reason='resume_coverage_unverified'
+          WHERE run_id=? AND catalog_external_id=?`).run(runId, id);
+      }
       const progress = store.getRunCatalogProgress(runId, opts.textbookId, state.catalog.externalId);
       console.log(
         `[列表] catalog=${state.catalog.externalId} scan=${pageLimitReached ? 'limited' : (stalled ? 'stalled' : 'complete')}`
@@ -557,7 +599,7 @@ async function runSync(options, dependencies = {}) {
                 result = await downloadAsset(context, opts, asset);
                 if (result.contentSha256) counters.assetsDownloaded += 1;
               } catch (error) {
-                if (String(error?.code || '') === 'asset_storage_error') throw error;
+                if (error.blocked || String(error?.code || '') === 'asset_storage_error') throw error;
                 result = {
                   ...asset,
                   sourceUrl,
@@ -653,6 +695,7 @@ async function runSync(options, dependencies = {}) {
     };
 
     async function rotateToFreshSession(reason) {
+      opts.sourceControl?.requireManual(String(reason || '来源要求验证，请人工核对后恢复'));
       if (injectedSession) {
         throw new VerificationRequiredError(String(reason || '当前会话需要验证'), { code: 'waiting_verification' });
       }
@@ -789,6 +832,34 @@ async function runSync(options, dependencies = {}) {
       }
     }
 
+    async function verifyResumeFrontier(state) {
+      const hint = state.resumeHint;
+      if (!hint || state.resumeChecked || state.nextPage < 2) return;
+      state.resumeChecked = true;
+      if (hint.lastPage < 3 || !hint.anchorId || opts.limit > 0) return;
+      const growth = state.expectedTotal != null && hint.total != null
+        ? Math.max(0, state.expectedTotal - hint.total) : 0;
+      const boundary = Math.min(explicitLastPage, safetyPageLimit,
+        Math.max(2, hint.lastPage + Math.floor(growth / DEFAULT_PAGE_CAPACITY)));
+      // A page number is only a search hint. Require the saved boundary ID in
+      // a current response; otherwise continue the fresh scan from page 2.
+      for (const pageNumber of [boundary, boundary + 1]) {
+        if (pageNumber > explicitLastPage || pageNumber > safetyPageLimit) break;
+        assertNotStopped();
+        await requestGate(opts.sleepFn || sleep);
+        const parsed = await postQuestionList(page, opts, state.catalog, pageNumber, { allowVerificationWait: false });
+        if (!(parsed.questionIds || []).map(String).includes(String(hint.anchorId))) continue;
+        resumeCoverageGaps.push(String(state.catalog.externalId));
+        persistResumeScope();
+        await persistCatalogPage(state, pageNumber, parsed);
+        state.nextPage = pageNumber + 1;
+        if (hint.finished && growth < DEFAULT_PAGE_CAPACITY) finishCatalogScan(state);
+        console.log(`[续采] catalog=${state.catalog.externalId} 边界题 ${hint.anchorId} 已在当前 page=${pageNumber} 复核`);
+        return;
+      }
+      console.log(`[续采] catalog=${state.catalog.externalId} 旧边界未匹配，继续从前部重新扫描`);
+    }
+
     // All real catalogs start from their own saved checkpoint.  Nodes without
     // a saved page 1 begin at page 1 here; the root total probe above is never
     // represented as a catalog page or question snapshot.  Each concurrent
@@ -799,6 +870,8 @@ async function runSync(options, dependencies = {}) {
       try {
         catalogPages:
         while (!state.finished) {
+          await verifyResumeFrontier(state);
+          if (state.finished) break;
           if (opts.limit > 0 && counters.questionsSeen >= opts.limit) break;
           // Check the task policy boundary before the generic safety ceiling.
           // This keeps an explicitly configured safetyPageLimit of 1000 from
@@ -834,7 +907,45 @@ async function runSync(options, dependencies = {}) {
           beginFetchWindow(state, pageNumbers);
           await requestGate(opts.sleepFn || sleep);
           const rows = await fetchWindow(state, pageNumbers);
-          await prefetchWindowAssets(rows);
+          let sourcePause = rows.find((row) => row.error?.blocked)?.error;
+          if (!sourcePause) {
+            try { await prefetchWindowAssets(rows); }
+            catch (error) {
+              if (!error.blocked) throw error;
+              sourcePause = error;
+            }
+          }
+          if (sourcePause) {
+            // Settle good responses already in flight. Do not initiate asset
+            // requests after the shared pause; missing bytes remain explicit
+            // and the import checker can isolate those questions later.
+            for (const row of rows) {
+              for (const question of row.parsed?.questions || []) {
+                for (const asset of question.assets || []) {
+                  const url = String(asset.sourceUrl || asset.url || '');
+                  if (url && !assetCache.has(url)) assetCache.set(url, {
+                    ...asset, sourceUrl: url, downloadFailed: true,
+                    errorCode: sourcePause.code, errorMessage: sourcePause.message,
+                  });
+                }
+              }
+            }
+            for (const row of rows.filter((item) => item.parsed)) {
+              const saved = await settleFetchedPage(state, row);
+              noteFetchSlot(state, row.pageNumber, saved);
+            }
+            for (const row of rows.filter((item) => item.error)) {
+              store.recordPageAttempt({
+                runId, textbookExternalId: opts.textbookId,
+                catalog: normalizedCatalogOf(state.catalog), pageNumber: row.pageNumber,
+                resultType: PAGE_RESULT.REQUEST_FAILED, errorCode: row.error.code || sourcePause.code,
+                queryFingerprint: state.scopeKey, filterJson: state.filterJson,
+                expectedTotal: state.expectedTotal, targetPages: state.targetPages,
+              });
+              noteFetchSlot(state, row.pageNumber, { resultType: PAGE_RESULT.REQUEST_FAILED });
+            }
+            throw sourcePause;
+          }
           const sessionRows = rows.filter((row) => row.error && isCookieSwitchError(row.error));
           if (sessionRows.length) {
             const sessionPages = new Set(sessionRows.map((row) => row.pageNumber));
@@ -965,6 +1076,7 @@ async function runSync(options, dependencies = {}) {
     }
     throw error;
   } finally {
+    opts.sourceBudget.stopTiming();
     try {
       await disposeCollectorSession();
     } catch {

@@ -124,6 +124,12 @@ function normalizeIndependentTextbookScopes(payload) {
   if (!payload.textbookScopes.length || payload.textbookScopes.length > MAX_SELECTED_TEXTBOOKS) {
     throw new Error(`教材范围数量必须在 1 到 ${MAX_SELECTED_TEXTBOOKS} 之间`);
   }
+  if (payload.workflowVersion !== 1 && payload.textbookScopes.length !== 1) {
+    throw new Error('新同步任务必须且只能选择一本教材');
+  }
+  if (payload.sourceNamespace != null && payload.sourceNamespace !== 'zujuan:junior:math') {
+    throw new Error('该来源学段学科的采集适配尚未验证');
+  }
   if (!Array.isArray(payload.textbookExternalIds)) {
     throw new Error('使用 textbookScopes 时必须提供 textbookExternalIds 数组');
   }

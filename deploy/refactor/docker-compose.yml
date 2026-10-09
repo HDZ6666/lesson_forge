@@ -1,0 +1,39 @@
+name: lesson-refactor
+
+services:
+  mysql:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: refactor-local-root
+      MYSQL_DATABASE: lesson_refactor
+      MYSQL_USER: lesson_refactor
+      MYSQL_PASSWORD: refactor-local-db
+    ports:
+      - "127.0.0.1:13316:3306"
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_0900_ai_ci"]
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ../../service/sql/ruoyi-fastapi.sql:/bootstrap/system.sql:ro
+      - ./init-system.sh:/docker-entrypoint-initdb.d/001-system.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "MYSQL_PWD=$$MYSQL_ROOT_PASSWORD mysqladmin ping -h 127.0.0.1 -uroot --silent"]
+      interval: 2s
+      timeout: 3s
+      retries: 60
+      start_period: 20s
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "127.0.0.1:16379:6379"
+    volumes:
+      - redis_data:/data
+    command: ["redis-server", "--appendonly", "yes"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  mysql_data:
+  redis_data:

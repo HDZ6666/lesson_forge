@@ -296,6 +296,7 @@ async def plan_asset_file(
     question_id: Annotated[int, Path(gt=0)],
     asset_key: Annotated[str, Path(min_length=1, max_length=100)],
     db: Annotated[AsyncSession, DBSessionDependency()],
+    current_user: Annotated[CurrentUserModel, CurrentUserDependency()],
     generation_id: Annotated[int | None, Query(alias='generationId', gt=0)] = None,
 ) -> FileResponse:
     path, media_type = await LessonService.asset_file(db, question_id, asset_key, generation_id)

@@ -266,6 +266,35 @@ def test_snapshot_normalization_validates_provider_ids_and_version_reference(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('mutate', [None, 'task', 'scope'])
+async def test_metadata_prepare_has_no_transaction_and_rechecks_binding(db, monkeypatch, mutate):
+    await _seed_tasks_and_other_provider(db)
+
+    async def read_snapshot(run_id):
+        assert not db.in_transaction()
+        if mutate == 'task':
+            task = await db.get(QbSyncJob, 9)
+            task.status = 'failed'
+            await db.commit()
+        elif mutate == 'scope':
+            scope = await db.scalar(select(QbSyncJobScope).where(QbSyncJobScope.run_id == 9))
+            scope.metadata_run_id = 10
+            await db.commit()
+        return _snapshot(run_id)
+
+    monkeypatch.setattr(textbook_apply_service, '_read_snapshot', read_snapshot)
+    if mutate:
+        with pytest.raises(ServiceException, match='在快照读取期间发生变化'):
+            await TextbookApplyService.apply(db, 9)
+        assert await db.scalar(select(func.count()).select_from(QbTextbookApplyHistory)) == 0
+        assert await db.scalar(
+            select(func.count()).select_from(QbTextbook).where(QbTextbook.source_provider == 'zujuan')
+        ) == 0
+    else:
+        assert (await TextbookApplyService.apply(db, 9))['textbooks']['inserted'] == 2
+
+
+@pytest.mark.asyncio
 async def test_apply_rollback_restore_preserves_keys_order_provider_and_history(
     db: AsyncSession,
     snapshot_reader: Mapping[int, dict[str, Any]],
