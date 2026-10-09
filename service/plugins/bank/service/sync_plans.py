@@ -9,6 +9,8 @@ from sqlalchemy import or_, select, update
 
 from exceptions.exception import ServiceException
 from plugins.bank.entity.do.bank_do import (
+    QbQuestionImport,
+    QbQuestionImportIntake,
     QbSyncBookState,
     QbSyncControl,
     QbSyncJob,
@@ -269,7 +271,8 @@ async def tick_plan(db, plan_id, *, client):
                     select(QbSyncJob)
                     .where(
                         QbSyncJob.options_json['autoPlanId'].as_integer() == plan_id,
-                        QbSyncJob.options_json['autoCycleNo'].as_integer() == plan.cycle_no,
+                        or_(QbSyncJob.options_json['autoCycleNo'].as_integer() == plan.cycle_no,
+                            QbSyncJob.run_id.in_([state.last_task_id for state in states.values() if state.last_task_id])),
                     )
                     .order_by(QbSyncJob.run_id)
                 )
@@ -294,22 +297,32 @@ async def tick_plan(db, plan_id, *, client):
             if scope is None or scope.local_textbook_id not in states:
                 continue
             state = states[scope.local_textbook_id]
+            if state.last_task_id and state.last_task_id > job.run_id:
+                continue
             state.last_task_id = job.run_id
             if (
                 job.status in TERMINAL
                 and job.active_slot is None
                 and job.dispatch_book_key is None
-                and state.last_cycle_no < plan.cycle_no
             ):
-                state.last_cycle_no = plan.cycle_no
-                state.last_finished_at = now
-                # A complete range scan can use normal refresh cadence;
-                # partial, failed or empty runs return earlier for refill.
-                state.next_due_at = now + (
-                    timedelta(days=plan.refresh_days)
-                    if job.snapshot_complete and job.question_count > 0 and job.status == 'completed'
-                    else timedelta(hours=plan.refill_hours)
-                )
+                imported = await db.scalar(select(QbQuestionImport).where(
+                    QbQuestionImport.task_id == job.run_id,
+                    QbQuestionImport.collector_run_id == scope.collector_run_id,
+                ).order_by(QbQuestionImport.import_id.desc()).limit(1))
+                usable = next((b['usableQuestionCount'] for b in books if b['textbookId'] == scope.local_textbook_id), 0)
+                complete = bool(job.snapshot_complete and job.status == 'completed' and imported
+                                and imported.status == 'completed' and imported.accepted_count > 0 and usable > 0)
+                outcome = {'scanComplete': bool(job.snapshot_complete),
+                           'importStatus': imported.status if imported else 'missing',
+                           'acceptedCount': imported.accepted_count if imported else 0, 'usableQuestionCount': usable,
+                           'needsRefill': not complete}
+                task_cycle = int((job.options_json or {}).get('autoCycleNo', 0))
+                new_attempt = state.last_cycle_no < task_cycle
+                if new_attempt or (job.options_json or {}).get('planOutcome') != outcome:
+                    state.last_cycle_no = max(state.last_cycle_no, task_cycle)
+                    state.last_finished_at = now
+                    job.options_json = {**(job.options_json or {}), 'planOutcome': outcome}
+                    state.next_due_at = now + (timedelta(days=plan.refresh_days) if complete else timedelta(hours=plan.refill_hours))
         eligible = [
             book
             for book in books
@@ -334,6 +347,7 @@ async def tick_plan(db, plan_id, *, client):
                 pending = due
                 targets = plan.cycle_targets
         cycle_no = plan.cycle_no
+        refill_hours = plan.refill_hours
         await db.commit()
         # Existing manual/automatic work on one book must not keep the
         # planner from queuing other targets. The original cycle stays fixed.
@@ -360,7 +374,20 @@ async def tick_plan(db, plan_id, *, client):
                     book['textbookId'],
                 )
             )
-            book = pending[0]
+            book = None
+            for candidate in pending:
+                held = await retry_saved_book_results(db, candidate['textbookId'], now)
+                if held:
+                    state = await db.scalar(select(QbSyncBookState).where(QbSyncBookState.plan_id == plan_id, QbSyncBookState.textbook_id == candidate['textbookId']))
+                    state.last_cycle_no = cycle_no
+                    state.next_due_at = now + timedelta(hours=refill_hours)
+                    await db.commit()
+                    continue
+                book = candidate
+                break
+            if book is None:
+                await _discovery(db, plan_id, client)
+                return
             from plugins.bank.service.task_service import SyncTaskService
 
             previous = await db.scalar(
@@ -423,7 +450,12 @@ async def _discovery(db, plan_id, client):
         task = await db.get(QbSyncJob, plan.discovery_task_id)
         if task and task.status not in TERMINAL:
             return
-        if task and task.status == 'completed' and task.snapshot_complete:
+        if task and task.status == 'completed' and (task.options_json or {}).get('discoveryMode') == 'merge':
+            options = task.options_json or {}
+            if not options.get('discoveryResult') and options.get('discoveryAttempts', 0) < 3:
+                return  # The shared discovery worker owns merge and retry timing.
+            plan.discovery_error = None if options.get('discoveryResult') else options.get('discoveryError')
+        elif task and task.status == 'completed' and task.snapshot_complete:
             task_id = task.run_id
             state = await db.get(QbTextbookApplyState, 'zujuan')
             # Never roll back a newer human discovery when an old automatic
@@ -434,7 +466,7 @@ async def _discovery(db, plan_id, client):
                 from plugins.bank.service.textbook_apply_service import TextbookApplyService
 
                 try:
-                    await TextbookApplyService.apply(db, task_id, current, 'automatic')
+                    await TextbookApplyService.apply(db, task_id, current, 'automatic', discovery=True)
                 except ServiceException as exc:
                     plan = await db.get(QbSyncPlan, plan_id)
                     plan.discovery_error = str(exc.message)[:500]
@@ -458,7 +490,7 @@ async def _discovery(db, plan_id, client):
         task_module='textbook',
         acknowledge_source_policy=True,
         operator='automatic',
-        extra_options={'autoDiscoveryPlanId': plan_id},
+        extra_options={'autoDiscoveryPlanId': plan_id, 'discoveryMode': 'merge'},
     )
     plan = await db.get(QbSyncPlan, plan_id)
     plan.discovery_task_id = result.get('taskId') or result.get('runId')
@@ -486,3 +518,44 @@ async def schedule_once(*, session_factory, client):
                 from utils.log_util import logger
 
                 logger.exception('自动同步计划 %s 处理失败，其他教材任务继续', plan_id)
+
+
+async def retry_saved_book_results(db, textbook_id, now):
+    """Do not scrape again while the latest sealed result needs database repair."""
+    scope = await db.scalar(select(QbSyncJobScope).join(QbSyncJob, QbSyncJob.run_id == QbSyncJobScope.run_id)
+        .where(QbSyncJobScope.local_textbook_id == textbook_id, QbSyncJob.status.in_(TERMINAL))
+        .order_by(QbSyncJob.run_id.desc()).limit(1))
+    if not scope or not scope.collector_run_id:
+        return False
+    imported = await db.scalar(select(QbQuestionImport).where(QbQuestionImport.scope_id == scope.scope_id,
+        QbQuestionImport.collector_run_id == scope.collector_run_id))
+    intake = await db.scalar(select(QbQuestionImportIntake).where(QbQuestionImportIntake.scope_id == scope.scope_id,
+        QbQuestionImportIntake.collector_run_id == scope.collector_run_id))
+    if imported and imported.status in ('queued', 'preparing', 'running'):
+        return True
+    if intake and intake.status in ('pending', 'probing', 'retry', 'discarded'):
+        return True
+    if not (imported and imported.status == 'failed' or intake and intake.status == 'blocked'):
+        return False
+    task_id = scope.run_id
+    has_import = imported is not None
+    job = await db.get(QbSyncJob, task_id)
+    options = dict(job.options_json or {})
+    if options.get('planImportRetryCount', 0) >= 3:
+        return True
+    await db.rollback()
+    from plugins.bank.service.import_intake import retry_import_intake
+    from plugins.bank.service.incremental_import import request_incremental_import
+    try:
+        if has_import:
+            await request_incremental_import(db, task_id)
+        else:
+            await retry_import_intake(db, task_id)
+    except ServiceException:
+        await db.rollback()
+        return True
+    job = await db.get(QbSyncJob, task_id, with_for_update=True, populate_existing=True)
+    job.options_json = {**(job.options_json or {}), 'planImportRetryCount': options.get('planImportRetryCount', 0) + 1,
+                        'planImportRetryAt': now.isoformat()}
+    await db.commit()
+    return True

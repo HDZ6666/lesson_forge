@@ -321,6 +321,20 @@ async def apply_textbook_sync_task(
     return ResponseUtil.success(data=result)
 
 
+@bank_controller.post(
+    '/sync/textbook/tasks/{task_id}/discovery-retry',
+    dependencies=[UserInterfaceAuthDependency('bank:sync:textbook:apply')],
+)
+@Log(title='重试教材发现登记', business_type=BusinessType.UPDATE)
+async def retry_textbook_discovery(
+    request: Request,
+    task_id: Annotated[int, Path(gt=0)],
+    db: Annotated[AsyncSession, DBSessionDependency()],
+) -> Response:
+    from plugins.bank.service.metadata_discovery import retry_discovery
+    return ResponseUtil.success(data=await retry_discovery(db, task_id))
+
+
 @bank_controller.delete(
     '/sync/textbook/tasks/{task_id}',
     response_model=ResponseBaseModel,

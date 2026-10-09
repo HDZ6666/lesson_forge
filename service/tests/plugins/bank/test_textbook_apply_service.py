@@ -18,8 +18,11 @@ from sqlalchemy.ext.compiler import compiles
 from exceptions.exception import ServiceException
 from plugins.bank.dao.textbook_apply_dao import TextbookApplyDao
 from plugins.bank.entity.do.bank_do import (
+    QbSyncIssue,
+    QbSyncIssueTask,
     QbSyncJob,
     QbSyncJobScope,
+    QbSyncPlan,
     QbTextbook,
     QbTextbookApplyHistory,
     QbTextbookApplyState,
@@ -50,6 +53,7 @@ def _compile_sqlite_long_text(_type: LONGTEXT, _compiler: object, **_kwargs: obj
 
 
 FORMAL_TABLES = [
+    QbSyncIssue.__table__, QbSyncIssueTask.__table__, QbSyncPlan.__table__,
     QbSyncJob.__table__,
     QbSyncJobScope.__table__,
     QbTextbookVersion.__table__,
@@ -519,3 +523,123 @@ async def test_remote_snapshot_requires_immutable_lock_marker(monkeypatch: pytes
     payload['run'].pop('snapshotLockedAt')
     with pytest.raises(ServiceException, match='缺少锁定标记'):
         await textbook_apply_service._read_snapshot(9)
+
+
+@pytest.mark.asyncio
+async def test_discovery_preserves_manual_disable_missing_and_stable_rename(db, monkeypatch):
+    await _seed_tasks_and_other_provider(db)
+    monkeypatch.setattr(textbook_apply_service, '_read_snapshot', AsyncMock(side_effect=lambda rid: _snapshot(rid, older=rid == 8)))
+    await TextbookApplyService.apply(db, 9, operator='legacy')
+    book_a = await db.scalar(select(QbTextbook).where(QbTextbook.external_textbook_id == 'textbook-a'))
+    book_b = await db.scalar(select(QbTextbook).where(QbTextbook.external_textbook_id == 'textbook-b'))
+    version_a = await db.get(QbTextbookVersion, book_a.version_id)
+    book_a.status = version_a.status = '1'
+    book_a_id, book_b_id = book_a.textbook_id, book_b.textbook_id
+    task = _job(10, 8)
+    task.options_json = {'discoveryMode': 'merge'}
+    db.add_all([task, _scope(101, 10, 8, 'textbook-a')])
+    await db.commit()
+    result = await TextbookApplyService.apply(db, 10, discovery=True)
+    await db.refresh(book_a)
+    await db.refresh(book_b)
+    await db.refresh(version_a)
+    assert book_a.status == version_a.status == '1'
+    assert book_b.status == '0' and book_b.textbook_id == book_b_id
+    assert book_a.textbook_id == book_a_id
+    from plugins.bank.entity.vo.bank_vo import TextbookApplyResponseModel
+    assert TextbookApplyResponseModel.model_validate(result).action == 'discovery_merge'
+    assert result['changes']['renamedTextbooks'] and result['changes']['missingTextbooks']
+    again = await TextbookApplyService.apply(db, 10, discovery=True)
+    assert again == result
+    assert (await SyncTaskService.textbook_detail(db, 10))['discoveryResult'] == result
+
+
+@pytest.mark.asyncio
+async def test_completed_manual_discovery_registers_without_apply_request(db, monkeypatch):
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from plugins.bank.service.metadata_discovery import merge_completed_discoveries
+    await _seed_tasks_and_other_provider(db)
+    task = await db.get(QbSyncJob, 9)
+    task.options_json = {'discoveryMode': 'merge'}
+    await db.commit()
+    monkeypatch.setattr(textbook_apply_service, '_read_snapshot', AsyncMock(side_effect=lambda rid: _snapshot(rid, older=rid == 8)))
+    await merge_completed_discoveries(session_factory=async_sessionmaker(db.bind, expire_on_commit=False))
+    await db.refresh(task)
+    assert task.options_json['discoveryResult']['changes']['newTextbooks']
+    assert await db.scalar(select(func.count()).select_from(QbTextbook).where(QbTextbook.source_provider == 'zujuan')) == 2
+
+
+@pytest.mark.asyncio
+async def test_discovery_truncation_rejects_without_changes_then_reappearing_book_keeps_status(db, monkeypatch):
+    await _seed_tasks_and_other_provider(db)
+    async def snapshot(rid):
+        return _snapshot(rid)
+    monkeypatch.setattr(textbook_apply_service, '_read_snapshot', snapshot)
+    await TextbookApplyService.apply(db, 9, operator='legacy')
+    book = await db.scalar(select(QbTextbook).where(QbTextbook.external_textbook_id == 'textbook-b'))
+    book.status = '1'
+    book_id = book.textbook_id
+    task = _job(10, 10)
+    task.options_json = {'discoveryMode':'merge'}
+    db.add_all([task, _scope(101,10,10,'textbook-a'), _scope(102,10,10,'textbook-b')])
+    await db.commit()
+    incomplete = _snapshot(10)
+    incomplete['textbooks'] = incomplete['textbooks'][:1]
+    monkeypatch.setattr(textbook_apply_service, '_read_snapshot', AsyncMock(return_value=incomplete))
+    with pytest.raises(ServiceException):
+        await TextbookApplyService.apply(db,10,discovery=True)
+    await db.refresh(book)
+    assert book.status == '1' and book.textbook_id == book_id
+    monkeypatch.setattr(textbook_apply_service, '_read_snapshot', snapshot)
+    result = await TextbookApplyService.apply(db,10,discovery=True)
+    assert result['changes']['missingTextbooks'] == []
+    await db.refresh(book)
+    assert book.status == '1' and book.textbook_id == book_id
+
+
+@pytest.mark.asyncio
+async def test_discovery_identity_conflict_isolated_and_metadata_retry_persistent(db, monkeypatch):
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from plugins.bank.entity.do.bank_do import QbSyncIssue
+    from plugins.bank.service.metadata_discovery import merge_completed_discoveries, retry_discovery
+    await _seed_tasks_and_other_provider(db)
+    monkeypatch.setattr(textbook_apply_service, '_read_snapshot', AsyncMock(side_effect=lambda rid:_snapshot(rid)))
+    await TextbookApplyService.apply(db,9,operator='legacy')
+    original = await db.scalar(select(QbTextbook).where(QbTextbook.external_textbook_id=='textbook-a'))
+    original_version = original.version_id
+    task=_job(10,10);task.options_json={'discoveryMode':'merge'}
+    db.add_all([task,_scope(101,10,10,'textbook-a'),_scope(102,10,10,'textbook-b')]);await db.commit()
+    conflicting=_snapshot(10)
+    conflicting['textbooks'][0]['version_external_id']='version-b'
+    conflicting['textbooks'][1]['textbook_name']='正常项改名'
+    monkeypatch.setattr(textbook_apply_service,'_read_snapshot',AsyncMock(return_value=conflicting))
+    result=await TextbookApplyService.apply(db,10,discovery=True)
+    assert len(result['changes']['conflicts'])==1 and result['changes']['renamedTextbooks']
+    await db.refresh(original);assert original.version_id==original_version
+    issue=await db.scalar(select(QbSyncIssue).where(QbSyncIssue.error_type=='metadata_identity'))
+    assert issue.status=='open' and issue.textbook_id==original.textbook_id
+    task=_job(11,11);task.options_json={'discoveryMode':'merge','discoveryAttempts':3,'discoveryError':'暂时不可访问'}
+    db.add_all([task,_scope(111,11,11,'textbook-a'),_scope(112,11,11,'textbook-b')]);await db.commit()
+    await retry_discovery(db,11)
+    monkeypatch.setattr(textbook_apply_service,'_read_snapshot',AsyncMock(side_effect=lambda rid:_snapshot(rid)))
+    await merge_completed_discoveries(session_factory=async_sessionmaker(db.bind,expire_on_commit=False))
+    await db.refresh(task);await db.refresh(issue)
+    assert task.options_json['discoveryResult'] and issue.status=='resolved'
+
+
+@pytest.mark.asyncio
+async def test_old_discovery_result_cannot_roll_back_new_metadata(db, monkeypatch):
+    from plugins.bank.entity.vo.bank_vo import TextbookApplyResponseModel
+    await _seed_tasks_and_other_provider(db)
+    monkeypatch.setattr(textbook_apply_service,'_read_snapshot',AsyncMock(side_effect=lambda rid:_snapshot(rid,older=rid==8)))
+    await TextbookApplyService.apply(db,9,operator='legacy')
+    task=await db.get(QbSyncJob,8)
+    task.options_json={'discoveryMode':'merge'}
+    await db.commit()
+    result=await TextbookApplyService.apply(db,8,discovery=True)
+    assert result['action']=='superseded' and result['supersededBy']==9
+    assert TextbookApplyResponseModel.model_validate(result).superseded_by==9
+    book=await db.scalar(select(QbTextbook).where(QbTextbook.external_textbook_id=='textbook-a'))
+    assert book.textbook_name=='新任务教材 A'

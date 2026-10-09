@@ -54,6 +54,8 @@ async def book_coverage(db: Any, textbook_ids: list[int], *, formal_counts: dict
         book: {
             'latestTaskId': job.run_id,
             'latestTaskStatus': job.status,
+            'latestTaskOutcome': (job.options_json or {}).get('planOutcome'),
+            'savedImportRetries': (job.options_json or {}).get('planImportRetryCount', 0),
             'latestTaskTime': job.finished_at or job.create_time,
         }
         for book, job in task_rows
@@ -62,7 +64,7 @@ async def book_coverage(db: Any, textbook_ids: list[int], *, formal_counts: dict
         (
             await db.execute(
                 select(QbSyncIssue.textbook_id, func.count())
-                .where(QbSyncIssue.textbook_id.in_(textbook_ids), QbSyncIssue.status == 'open')
+                .where(QbSyncIssue.textbook_id.in_(textbook_ids), QbSyncIssue.status == 'open', (QbSyncIssue.evidence_json['handling'].as_string().is_(None)) | (QbSyncIssue.evidence_json['handling'].as_string() != 'retry'))
                 .group_by(QbSyncIssue.textbook_id)
             )
         ).all()

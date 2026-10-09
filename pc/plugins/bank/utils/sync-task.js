@@ -123,6 +123,12 @@ export function textbookApplyVerb(task = {}) {
 }
 
 export function textbookTaskMeaning(task = {}) {
+  if (task.discoveryMode) {
+    if (task.discoveryResult?.action === 'superseded') return '已有较新发现，本次保留历史'
+    if (task.discoveryResult) return '正常项已自动登记'
+    if (task.discoveryError) return '登记失败，等待重试'
+    return normalizeSyncTaskStatus(task.status, '') === 'completed' ? '后台登记中' : '采集后自动登记'
+  }
   if (task.isCurrent || task.suggestedAction === 'alreadyApplied') return '已应用，当前正式版本'
   if (normalizeSyncTaskStatus(task.status, '') === 'completed') return '采集已完成，当前未作为正式版本'
   return '只抓取，未应用'

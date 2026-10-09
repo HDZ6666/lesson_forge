@@ -156,14 +156,15 @@ async def release_finished_books(db) -> int:
     return released
 
 
-async def _validate_waiting_scope(db, row):
+async def _validate_waiting_scope(db, row, *, lock=True):
     scopes = await SyncTaskDao.scopes(db, row.run_id)
     if len(scopes) != 1:
         raise ServiceException(message='待办任务的单本教材范围无效')
     scope = scopes[0]
     # Creation and import submission lock this same formal book. A dispatch
     # cannot race a retry of an older import for the same source identity.
-    await db.get(QbTextbook, scope.local_textbook_id, with_for_update=True, populate_existing=True)
+    if lock:
+        await db.get(QbTextbook, scope.local_textbook_id, with_for_update=True, populate_existing=True)
     valid = await db.scalar(select(QbTextbook.textbook_id)
         .join(QbTextbookVersion, QbTextbookVersion.version_id == QbTextbook.version_id)
         .join(QbSubject, QbSubject.subject_id == QbTextbook.subject_id)
@@ -366,6 +367,8 @@ async def dispatch_once(*, session_factory=None, client=None) -> int:
 async def _loop():
     while True:
         try:
+            from plugins.bank.service.metadata_discovery import merge_completed_discoveries
+            await merge_completed_discoveries(session_factory=DataSourceRegistry.session)
             from plugins.bank.service.sync_plans import schedule_once
             try:
                 await schedule_once(session_factory=DataSourceRegistry.session, client=CollectorClient())

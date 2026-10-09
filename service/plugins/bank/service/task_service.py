@@ -481,6 +481,9 @@ def task_payload(row: object, scopes: list[object] | None = None) -> dict[str, A
         # Keep a snake-case-compatible nested projection for non-browser
         # clients without leaking worker tokens or process IDs.
         'scope': scope_payloads,
+        'discoveryMode': options.get('discoveryMode') == 'merge',
+        'discoveryResult': options.get('discoveryResult'),
+        'discoveryError': options.get('discoveryError'),
         'workflowVersion': options.get('workflowVersion', 1),
         'resumeFromCollectorRunId': normalized_row_resume,
         'resumeAvailable': bool(resume_ids)
@@ -1155,6 +1158,7 @@ class SyncTaskService:
             task_module='textbook',
             acknowledge_source_policy=True,
             operator=operator,
+            extra_options={'discoveryMode': 'merge'},
         )
 
     @classmethod

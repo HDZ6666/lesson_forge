@@ -1,0 +1,233 @@
+{
+  "dataset": {
+    "syntheticQuestions": 50000,
+    "usableQuestions": 50001,
+    "assets": 0,
+    "draftLimit": 200
+  },
+  "environment": {
+    "platform": "macOS-26.5.2-arm64-arm-64bit",
+    "python": "3.12.13",
+    "database": "mysql"
+  },
+  "filters": {
+    "0": {
+      "samples": 10,
+      "p50Ms": 236.11,
+      "p95Ms": 250.51
+    },
+    "1": {
+      "samples": 10,
+      "p50Ms": 205.11,
+      "p95Ms": 225.71
+    },
+    "2": {
+      "samples": 10,
+      "p50Ms": 138.46,
+      "p95Ms": 147.65
+    }
+  },
+  "fill20": {
+    "samples": 10,
+    "p50Ms": 122.18,
+    "p95Ms": 175.06
+  },
+  "word20": {
+    "samples": 10,
+    "p50Ms": 27.79,
+    "p95Ms": 32.59
+  },
+  "word200Ms": 51.65,
+  "word200Bytes": 37501,
+  "peakRssMiB": 165.77,
+  "queryPlans": [
+    {
+      "sql": "SELECT qb_question.question_id \nFROM qb_question \nWHERE qb_question.subject_id = 1 AND qb_question.status = '0' AND (EXISTS (SELECT 1 \nFROM qb_question_readiness \nWHERE qb_question_readiness.question_id = qb_question.question_id AND qb_question.readiness_revision IS NOT NULL AND qb_question_readiness.question_revision = qb_question.readiness_revision AND qb_question_readiness.subject_id = qb_question.subject_id AND qb_question_readiness.source_provider = qb_question.source_provider AND qb_question_readiness.external_question_id <=> qb_question.external_question_id AND qb_question_readiness.content_hash <=> qb_question.content_hash AND qb_question_readiness.status = 'ready' AND qb_question_readiness.stem_valid = 1 AND qb_question_readiness.assets_ready = 1)) AND (EXISTS (SELECT 1 \nFROM qb_question_catalog \nWHERE qb_question_catalog.question_id = qb_question.question_id AND qb_question_catalog.catalog_id IN (1) AND qb_question_catalog.relation_type = 'query_catalog')) ORDER BY qb_question.question_id DESC \n LIMIT 20",
+      "plan": [
+        {
+          "id": 1,
+          "select_type": "SIMPLE",
+          "table": "qb_question_readiness",
+          "partitions": null,
+          "type": "ref",
+          "possible_keys": "PRIMARY,idx_qb_readiness_status",
+          "key": "idx_qb_readiness_status",
+          "key_len": "82",
+          "ref": "const",
+          "rows": 25000,
+          "filtered": 0.1,
+          "Extra": "Using where; Using temporary; Using filesort"
+        },
+        {
+          "id": 1,
+          "select_type": "SIMPLE",
+          "table": "qb_question",
+          "partitions": null,
+          "type": "eq_ref",
+          "possible_keys": "PRIMARY,uk_qb_question_provider_external,idx_qb_question_subject,idx_qb_question_status",
+          "key": "PRIMARY",
+          "key_len": "8",
+          "ref": "lesson_refactor_merge.qb_question_readiness.question_id",
+          "rows": 1,
+          "filtered": 5.0,
+          "Extra": "Using where"
+        },
+        {
+          "id": 1,
+          "select_type": "SIMPLE",
+          "table": "qb_question_catalog",
+          "partitions": null,
+          "type": "ref",
+          "possible_keys": "uk_qb_question_catalog,idx_qb_question_catalog_catalog",
+          "key": "uk_qb_question_catalog",
+          "key_len": "138",
+          "ref": "lesson_refactor_merge.qb_question_readiness.question_id,const,const",
+          "rows": 1,
+          "filtered": 100.0,
+          "Extra": "Using index; FirstMatch(qb_question)"
+        }
+      ]
+    },
+    {
+      "sql": "SELECT qb_question.question_id \nFROM qb_question \nWHERE qb_question.subject_id = 1 AND qb_question.status = '0' AND (EXISTS (SELECT 1 \nFROM qb_question_readiness \nWHERE qb_question_readiness.question_id = qb_question.question_id AND qb_question.readiness_revision IS NOT NULL AND qb_question_readiness.question_revision = qb_question.readiness_revision AND qb_question_readiness.subject_id = qb_question.subject_id AND qb_question_readiness.source_provider = qb_question.source_provider AND qb_question_readiness.external_question_id <=> qb_question.external_question_id AND qb_question_readiness.content_hash <=> qb_question.content_hash AND qb_question_readiness.status = 'ready' AND qb_question_readiness.stem_valid = 1 AND qb_question_readiness.assets_ready = 1)) AND (EXISTS (SELECT 1 \nFROM qb_question_catalog \nWHERE qb_question_catalog.question_id = qb_question.question_id AND qb_question_catalog.catalog_id IN (1) AND qb_question_catalog.relation_type = 'query_catalog')) AND qb_question.question_type IN ('单选题') ORDER BY qb_question.question_id DESC \n LIMIT 20",
+      "plan": [
+        {
+          "id": 1,
+          "select_type": "SIMPLE",
+          "table": "qb_question_readiness",
+          "partitions": null,
+          "type": "ref",
+          "possible_keys": "PRIMARY,idx_qb_readiness_status",
+          "key": "idx_qb_readiness_status",
+          "key_len": "82",
+          "ref": "const",
+          "rows": 25000,
+          "filtered": 0.1,
+          "Extra": "Using where; Using temporary; Using filesort"
+        },
+        {
+          "id": 1,
+          "select_type": "SIMPLE",
+          "table": "qb_question",
+          "partitions": null,
+          "type": "eq_ref",
+          "possible_keys": "PRIMARY,uk_qb_question_provider_external,idx_qb_question_subject,idx_qb_question_type_difficulty,idx_qb_question_status",
+          "key": "PRIMARY",
+          "key_len": "8",
+          "ref": "lesson_refactor_merge.qb_question_readiness.question_id",
+          "rows": 1,
+          "filtered": 5.0,
+          "Extra": "Using where"
+        },
+        {
+          "id": 1,
+          "select_type": "SIMPLE",
+          "table": "qb_question_catalog",
+          "partitions": null,
+          "type": "ref",
+          "possible_keys": "uk_qb_question_catalog,idx_qb_question_catalog_catalog",
+          "key": "uk_qb_question_catalog",
+          "key_len": "138",
+          "ref": "lesson_refactor_merge.qb_question_readiness.question_id,const,const",
+          "rows": 1,
+          "filtered": 100.0,
+          "Extra": "Using index; FirstMatch(qb_question)"
+        }
+      ]
+    },
+    {
+      "sql": "SELECT qb_question.question_id \nFROM qb_question \nWHERE qb_question.subject_id = 1 AND qb_question.status = '0' AND (EXISTS (SELECT 1 \nFROM qb_question_readiness \nWHERE qb_question_readiness.question_id = qb_question.question_id AND qb_question.readiness_revision IS NOT NULL AND qb_question_readiness.question_revision = qb_question.readiness_revision AND qb_question_readiness.subject_id = qb_question.subject_id AND qb_question_readiness.source_provider = qb_question.source_provider AND qb_question_readiness.external_question_id <=> qb_question.external_question_id AND qb_question_readiness.content_hash <=> qb_question.content_hash AND qb_question_readiness.status = 'ready' AND qb_question_readiness.stem_valid = 1 AND qb_question_readiness.assets_ready = 1)) AND (EXISTS (SELECT 1 \nFROM qb_question_catalog \nWHERE qb_question_catalog.question_id = qb_question.question_id AND qb_question_catalog.catalog_id IN (1) AND qb_question_catalog.relation_type = 'query_catalog')) AND qb_question.question_type IN ('解答题') AND qb_question.difficulty IN ('容易') AND qb_question.province IN ('山东') AND qb_question.city IN ('青岛') AND qb_question.year >= 2025 AND (EXISTS (SELECT 1 \nFROM qb_question_readiness \nWHERE qb_question_readiness.question_id = qb_question.question_id AND qb_question.readiness_revision IS NOT NULL AND qb_question_readiness.question_revision = qb_question.readiness_revision AND qb_question_readiness.subject_id = qb_question.subject_id AND qb_question_readiness.source_provider = qb_question.source_provider AND qb_question_readiness.external_question_id <=> qb_question.external_question_id AND qb_question_readiness.content_hash <=> qb_question.content_hash AND qb_question_readiness.has_image = 0)) AND (EXISTS (SELECT 1 \nFROM qb_question_readiness \nWHERE qb_question_readiness.question_id = qb_question.question_id AND qb_question.readiness_revision IS NOT NULL AND qb_question_readiness.question_revision = qb_question.readiness_revision AND qb_question_readiness.subject_id = qb_question.subject_id AND qb_question_readiness.source_provider = qb_question.source_provider AND qb_question_readiness.external_question_id <=> qb_question.external_question_id AND qb_question_readiness.content_hash <=> qb_question.content_hash AND qb_question_readiness.has_table = 0)) ORDER BY qb_question.question_id DESC \n LIMIT 20",
+      "plan": [
+        {
+          "id": 1,
+          "select_type": "SIMPLE",
+          "table": "qb_question",
+          "partitions": null,
+          "type": "ref",
+          "possible_keys": "PRIMARY,uk_qb_question_provider_external,idx_qb_question_subject,idx_qb_question_type_difficulty,idx_qb_question_status",
+          "key": "idx_qb_question_subject",
+          "key_len": "12",
+          "ref": "const,const",
+          "rows": 25001,
+          "filtered": 0.12,
+          "Extra": "Using where; Backward index scan"
+        },
+        {
+          "id": 1,
+          "select_type": "SIMPLE",
+          "table": "qb_question_readiness",
+          "partitions": null,
+          "type": "eq_ref",
+          "possible_keys": "PRIMARY,idx_qb_readiness_status",
+          "key": "PRIMARY",
+          "key_len": "8",
+          "ref": "lesson_refactor_merge.qb_question.question_id",
+          "rows": 1,
+          "filtered": 5.0,
+          "Extra": "Using where"
+        },
+        {
+          "id": 1,
+          "select_type": "SIMPLE",
+          "table": "qb_question_readiness",
+          "partitions": null,
+          "type": "eq_ref",
+          "possible_keys": "PRIMARY",
+          "key": "PRIMARY",
+          "key_len": "8",
+          "ref": "lesson_refactor_merge.qb_question.question_id",
+          "rows": 1,
+          "filtered": 5.0,
+          "Extra": "Using where"
+        },
+        {
+          "id": 1,
+          "select_type": "SIMPLE",
+          "table": "qb_question_readiness",
+          "partitions": null,
+          "type": "eq_ref",
+          "possible_keys": "PRIMARY",
+          "key": "PRIMARY",
+          "key_len": "8",
+          "ref": "lesson_refactor_merge.qb_question.question_id",
+          "rows": 1,
+          "filtered": 5.0,
+          "Extra": "Using where"
+        },
+        {
+          "id": 1,
+          "select_type": "SIMPLE",
+          "table": "qb_question_catalog",
+          "partitions": null,
+          "type": "ref",
+          "possible_keys": "uk_qb_question_catalog,idx_qb_question_catalog_catalog",
+          "key": "uk_qb_question_catalog",
+          "key_len": "138",
+          "ref": "lesson_refactor_merge.qb_question.question_id,const,const",
+          "rows": 1,
+          "filtered": 100.0,
+          "Extra": "Using index; FirstMatch(qb_question_readiness)"
+        }
+      ]
+    }
+  ],
+  "date": "2026-10-09",
+  "baseline": "e4e6af6",
+  "sourceVersion": "本文件所属修复提交；下列源码SHA256可复核",
+  "command": "python3 scripts/refactor_env.py -- .venv/bin/python -c 'import os,pytest; os.environ[\"LESSON_REFACTOR_MYSQL_MERGE_CHECK\"]=\"1\"; os.environ[\"LESSON_EDITOR_SCALE_CHECK\"]=\"1\"; raise SystemExit(pytest.main([\"tests/plugins/lesson/test_editor_scale.py\",\"-q\",\"-s\"]))' ",
+  "filterCases": {
+    "0": "整本教材，默认20题分页；同时统计匹配总数和未选数量",
+    "1": "目录1 + 单选题",
+    "2": "目录1 + 解答题 + 容易 + 年份>=2025 + 山东/青岛 + 无图片/无表格"
+  },
+  "measurement": "每种筛选、补齐20题、保存版本Word20题各10次，包含首次；p95为nearest-rank。200题Word为一次上限导出。RSS为测试进程峰值，非每请求增量。",
+  "limitations": "合成题干相同、无素材下载，不代表真实长题和生产服务器；复杂素材Word沿用已有验收，本轮未重跑。",
+  "sourceSha256": {
+    "service/plugins/lesson/service/editor_service.py": "7faec842b073df07ad5cf01fe2887efa42560b436b86c4c52212036d6db7cd3c",
+    "service/plugins/lesson/service/editor_filter.py": "db083bd0c14242f3284dc81ec71472822bc00ff014c941928d0727b2eff9784f",
+    "service/plugins/lesson/service/word_export.py": "60a22760e160dbeb077b263a52d729959271226f165d5309c1e158d6ac99401d",
+    "service/plugins/lesson/entity/vo/editor_vo.py": "3d79b7cf1ef13b032725978f316aef923fbbcf50d7fa4a38dfcea90737559c35",
+    "service/plugins/bank/service/question_readiness.py": "8147be1bb43227f142e4102c8e4cfced61ee46fdc20d9d2df97d9d7de7c41968",
+    "service/tests/plugins/lesson/test_editor_scale.py": "db3c70d331350ca05934084b8309d27d1aed7a1b2dabda78f189e5e6663f74ed"
+  }
+}

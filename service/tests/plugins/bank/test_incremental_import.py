@@ -124,6 +124,11 @@ async def test_sealed_qc_to_formal_merge_and_restart_uses_committed_cursor(impor
     )
     assert first['incrementalImport']['processedCount'] == 1
     await fail_incremental_import(db, ticket, '模拟进程退出')
+    from plugins.bank.entity.do.bank_do import QbSyncIssue
+    issue = await db.scalar(select(QbSyncIssue).where(QbSyncIssue.error_type == 'import_failure'))
+    assert issue.status == 'open' and issue.textbook_id == 1 and issue.latest_task_id == 28
+    assert issue.evidence_json['cursor'] == 1 and issue.evidence_json['collectorRunId'] == 27
+    await db.rollback()
     recovered = await claim_incremental_import(db, 30, quality)
     assert recovered['cursor'] == 1 and recovered['workerToken'] != ticket['workerToken']
     for cursor in (1, 2):
@@ -138,6 +143,9 @@ async def test_sealed_qc_to_formal_merge_and_restart_uses_committed_cursor(impor
         2,
         1,
     )
+    await db.refresh(issue)
+    assert issue.status == 'resolved' and issue.evidence_json['repair'] == 'import_settled'
+    await db.rollback()
     assert state['isCurrent'] is False and state['snapshotComplete'] is False
     repeated = await claim_incremental_import(db, 30, quality)
     assert repeated['done'] and repeated['workerToken'] is None and repeated['batchCount'] == 3

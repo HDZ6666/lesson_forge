@@ -1,14 +1,15 @@
 from typing import Annotated
 
 from fastapi import Query, Response
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from common.aspect.db_session import DBSessionDependency
 from common.aspect.interface_auth import UserInterfaceAuthDependency
 from common.aspect.pre_auth import PreAuthDependency
 from common.router import APIRouterPro
-from plugins.bank.entity.do.bank_do import QbSyncJob, QbTextbook
+from plugins.bank.entity.do.bank_do import QbSubject, QbSyncJob, QbSyncPlan, QbTextbook, QbTextbookVersion
+from plugins.bank.service.import_dates import utc_datetime
 from utils.response_util import ResponseUtil
 
 sync_overview_controller = APIRouterPro(
@@ -27,7 +28,7 @@ async def overview(
     db: Annotated[AsyncSession, DBSessionDependency()],
     subject_id: Annotated[int | None, Query(alias='subjectId', gt=0)] = None,
 ) -> Response:
-    books = select(QbTextbook.textbook_id).where(QbTextbook.status == '0')
+    books = select(QbTextbook.textbook_id).join(QbTextbookVersion, QbTextbookVersion.version_id == QbTextbook.version_id).join(QbSubject, QbSubject.subject_id == QbTextbook.subject_id).where(QbTextbook.status == '0', QbTextbookVersion.status == '0', QbSubject.status == '0', QbTextbookVersion.subject_id == QbTextbook.subject_id)
     jobs = select(QbSyncJob)
     if subject_id is not None:
         books = books.where(QbTextbook.subject_id == subject_id)
@@ -46,18 +47,61 @@ async def overview(
     if subject_id is not None:
         issue_query = issue_query.where(QbSyncIssue.subject_id == subject_id)
     issue_counts = dict((await db.execute(issue_query)).all())
+    manual_query = select(func.count()).select_from(QbSyncIssue).where(QbSyncIssue.status == 'open', (QbSyncIssue.evidence_json['handling'].as_string().is_(None)) | (QbSyncIssue.evidence_json['handling'].as_string() != 'retry'))
+    if subject_id is not None:
+        manual_query = manual_query.where(QbSyncIssue.subject_id == subject_id)
+    manual_issues = await db.scalar(manual_query)
     plans = await list_plans(db, subject_id)
     control = await control_status(db)
     current = await db.scalar(jobs.where(QbSyncJob.active_slot.is_not(None)).order_by(QbSyncJob.run_id).limit(1))
-    next_task = await db.scalar(jobs.where(QbSyncJob.status == 'queued').order_by(QbSyncJob.run_id).limit(1))
+    from plugins.bank.service.incremental_import import _clock
+    from plugins.bank.service.sync_plans import automatic_task_reason
+    waiting = list((await db.scalars(jobs.where(QbSyncJob.status == 'queued').order_by(QbSyncJob.run_id))).all())
+    now = await _clock(db)
+    next_task = None
+    deferred = None
+    for pending in waiting:
+        reason = control['reason'] or '同步已紧急暂停' if control['paused'] else await automatic_task_reason(db, pending)
+        if not reason and pending.task_module == 'question':
+            from exceptions.exception import ServiceException
+            from plugins.bank.service.sync_dispatch import _validate_waiting_scope
+            try:
+                await _validate_waiting_scope(db, pending, lock=False)
+            except ServiceException as exc:
+                reason = exc.message
+        if not reason and pending.dispatch_not_before and pending.dispatch_not_before > now:
+            reason = '等待最早派发时间'
+        if not reason:
+            next_task = pending
+            break
+        if deferred is None:
+            deferred = (pending, reason)
+    from plugins.bank.entity.do.bank_do import QbQuestionAsset, QbQuestionImport, QbSyncBookState
+    states = list((await db.scalars(select(QbSyncBookState).where(QbSyncBookState.plan_id.in_([p['planId'] for p in plans])))).all()) if plans else []
+    cycle_targets = {(p['planId'], b): p['cycleNo'] for p in plans for b in (await db.get(QbSyncPlan, p['planId'])).cycle_targets or []}
+    cycle_attempted = sum(s.last_cycle_no >= cycle_targets.get((s.plan_id, s.textbook_id), 10**10) for s in states)
+    ranked = select(QbQuestionImport.local_textbook_id.label('book'), QbQuestionImport.status, QbQuestionImport.snapshot_complete, func.row_number().over(partition_by=QbQuestionImport.local_textbook_id, order_by=QbQuestionImport.import_id.desc()).label('pos')).where(QbQuestionImport.local_textbook_id.in_(ids)).subquery()
+    incomplete = set((await db.scalars(select(ranked.c.book).where(ranked.c.pos == 1, (ranked.c.status != 'completed') | (ranked.c.snapshot_complete == 0)))).all())
+    need_refill = set(b for b in ids if not stem_counts.get(b, {}).get('usableQuestionCount')) | incomplete
+    asset_count = await db.scalar(select(func.count(func.distinct(QbQuestionAsset.file_hash))).where(QbQuestionAsset.download_status == 'downloaded'))
+    database_bytes = None
+    if db.bind.dialect.name == 'mysql':
+        database_bytes = await db.scalar(text('SELECT COALESCE(SUM(data_length + index_length),0) FROM information_schema.tables WHERE table_schema = DATABASE()'))
+
+    from plugins.bank.entity.do.bank_do import QbSyncJobScope
+    visible_task_ids = [row.run_id for row in (current, next_task, deferred[0] if deferred else None) if row is not None]
+    book_labels = dict((await db.execute(select(QbSyncJobScope.run_id, QbTextbook.textbook_name)
+        .join(QbTextbook, QbTextbook.textbook_id == QbSyncJobScope.local_textbook_id)
+        .where(QbSyncJobScope.run_id.in_(visible_task_ids)))).all()) if visible_task_ids else {}
 
     def brief(row):
         return (
             {
                 'taskId': row.run_id,
                 'taskModule': row.task_module,
+                'textbookName': book_labels.get(row.run_id),
                 'reason': row.dispatch_error,
-                'notBefore': row.dispatch_not_before,
+                'notBefore': utc_datetime(row.dispatch_not_before),
             }
             if row
             else None
@@ -74,6 +118,10 @@ async def overview(
             'control': control,
             'currentTask': brief(current),
             'nextTask': brief(next_task),
+            'deferredTask': dict(brief(deferred[0]), reason=deferred[1]) if deferred else None,
+            'cycleTargetCount': len(cycle_targets), 'cycleAttemptedCount': cycle_attempted,
+            'textbooksNeedingRefill': len(need_refill), 'openIssueCount': manual_issues, 'retryIssueCount': issue_counts.get('open', 0) - manual_issues,
+            'storage': {'databaseBytes': int(database_bytes) if database_bytes is not None else None, 'uniqueAssetCount': asset_count},
             'textbooksWithQuestions': populated,
             'textbooksWithoutQuestions': total - populated,
             'taskCounts': dict(counts),

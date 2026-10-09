@@ -174,6 +174,8 @@ async def claim_import_intake(db: Any, intake_id: int) -> dict[str, Any] | None:
         except ServiceException as exc:
             _block(row, now, 'binding', exc.message)
             row.status = 'discarded'
+            from plugins.bank.service.sync_issues import record_runtime_failure
+            await record_runtime_failure(db, row, stage='intake', message=exc.message, now=now)
             await db.commit()
             return None
         book = await db.get(QbTextbook, scope.local_textbook_id, with_for_update=True, populate_existing=True)
@@ -183,10 +185,14 @@ async def claim_import_intake(db: Any, intake_id: int) -> dict[str, Any] | None:
             or book.version_id != scope.local_version_id
         ):
             _block(row, now, 'book_binding', '入库任务与当前教材归属不一致或教材已停用')
+            from plugins.bank.service.sync_issues import record_runtime_failure
+            await record_runtime_failure(db, row, stage='intake', message='入库任务与当前教材归属不一致或教材已停用', now=now)
             await db.commit()
             return None
         if row.attempt_count >= row.attempt_limit:
             _block(row, now, 'retry_budget', '封存核验重试次数已用完，请检查采集服务后重试核验')
+            from plugins.bank.service.sync_issues import record_runtime_failure
+            await record_runtime_failure(db, row, stage='intake', message='封存核验重试次数已用完，请检查采集服务后重试核验', now=now)
             await db.commit()
             return None
         row.status = 'probing'
@@ -265,6 +271,8 @@ async def complete_import_intake(db: Any, ticket: dict[str, Any], summary: dict[
         row.next_attempt_at = None
         row.update_time = now
         _release(row)
+        from plugins.bank.service.sync_issues import resolve_runtime_failures
+        await resolve_runtime_failures(db, row, stage='intake', now=now)
         result = import_status(queued)
         await db.commit()
         return result
@@ -307,6 +315,8 @@ async def fail_import_intake(db: Any, ticket: dict[str, Any], kind: str, message
             row.status = 'retry'
             delay = INTAKE_RETRY_DELAYS[min(row.attempt_count - 1, len(INTAKE_RETRY_DELAYS) - 1)]
             row.next_attempt_at = now + timedelta(seconds=delay)
+        from plugins.bank.service.sync_issues import record_runtime_failure
+        await record_runtime_failure(db, row, stage='intake', message=message, now=now)
         await db.commit()
     except BaseException:
         await db.rollback()
@@ -338,6 +348,8 @@ async def retry_import_intake(db: Any, task_id: int) -> dict[str, Any]:
             row.error_kind = None
             row.error_message = None
             row.update_time = await _clock(db)
+            from plugins.bank.service.sync_issues import mark_runtime_retry
+            await mark_runtime_retry(db, row, stage='intake', now=row.update_time)
             result = intake_status(row)
         await db.commit()
         return result

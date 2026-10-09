@@ -238,6 +238,8 @@ async def _queue_verified_scope(db: Any, scope: QbSyncJobScope, now: Any, *, ret
         row.active_source_slot = None
         row.finished_at = None
         row.update_time = now
+        from plugins.bank.service.sync_issues import mark_runtime_retry
+        await mark_runtime_retry(db, row, stage='import', now=now)
     return row
 
 
@@ -352,6 +354,8 @@ async def reject_pending_incremental_import(db: Any, import_id: int, message: st
             row.lease_until = None
             row.active_source_slot = None
             row.update_time = now
+            from plugins.bank.service.sync_issues import record_runtime_failure
+            await record_runtime_failure(db, row, stage='import', message=message, now=now)
         await db.commit()
     except BaseException:
         await db.rollback()
@@ -402,6 +406,8 @@ async def attach_incremental_quality(db: Any, ticket: dict[str, Any], report: di
         row.update_time = now
         if row.question_count == 0:
             _finish(row, now)
+            from plugins.bank.service.sync_issues import resolve_runtime_failures
+            await resolve_runtime_failures(db, row, stage='import', now=now)
         result = _ticket(row)
         await db.commit()
         return result
@@ -451,6 +457,8 @@ async def claim_incremental_import(db: Any, scope_id: int, report: dict[str, Any
         row.update_time = now
         if row.question_count == 0:
             _finish(row, now)
+            from plugins.bank.service.sync_issues import resolve_runtime_failures
+            await resolve_runtime_failures(db, row, stage='import', now=now)
         ticket = _ticket(row)
         await db.commit()
         return ticket
@@ -521,6 +529,8 @@ async def fail_incremental_import(db: Any, ticket: dict[str, Any], message: str)
         row.lease_until = None
         row.active_source_slot = None
         row.update_time = now
+        from plugins.bank.service.sync_issues import record_runtime_failure
+        await record_runtime_failure(db, row, stage='import', message=message, now=now)
         await db.commit()
     except BaseException:
         await db.rollback()
@@ -588,7 +598,7 @@ async def submit_incremental_import_batch(
                 raise ServiceException(message='入库批次与质量检查的题目身份不一致')
             accepted.append(value)
         elif verdict.get('status') == 'quarantined' and verdict.get('normalized') is None and verdict.get('reason'):
-            issues.append({'questionId': verdict['questionId'], 'reason': str(verdict['reason'])[:2000]})
+            issues.append({'questionId': verdict['questionId'], 'reason': str(verdict['reason'])[:2000], 'ordinal': verdict['ordinal']})
         else:
             raise ServiceException(message='入库批次包含无效检查结论')
     locked = None
@@ -647,6 +657,8 @@ async def submit_incremental_import_batch(
         locked.lease_until = now + timedelta(seconds=LEASE_SECONDS)
         if locked.cursor == locked.question_count:
             _finish(locked, now)
+            from plugins.bank.service.sync_issues import resolve_runtime_failures
+            await resolve_runtime_failures(session, locked, stage='import', now=now)
         result['incrementalImport'] = import_status(locked)
 
     if accepted:

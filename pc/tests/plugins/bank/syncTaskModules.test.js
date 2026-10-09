@@ -56,7 +56,7 @@ for (const endpoint of [
   assert.match(api, new RegExp(endpoint.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
 }
 
-assert.match(textbookList, /新增同步教材任务/)
+assert.match(textbookList, /新增教材发现任务/)
 assert.match(textbookList, /acknowledgeSourcePolicy: true/)
 assert.match(textbookDetail, /metadataRunId/)
 assert.match(textbookDetail, /该任务抓取的完整版本与教材/)

@@ -10,7 +10,7 @@
       <el-button v-hasPermi="['lesson:plan:generate']" type="primary" :disabled="!bookId" :loading="saving" @click="create">开始备课</el-button>
     </div>
     <template v-else>
-      <div class="draft-header"><el-input v-model="title" :disabled="draft.readOnly || saving || !!failed" maxlength="200" @change="saveTitle"/><span>{{ draft.readOnly ? '历史教案（只读）' : saving ? '保存中' : failed ? '保存失败，操作已保留' : '已保存' }} · 版本 {{ draft.revision }}</span>
+      <div class="draft-header"><el-input v-model="title" :disabled="draft.readOnly || saving || !!failed" maxlength="200" @change="saveTitle"/><span>{{ draft.readOnly ? '历史教案（只读）' : saving ? '保存中' : failed ? '保存失败，操作已保留' : '已保存' }} · 版本 {{ draft.revision }}</span><small class="book-label">{{draft.textbookName || `教材 ${draft.textbookId}`}}</small>
         <el-button v-if="draft.readOnly" @click="copyDraft(draft.draftId)">复制为可编辑教案</el-button>
         <el-button :disabled="busy || dirty" @click="previewVisible=true">预览</el-button>
         <el-button v-hasPermi="['lesson:plan:export']" :disabled="saving || !!failed || dirty" @click="exportWord">导出 Word</el-button>
@@ -18,8 +18,10 @@
       </div>
       <el-alert v-if="draft.items.some(i=>i.snapshotMissing)" title="部分历史题目缺少当时的快照；复制时使用当前题库重建并注明，无法找回当年题干。" type="warning" :closable="false"/>
       <el-tabs v-if="!draft.readOnly" v-model="mode" @tab-change="changeMode"><el-tab-pane label="按教学内容配题" name="content"/><el-tab-pane label="直接筛题" name="direct"/></el-tabs>
+      <p class="draft-counts">整份教案 {{draft.items.length}} 题 · 手选 {{draft.manualCount || 0}} 题 · 待整理 {{draft.unassignedCount || 0}} 题 · 规则总缺额 {{(draft.rules || []).reduce((n,r)=>n+r.deficit,0)}} 题</p>
+      <el-radio-group v-model="mobilePane" class="mobile-section-switch"><el-radio-button value="content">教学内容</el-radio-button><el-radio-button v-if="!draft.readOnly" value="filter">筛选题目</el-radio-button><el-radio-button value="selected">已选题目</el-radio-button></el-radio-group>
       <div class="editor-layout">
-        <aside>
+        <aside :class="{'mobile-active':mobilePane==='content'}">
           <h3>教学内容</h3>
           <el-button v-if="!draft.readOnly" :disabled="busy" @click="newGroup">新增内容</el-button>
           <div v-for="(group,groupIndex) in draft.groups" :key="group.groupKey" :class="['group',{active:activeGroup===group.groupKey}]" @click="chooseGroup(group)">
@@ -30,7 +32,7 @@
           <p>可以先列教学内容，也可以直接筛题后再分组。</p>
           <el-button v-if="!draft.readOnly" :disabled="busy" :loading="saving" @click="fill()">补齐全部内容</el-button>
         </aside>
-        <main v-if="!draft.readOnly">
+        <main v-if="!draft.readOnly" :class="{'mobile-active':mobilePane==='filter'}">
           <template v-if="mode==='content'">
             <h3>{{ currentGroup?.name || '请先选择教学内容' }}</h3>
             <el-select v-model="activeRule" clearable placeholder="选择条件组" @change="queryCandidates()"><el-option v-for="r in currentGroup?.rules || []" :key="r.ruleKey" :label="`${r.name} · 目标 ${r.targetCount} 道`" :value="r.ruleKey"/></el-select>
@@ -50,8 +52,8 @@
           </div>
           <el-pagination v-if="candidates.total" v-model:current-page="page" :page-size="20" :total="candidates.total" layout="prev,pager,next" @current-change="queryCandidates(false)"/>
         </main>
-        <section class="selected">
-          <h3>已选题目（{{ draft.items.length }}）</h3>
+        <section class="selected" :class="{'mobile-active':mobilePane==='selected'}">
+          <h3>{{currentGroup?.name || '待整理'}}：{{selectedItems.length}} 题，手选 {{selectedItems.filter(i=>!i.ruleKey).length}} 题</h3>
           <el-button v-if="undoId && !draft.readOnly" :disabled="busy" @click="undo">撤销最近移出</el-button>
           <div v-for="(item,index) in selectedItems" :key="item.itemId" class="question-card">
             <div><strong>{{ index+1 }}.</strong><el-tag v-if="item.needsReview" type="warning">条件已变化，待复核</el-tag><el-tag v-if="!item.ruleKey" type="info">手选题</el-tag><el-tag v-if="item.currentStatus && item.currentStatus!=='enabled'" type="warning">当前题库{{item.currentStatus==='missing'?'已不存在':'已停用'}}</el-tag><el-tag v-else-if="item.sourceChanged" type="info">题库已更新，保留选入版本</el-tag></div>
@@ -99,6 +101,7 @@ import QuestionStem from '../../components/QuestionStem.vue'
 const base='/lesson/plan',data=r=>r.data || r,clone=v=>JSON.parse(JSON.stringify(v)),key=()=>crypto.randomUUID()
 const emptyFilter=()=>({catalogIds:[],questionTypes:[],difficulties:[],easeMin:null,easeMax:null,yearMin:null,yearMax:null,provinces:[],cities:[],examTypes:[],maxExtraPoints:null,maxSubquestionCount:null,allowImage:true,allowTable:true})
 const subjectId=ref(1),versionId=ref(),bookId=ref(),versions=ref([]),books=ref([]),newTitle=ref('新教案'),draft=ref(),title=ref(''),catalogs=ref([]),options=ref({}),filter=ref(emptyFilter()),mode=ref('content'),activeGroup=ref(null),activeRule=ref(null),candidates=ref({}),page=ref(1),pickCount=ref(1)
+const mobilePane=ref('content')
 const saving=ref(false),error=ref(''),failed=ref(null),querying=ref(false),undoId=ref(),groupVisible=ref(false),groupForm=ref({rules:[]}),editingRule=ref(),previewVisible=ref(false),printSettings=ref({showGroupTitles:true,blankLines:2}),historyVisible=ref(false),history=ref([]),legacy=ref([])
 const treeProps={label:'nodeName',children:'children'},busy=computed(()=>saving.value || !!failed.value),dirty=computed(()=>groupVisible.value || title.value!==(draft.value?.title || ''))
 const currentGroup=computed(()=>draft.value?.groups.find(g=>g.groupKey===activeGroup.value)),currentRuleSummary=computed(()=>draft.value?.rules?.find(r=>r.ruleKey===activeRule.value)),selectedItems=computed(()=>draft.value?.items.filter(i=>i.groupKey===activeGroup.value).sort((a,b)=>a.sortNo-b.sortNo || a.itemId-b.itemId) || [])
@@ -109,7 +112,7 @@ async function loadVersions(){const id=++scopeEpoch;versionId.value=null;bookId.
 async function loadBooks(){const id=++scopeEpoch;bookId.value=null;try{const r=await request({url:`${base}/textbooks`,params:{versionId:versionId.value,subjectId:subjectId.value,pageSize:100}});if(id===scopeEpoch)books.value=r.rows || r.data?.rows || []}catch(e){error.value=e.message}}
 async function openDraft(id){if(busy.value || dirty.value)return;await readDraft(id);historyVisible.value=false}
 async function readDraft(id){const d=data(await request({url:`${base}/drafts/${id}`}));if(draft.value?.draftId!==d.draftId){chooseGroup(null);filter.value=emptyFilter();undoId.value=null;previewVisible.value=false}draft.value=d;if(activeGroup.value&&!d.groups.some(g=>g.groupKey===activeGroup.value))chooseGroup(null);if(activeRule.value&&!d.groups.some(g=>g.rules.some(r=>r.ruleKey===activeRule.value)))activeRule.value=null;title.value=d.title;printSettings.value=clone(d.printSettings);const [c,o]=await Promise.all([request({url:`${base}/catalog-tree`,params:{textbookId:d.textbookId}}),d.readOnly?Promise.resolve({data:{}}):request({url:`${base}/drafts/${id}/filter-options`})]);catalogs.value=data(c);options.value=data(o)}
-async function perform(operation){if(saving.value)return;saving.value=true;error.value='';try{const r=data(await request(operation));failed.value=null;if(r.deleted){if(draft.value?.draftId===r.draftId)leave();await loadHistory();return r}if(r.undoRequestId)undoId.value=r.undoRequestId;await readDraft(r.draftId);++searchEpoch;querying.value=false;const chosen=new Set(draft.value.items.map(i=>i.questionId));if(candidates.value.rows)candidates.value.rows=candidates.value.rows.map(q=>({...q,selected:chosen.has(q.questionId)}));return r}catch(e){failed.value=operation;error.value=e.message || '保存失败，输入和操作已保留';throw e}finally{saving.value=false}}
+async function perform(operation){if(saving.value)return;saving.value=true;error.value='';try{const r=data(await request(operation));failed.value=null;if(r.deleted){if(draft.value?.draftId===r.draftId)leave();await loadHistory();return r}if(r.undoRequestId)undoId.value=r.undoRequestId;await readDraft(r.draftId);++searchEpoch;querying.value=false;const chosen=new Map(draft.value.items.map(i=>[i.questionId,i.groupKey]));if(candidates.value.rows)candidates.value.rows=candidates.value.rows.map(q=>({...q,selected:chosen.has(q.questionId),selectedGroupKey:chosen.get(q.questionId)}));return r}catch(e){failed.value=operation;error.value=e.message || '保存失败，输入和操作已保留';throw e}finally{saving.value=false}}
 async function execute(operation){try{return await perform(operation)}catch{return null}}
 async function retry(){if(failed.value)await execute(failed.value)}
 async function refreshSaved(){try{await readDraft(draft.value.draftId);failed.value=null;error.value='';groupVisible.value=false;chooseGroup(null)}catch(e){error.value=e.message}}
@@ -118,7 +121,7 @@ function mutation(path,payload,method='post'){return execute({url:`${base}/draft
 async function create(){await execute({url:`${base}/drafts`,method:'post',data:{textbookId:bookId.value,title:newTitle.value,requestId:key()}})}
 async function saveTitle(){await mutation('/commands',{type:'set_title',title:title.value})}
 async function savePrint(){await mutation('/commands',{type:'set_print',printSettings:printSettings.value})}
-function chooseGroup(group){activeGroup.value=group?.groupKey || null;activeRule.value=null;candidates.value={};querying.value=false;++searchEpoch}
+function chooseGroup(group){activeGroup.value=group?.groupKey || null;activeRule.value=null;candidates.value={};querying.value=false;++searchEpoch;mobilePane.value=draft.value?.readOnly?'selected':'filter'}
 function changeMode(){candidates.value={};querying.value=false;++searchEpoch}
 async function queryCandidates(reset=true){if(!draft.value || draft.value.readOnly)return;if(mode.value==='content'&&!activeRule.value)return;if(reset)page.value=1;const id=++searchEpoch;querying.value=true;try{const r=await request({url:`${base}/candidates/query`,method:'post',data:{draftId:draft.value.draftId,filter:mode.value==='direct'?filter.value:emptyFilter(),ruleKey:mode.value==='content'?activeRule.value:null,pageNum:page.value,pageSize:20}});if(id===searchEpoch && data(r).revision===draft.value.revision)candidates.value=data(r)}catch(e){if(id===searchEpoch)error.value=e.message}finally{if(id===searchEpoch)querying.value=false}}
 async function select(q){const result=await mutation('/commands',{type:'select',questionIds:[q.questionId],groupKey:activeGroup.value,ruleKey:mode.value==='content'?activeRule.value:null,filter:mode.value==='direct'?filter.value:null});if(result){if(result.rejected?.length)error.value='该题已失效或不符合条件，未选入';await queryCandidates(false)}}
@@ -152,4 +155,5 @@ onBeforeUnmount(()=>{++searchEpoch;++scopeEpoch;window.removeEventListener('befo
 </script>
 <style scoped>
 header,.draft-header{display:flex;gap:12px;align-items:center;margin-bottom:16px}header h2{flex:1}.draft-header .el-input{max-width:360px}.draft-header span{flex:1;font-size:13px;color:var(--el-text-color-secondary)}.create-panel{display:flex;gap:12px;align-items:center;flex-wrap:wrap}.create-panel .el-input,.create-panel .el-select{width:220px}.editor-layout{display:grid;grid-template-columns:220px minmax(300px,1fr) minmax(300px,1fr);gap:20px;margin-top:16px}.group{padding:14px;margin:8px 0;border:1px solid var(--el-border-color);border-radius:6px;cursor:pointer}.group.active{border-color:var(--el-color-primary);background:var(--el-color-primary-light-9)}.group small{display:block}.question-card{border:1px solid var(--el-border-color);padding:14px;margin:12px 0;border-radius:6px}.candidate-title,.item-actions,.pick-bar,.print-settings,.history-row{display:flex;gap:12px;align-items:center;margin:8px 0}.candidate-title span{flex:1}.print-settings .el-select{width:180px}p,small{color:var(--el-text-color-secondary)}article{background:white;color:#222;padding:32px}.el-dialog .el-tree-select{width:100%;margin:12px 0}@media(max-width:1100px){.editor-layout{grid-template-columns:180px 1fr}.selected{grid-column:1/-1}}@media(max-width:700px){.editor-layout{display:block}.draft-header{flex-wrap:wrap}.draft-header .el-input{max-width:none}}
+.mobile-section-switch{display:none}.book-label{flex-basis:100%;overflow-wrap:anywhere}.draft-header{flex-wrap:wrap}.draft-header span{min-width:180px}.draft-counts{line-height:1.8}@media(max-width:700px){.mobile-section-switch{display:flex;flex-wrap:wrap;margin:12px 0}.editor-layout>aside,.editor-layout>main,.editor-layout>.selected{display:none}.editor-layout>.mobile-active{display:block}.draft-header .el-input,.draft-header span,.draft-header .book-label{flex:1 1 100%;min-width:0;width:100%;white-space:normal}.item-actions,.pick-bar{flex-wrap:wrap}.print-settings{flex-wrap:wrap}}
 </style>

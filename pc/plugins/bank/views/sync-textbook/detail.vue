@@ -3,7 +3,7 @@
     <header class="page-heading">
       <div class="heading-copy">
         <el-button link type="primary" :icon="ArrowLeft" @click="goBack">返回任务列表</el-button>
-        <h2>同步教材任务详情</h2>
+        <h2>教材发现详情</h2>
         <p>详情始终读取该任务绑定的 metadataRunId 快照，不会随后续采集任务变化。</p>
       </div>
       <div class="heading-actions">
@@ -38,6 +38,18 @@
       </div>
     </header>
 
+    <section v-if="task?.discoveryMode" class="panel">
+      <h3>{{ task.discoveryResult ? '发现登记结果' : '等待自动登记' }}</h3>
+      <p>正常新增及改名自动登记；人工业务启停保持不变，本次未发现不删除或停用旧教材。</p>
+      <el-alert v-if="task.discoveryError" :title="task.discoveryError" type="error" :closable="false"/>
+      <el-button v-if="task.discoveryError" v-hasPermi="['bank:sync:textbook:apply']" :loading="acting" @click="retryDiscovery">重试登记当前快照</el-button>
+      <template v-if="task.discoveryResult"><p v-if="task.discoveryResult.action==='superseded'">已有更新的发现任务 {{task.discoveryResult.supersededBy}}，本次仅保留历史。</p>
+        <div v-for="(label,key) in discoveryLabels" :key="key"><h4>{{label}}（{{task.discoveryResult.changes?.[key]?.length || 0}}）</h4>
+          <el-table v-if="task.discoveryResult.changes?.[key]?.length" :data="task.discoveryResult.changes[key]"><el-table-column prop="externalId" label="来源ID"/><el-table-column prop="oldName" label="原名称"/><el-table-column prop="name" label="名称"/><el-table-column v-if="key==='conflicts'" prop="observedVersionId" label="来源版本ID"/><el-table-column prop="reason" label="说明"/></el-table>
+        </div>
+      </template>
+    </section>
+    <SyncIssues v-if="task?.discoveryMode" :task-id="task.taskId" :subject-id="task.subjectId"/>
     <el-alert v-if="requestError" class="state-alert" type="error" :closable="false" show-icon>{{ requestError }}</el-alert>
     <el-alert
       v-if="applySuccess"
@@ -54,13 +66,13 @@
     <el-alert v-if="task?.eligible && task?.isCurrent" class="state-alert" type="info" :closable="false" show-icon>
       当前任务快照已是正式版本，重复提交不会产生新的应用历史。
     </el-alert>
-    <el-alert v-if="task?.status === 'completed' && !task?.eligible && task?.eligibilityMessage" class="state-alert" type="warning" :closable="false" show-icon>
+    <el-alert v-if="!task?.discoveryMode && task?.status === 'completed' && !task?.eligible && task?.eligibilityMessage" class="state-alert" type="warning" :closable="false" show-icon>
       当前任务暂不可应用：{{ task.eligibilityMessage }}
     </el-alert>
 
     <!-- Put the snapshot comparison first so review is the primary task
          action; metadata, status and the raw log remain below it. -->
-    <section v-if="task && task.status === 'completed'" class="comparison-panel">
+    <section v-if="task && !task.discoveryMode && task.status === 'completed'" class="comparison-panel">
       <TextbookComparison
         ref="comparisonRef"
         :metadata-run-id="task.metadataRunId"
@@ -70,7 +82,7 @@
         description="左侧是该任务抓取的完整版本与教材，右侧是当前正式数据。点击左侧已有数据可定位右侧对应项。"
       />
     </section>
-    <section v-else-if="task" class="waiting-panel panel">
+    <section v-else-if="task && task.status !== 'completed'" class="waiting-panel panel">
       <el-empty :image-size="76" :description="comparisonWaitingText" />
     </section>
 
@@ -98,8 +110,8 @@
         <el-descriptions-item label="开始时间">{{ formatTaskTime(task.startedAt) }}</el-descriptions-item>
         <el-descriptions-item label="完成时间">{{ formatTaskTime(task.completedAt) }}</el-descriptions-item>
         <el-descriptions-item label="任务含义">{{ textbookTaskMeaning(task) }}</el-descriptions-item>
-        <el-descriptions-item label="正式版本">{{ task.isCurrent ? `任务 ${task.taskNo || task.taskId}` : (task.currentTaskId ? `任务 ${task.currentTaskId}` : '尚未应用') }}</el-descriptions-item>
-        <el-descriptions-item label="最近应用时间">{{ formatTaskTime(task.appliedAt) }}</el-descriptions-item>
+        <el-descriptions-item v-if="!task.discoveryMode" label="正式版本">{{ task.isCurrent ? `任务 ${task.taskNo || task.taskId}` : (task.currentTaskId ? `任务 ${task.currentTaskId}` : '尚未应用') }}</el-descriptions-item>
+        <el-descriptions-item v-if="!task.discoveryMode" label="最近应用时间">{{ formatTaskTime(task.appliedAt) }}</el-descriptions-item>
       </el-descriptions>
       <el-alert v-if="task.errorMessage" class="inner-alert" type="error" :closable="false" show-icon>{{ task.errorMessage }}</el-alert>
       <section class="log-panel">
@@ -113,11 +125,15 @@
 </template>
 
 <script setup>
+import request from '@/utils/request'
+const discoveryLabels={newVersions:'新增版本',renamedVersions:'版本改名',missingVersions:'本次未发现版本',newTextbooks:'新增教材',renamedTextbooks:'教材改名',missingTextbooks:'本次未发现教材',conflicts:'归属冲突'}
+
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ArrowLeft, Refresh, RefreshRight, Upload, VideoPause } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useRoute, useRouter } from 'vue-router'
 import TextbookComparison from './comparison.vue'
+import SyncIssues from '../../components/SyncIssues.vue'
 import {
   cancelTextbookSyncTask,
   applyTextbookSyncTask,
@@ -164,6 +180,7 @@ const comparisonWaitingText = computed(() => {
   return '采集进行中，完成后将自动加载本任务的版本与教材快照对比'
 })
 const completedStateMessage = computed(() => {
+  if (task.value?.discoveryMode) return task.value.discoveryResult ? '采集完成，正常项已自动登记；变化及冲突见发现结果。' : task.value.discoveryError ? '采集完成，登记失败；可重试登记当前快照。' : '采集完成，正在后台登记。'
   if (task.value?.isCurrent) return '采集已完成，且本任务快照已应用为当前正式版本。'
   if (task.value?.eligible) return `采集已完成。请先核对下方快照差异，再确认${textbookApplyVerb(task.value)}正式版本。`
   return '采集已完成，但当前快照暂不可应用。'
@@ -180,7 +197,7 @@ function clearPoll() {
 
 function schedulePoll() {
   clearPoll()
-  if (!mounted || !task.value || !isActiveSyncTask(task.value.status)) return
+  if (!mounted || !task.value || (!isActiveSyncTask(task.value.status) && !(task.value.discoveryMode && task.value.status === 'completed' && !task.value.discoveryResult && !task.value.discoveryError))) return
   pollTimer = window.setTimeout(async () => {
     pollTimer = null
     await loadTask(true)
@@ -188,7 +205,7 @@ function schedulePoll() {
 }
 
 async function ensureComparisonLoaded() {
-  if (!task.value || task.value.status !== 'completed' || loadedComparisonTaskId === task.value.taskId) return
+  if (!task.value || task.value.discoveryMode || task.value.status !== 'completed' || loadedComparisonTaskId === task.value.taskId) return
   loadedComparisonTaskId = task.value.taskId
   await nextTick()
   try {
@@ -212,7 +229,7 @@ async function loadTask(silent = false) {
     task.value = result
     await ensureComparisonLoaded()
   } catch (error) {
-    requestError.value = syncTaskErrorMessage(error, '同步教材任务详情加载失败')
+    requestError.value = syncTaskErrorMessage(error, '教材发现详情加载失败')
   } finally {
     if (!silent) loading.value = false
     schedulePoll()
@@ -226,6 +243,11 @@ async function refreshTask() {
 
 function loadTaskComparison() {
   return getTextbookSyncTaskComparison(taskId.value)
+}
+
+async function retryDiscovery(){
+  acting.value=true
+  try{await request({url:`/bank/sync/textbook/tasks/${task.value.taskId}/discovery-retry`,method:'post'}); await loadTask(true); ElMessage.success('已安排后台重新登记')}catch(e){ElMessage.error(syncTaskErrorMessage(e,'登记重试失败'))}finally{acting.value=false}
 }
 
 async function stopTask() {

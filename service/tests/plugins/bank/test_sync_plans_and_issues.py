@@ -225,3 +225,143 @@ async def test_automatic_plan_refills_latest_sealed_partial_book(bank_db, monkey
     next_scope = await bank_db.scalar(select(QbSyncJobScope).where(QbSyncJobScope.run_id == latest.run_id))
     assert latest.run_id != old['taskId'] and latest.retry_of_run_id == old['taskId']
     assert next_scope.resume_from_collector_run_id == 55
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('import_state,accepted,expected_days', [('failed',0,1), ('partial',0,1), ('partial',2,1), ('completed',3,7)])
+async def test_cycle_cadence_uses_import_and_usable_outcome(bank_db, monkeypatch, import_state, accepted, expected_days):
+    from plugins.bank.entity.do.bank_do import QbSyncJobScope
+    from plugins.bank.service.incremental_import import _new_import
+
+    result = await plans.save_plan(bank_db, PlanInput(subjectId=1, enabled=True))
+    monkeypatch.setattr(plans, '_discovery', _noop)
+    await plans.tick_plan(bank_db, result['planId'], client=None)
+    job = await bank_db.scalar(select(QbSyncJob).where(QbSyncJob.task_module == 'question'))
+    scope = await bank_db.scalar(select(QbSyncJobScope).where(QbSyncJobScope.run_id == job.run_id))
+    timestamp = datetime.utcnow().replace(microsecond=0)
+    job.status = job.phase = 'completed'
+    job.snapshot_complete = 1
+    job.question_count = 3
+    job.dispatch_book_key = None
+    scope.status = 'completed'
+    scope.collector_run_id = 99
+    scope.question_count = 3
+    scope.snapshot_complete = 1
+    scope.snapshot_locked_at = timestamp
+    incoming = _new_import(scope, timestamp)
+    incoming.status, incoming.accepted_count = import_state, accepted
+    incoming.cursor = 3 if import_state != 'failed' else 0
+    bank_db.add(incoming)
+    plan = await bank_db.get(QbSyncPlan, result['planId'])
+    plan.next_check_at = None
+    await bank_db.commit()
+    # Formal usable counts are separate from collected/accepted counts.
+    original = plans.list_books
+    async def books(*args):
+        rows = await original(*args)
+        for row in rows:
+            row['usableQuestionCount'] = 3 if import_state == 'completed' else 0
+        return rows
+    monkeypatch.setattr(plans, 'list_books', books)
+    plan_id, job_id = plan.plan_id, job.run_id
+    await plans.tick_plan(bank_db, plan_id, client=None)
+    await bank_db.refresh(job)
+    state = await bank_db.scalar(select(QbSyncBookState).where(QbSyncBookState.last_task_id == job_id))
+    assert expected_days*86400-3 <= (state.next_due_at-timestamp).total_seconds() <= expected_days*86400+3
+    assert job.options_json['planOutcome']['importStatus'] == import_state
+    if import_state == 'failed':
+        await bank_db.rollback()
+        assert await plans.retry_saved_book_results(bank_db, 1, timestamp)
+        await bank_db.refresh(incoming)
+        assert incoming.status == 'queued' and incoming.cursor == 0
+        assert len((await bank_db.scalars(select(QbSyncJob).where(QbSyncJob.options_json['textbookIds'][0].as_integer() == 1))).all()) == 1
+
+
+@pytest.mark.asyncio
+async def test_plan_recovers_saved_import_on_next_cycle_without_new_collection(bank_db, monkeypatch):
+    from datetime import timedelta
+
+    from plugins.bank.entity.do.bank_do import QbQuestionImport, QbSyncJobScope
+    from plugins.bank.service.incremental_import import _new_import
+    result = await plans.save_plan(bank_db, PlanInput(subjectId=1, enabled=True))
+    await plans.save_book_override(bank_db,result['planId'],2,BookOverride(expectedRevision=0,enabled=False))
+    monkeypatch.setattr(plans,'_discovery',_noop)
+    await plans.tick_plan(bank_db,result['planId'],client=None)
+    job=await bank_db.scalar(select(QbSyncJob).where(QbSyncJob.task_module=='question'))
+    scope=await bank_db.scalar(select(QbSyncJobScope).where(QbSyncJobScope.run_id==job.run_id))
+    now=datetime.utcnow()
+    job.status=job.phase=scope.status='completed'
+    job.snapshot_complete=1;job.question_count=3
+    job.dispatch_book_key=None
+    scope.collector_run_id=77;scope.snapshot_locked_at=now;scope.question_count=3;scope.snapshot_complete=1
+    incoming=_new_import(scope,now);incoming.status='failed';incoming.cursor=1
+    bank_db.add(incoming)
+    plan=await bank_db.get(QbSyncPlan,result['planId']);plan.next_check_at=None
+    await bank_db.commit()
+    await plans.tick_plan(bank_db,result['planId'],client=None)
+    state=await bank_db.scalar(select(QbSyncBookState).where(QbSyncBookState.textbook_id==1))
+    state.next_due_at=now-timedelta(seconds=1)
+    plan=await bank_db.get(QbSyncPlan,result['planId']);plan.next_check_at=None
+    await bank_db.commit()
+    await plans.tick_plan(bank_db,result['planId'],client=None)
+    incoming=await bank_db.scalar(select(QbQuestionImport))
+    assert incoming.status=='queued' and incoming.cursor==1
+    jobs=list((await bank_db.scalars(select(QbSyncJob).where(QbSyncJob.task_module=='question'))).all())
+    assert len(jobs)==1 and jobs[0].options_json['planImportRetryCount']==1
+    incoming.status='completed';incoming.cursor=incoming.accepted_count=3
+    plan=await bank_db.get(QbSyncPlan,result['planId']);plan.next_check_at=None
+    await bank_db.commit()
+    original=plans.list_books
+    async def populated(*args):
+        rows=await original(*args)
+        for row in rows: row['usableQuestionCount']=3
+        return rows
+    monkeypatch.setattr(plans,'list_books',populated)
+    await plans.tick_plan(bank_db,result['planId'],client=None)
+    state=await bank_db.scalar(select(QbSyncBookState).where(QbSyncBookState.textbook_id==1))
+    job=await bank_db.scalar(select(QbSyncJob).where(QbSyncJob.task_module=='question'))
+    assert job.options_json['planOutcome']['importStatus']=='completed'
+    assert 7*86400-5 <= (state.next_due_at-now).total_seconds() <= 7*86400+5
+
+
+@pytest.mark.asyncio
+async def test_overview_skips_deferred_queue_and_uses_enabled_scope(bank_db):
+    import json
+    from datetime import timedelta
+
+    from plugins.bank.controller.sync_overview_controller import overview
+    from plugins.bank.service.incremental_import import _clock
+    from plugins.bank.service.task_service import SyncTaskService
+    first=await SyncTaskService.create_question(bank_db,{'versionId':1,'textbookId':1},'teacher')
+    second=await SyncTaskService.create_question(bank_db,{'versionId':1,'textbookId':2},'teacher')
+    job=await bank_db.get(QbSyncJob,first['taskId'])
+    job.dispatch_not_before=await _clock(bank_db)+timedelta(minutes=30)
+    await bank_db.commit()
+    payload=json.loads((await overview(bank_db,subject_id=1)).body)['data']
+    assert payload['nextTask']['taskId']==second['taskId']
+    assert payload['deferredTask']['taskId']==first['taskId'] and payload['deferredTask']['notBefore']
+    assert payload['cycleTargetCount']==0 and payload['storage']['uniqueAssetCount']==0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('registered', [True,False])
+async def test_plan_discovery_waits_for_shared_worker_then_records_result(bank_db, registered):
+    from datetime import timedelta
+    result=await plans.save_plan(bank_db,PlanInput(subjectId=1,enabled=True))
+    plan=await bank_db.get(QbSyncPlan,result['planId'])
+    now=datetime.utcnow()
+    task=QbSyncJob(subject_id=1,task_module='textbook',run_type='metadata',status='completed',phase='completed',
+        options_json={'discoveryMode':'merge'},acknowledge_source_policy='Y',create_time=now,update_time=now)
+    bank_db.add(task);await bank_db.flush()
+    task_id=task.run_id
+    plan.discovery_task_id=task_id;plan.discovery_next_at=now+timedelta(days=7)
+    await bank_db.commit()
+    await plans._discovery(bank_db,result['planId'],None)
+    assert plan.discovery_task_id==task_id  # No Collector call or second merge path.
+    task.options_json={'discoveryMode':'merge','discoveryAttempts':3,
+        'discoveryResult':{'action':'discovery_merge'} if registered else None,
+        'discoveryError':None if registered else '封存不完整'}
+    await bank_db.commit()
+    await plans._discovery(bank_db,result['planId'],None)
+    assert plan.discovery_task_id is None and plan.discovery_processed_task_id==task_id
+    assert plan.discovery_error==(None if registered else '封存不完整')

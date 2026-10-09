@@ -339,6 +339,9 @@ class TextbookApplyService:
 
     @classmethod
     async def task_apply_status(cls, db: AsyncSession, task: object, scopes: list[object]) -> dict[str, Any]:
+        options = _task_value(task, 'options_json', default={}) or {}
+        if options.get('discoveryMode') == 'merge':
+            return {'discoveryMode': True, 'discoveryResult': options.get('discoveryResult'), 'discoveryError': options.get('discoveryError'), 'eligible': False, 'isCurrent': False, 'suggestedAction': 'automaticMerge', 'eligibilityMessage': None}
         state = await cls._state(db)
         current_task_id = _task_value(state, 'current_task_id') if state else None
         current_metadata_run_id = _task_value(state, 'current_metadata_run_id') if state else None
@@ -388,10 +391,15 @@ class TextbookApplyService:
         task_id: int,
         expected_current_task_id: int | None = None,
         operator: str | None = None,
+        *,
+        discovery: bool = False,
     ) -> dict[str, Any]:
         write_stack = AsyncExitStack()
         try:
             task, scopes = await _load_task_and_scopes(db, task_id)
+            discovery = discovery or (task.options_json or {}).get('discoveryMode') == 'merge'
+            if discovery and (task.options_json or {}).get('discoveryResult'):
+                return task.options_json['discoveryResult']
             binding = _snapshot_binding(task, scopes)
             await db.rollback()
             # Validate remote data without holding a database transaction.
@@ -407,7 +415,7 @@ class TextbookApplyService:
                 # A newly inserted row is owned by this transaction and is
                 # therefore already serialized for the first provider write.
             current_task_id = int(state.current_task_id) if state.current_task_id is not None else None
-            if expected_current_task_id != current_task_id:
+            if not discovery and expected_current_task_id != current_task_id:
                 raise ServiceException(
                     message=(
                         f'正式教材版本已变化（当前为任务 {current_task_id or "无"}），'
@@ -420,6 +428,18 @@ class TextbookApplyService:
             task, scopes = await _load_task_and_scopes(db, task_id, for_update=True)
             if _snapshot_binding(task, scopes) != binding:
                 raise ServiceException(message='同步教材任务或教材范围在快照读取期间发生变化，请刷新后重试')
+            if discovery and (task.options_json or {}).get('discoveryResult'):
+                result = task.options_json['discoveryResult']
+                await db.rollback()
+                return result
+            if discovery and current_task_id is not None and current_task_id > int(task_id):
+                result = cls._response(action='superseded', already_applied=False, task_id=task_id,
+                    previous_task_id=current_task_id, metadata_run_id=metadata_run_id,
+                    snapshot_hash=str(normalized['snapshot_hash']), stats=cls._empty_stats())
+                result.update(supersededBy=current_task_id, changes={})
+                task.options_json = {**(task.options_json or {}), 'discoveryResult': result}
+                await db.commit()
+                return result
             snapshot_hash = str(normalized['snapshot_hash'])
             if (
                 current_task_id == int(task_id)
@@ -438,8 +458,10 @@ class TextbookApplyService:
                 await db.rollback()
                 return result
 
-            stats = await cls._upsert_formal(db, normalized)
+            stats = await cls._upsert_formal(db, normalized, discovery=discovery, task_id=task_id)
             action = 'apply' if current_task_id is None else ('rollback' if int(task_id) < current_task_id else 'restore')
+            if discovery:
+                action = 'discovery_merge'
             now = datetime.now()
             previous_metadata_run_id = int(state.current_metadata_run_id) if state.current_metadata_run_id else None
             state.current_task_id = int(task_id)
@@ -455,7 +477,7 @@ class TextbookApplyService:
                     task_id=int(task_id),
                     metadata_run_id=metadata_run_id,
                     snapshot_hash=snapshot_hash,
-                    action=action,
+                    action='apply' if discovery else action,
                     previous_task_id=current_task_id,
                     previous_metadata_run_id=previous_metadata_run_id,
                     change_stats_json=stats,
@@ -465,16 +487,15 @@ class TextbookApplyService:
                     update_time=now,
                 ),
             )
-            await db.commit()
-            return cls._response(
-                action=action,
-                already_applied=False,
-                task_id=task_id,
-                previous_task_id=current_task_id,
-                metadata_run_id=metadata_run_id,
-                snapshot_hash=snapshot_hash,
-                stats=stats,
+            result = cls._response(
+                action=action, already_applied=False, task_id=task_id, previous_task_id=current_task_id,
+                metadata_run_id=metadata_run_id, snapshot_hash=snapshot_hash, stats=stats,
             )
+            if discovery:
+                result['changes'] = stats.get('changes', {})
+                task.options_json = {**(task.options_json or {}), 'discoveryResult': result, 'discoveryError': None}
+            await db.commit()
+            return result
         except BaseException:
             await db.rollback()
             raise
@@ -489,7 +510,7 @@ class TextbookApplyService:
         }
 
     @classmethod
-    async def _upsert_formal(cls, db: AsyncSession, snapshot: Mapping[str, Any]) -> dict[str, Any]:  # noqa: PLR0912, PLR0915
+    async def _upsert_formal(cls, db: AsyncSession, snapshot: Mapping[str, Any], *, discovery=False, task_id=None) -> dict[str, Any]:  # noqa: PLR0912, PLR0915
         now = datetime.now()
         stats = cls._empty_stats()
         version_rows_result = await db.execute(select(QbTextbookVersion).where(QbTextbookVersion.subject_id == 1, QbTextbookVersion.source_provider == PROVIDER))
@@ -502,6 +523,7 @@ class TextbookApplyService:
         textbooks_by_id = {str(row.external_textbook_id): row for row in textbooks if row.external_textbook_id}
         fields = ('version_name', 'source_url', 'is_new', 'sort_order', 'status', 'last_seen_at')
         version_map: dict[str, int] = {}
+        changes = {name: [] for name in ('newVersions', 'renamedVersions', 'missingVersions', 'newTextbooks', 'renamedTextbooks', 'missingTextbooks', 'conflicts')}
         target_version_ids = set(snapshot['version_ids'])
         for values in snapshot['versions']:
             external_id = values['external_version_id']
@@ -519,8 +541,11 @@ class TextbookApplyService:
                 await db.flush()
                 versions_by_id[external_id] = row
                 stats['versions']['inserted'] += 1
+                changes['newVersions'].append({'externalId': external_id, 'name': row.version_name})
             else:
-                changed = _update_values(row, values, fields)
+                if row.version_name != values['version_name']:
+                    changes['renamedVersions'].append({'externalId': external_id, 'oldName': row.version_name, 'name': values['version_name']})
+                changed = _update_values(row, values, tuple(f for f in fields if not discovery or f != 'status'))
                 if changed:
                     for field, value in changed.items():
                         setattr(row, field, value)
@@ -530,7 +555,9 @@ class TextbookApplyService:
                     stats['versions']['unchanged'] += 1
             version_map[external_id] = int(row.version_id)
         for external_id, row in versions_by_id.items():
-            if external_id not in target_version_ids and str(row.status or '0') != '1':
+            if external_id not in target_version_ids:
+                changes['missingVersions'].append({'externalId': external_id, 'name': row.version_name})
+            if not discovery and external_id not in target_version_ids and str(row.status or '0') != '1':
                 row.status = '1'
                 row.update_time = now
                 stats['versions']['disabled'] += 1
@@ -541,6 +568,13 @@ class TextbookApplyService:
             external_id = values['external_textbook_id']
             row = textbooks_by_id.get(external_id)
             formal_values = {**values, 'version_id': version_map[values['version_external_id']]}
+            if discovery and row is not None and row.version_id != formal_values['version_id']:
+                reason = f'教材 {external_id} 的来源版本归属变化，保留原归属待人工核对'
+                conflict = {'externalId': external_id, 'textbookId': row.textbook_id, 'reason': reason, 'observedVersionId': values['version_external_id']}
+                changes['conflicts'].append(conflict)
+                from plugins.bank.service.sync_issues import observe
+                await observe(db, subject_id=1, provider=PROVIDER, book_id=row.textbook_id, task_id=task_id, kind='textbook', key=external_id, error_type='metadata_identity', reason=reason, evidence=conflict, now=now)
+                continue
             if row is None:
                 row = QbTextbook(
                     source_provider=PROVIDER,
@@ -554,8 +588,11 @@ class TextbookApplyService:
                 await db.flush()
                 textbooks_by_id[external_id] = row
                 stats['textbooks']['inserted'] += 1
+                changes['newTextbooks'].append({'externalId': external_id, 'textbookId': row.textbook_id, 'name': row.textbook_name})
             else:
-                changed = _update_values(row, formal_values, textbook_fields)
+                if row.textbook_name != formal_values['textbook_name']:
+                    changes['renamedTextbooks'].append({'externalId': external_id, 'textbookId': row.textbook_id, 'oldName': row.textbook_name, 'name': formal_values['textbook_name']})
+                changed = _update_values(row, formal_values, tuple(f for f in textbook_fields if not discovery or f != 'status'))
                 if changed:
                     for field, value in changed.items():
                         setattr(row, field, value)
@@ -563,11 +600,20 @@ class TextbookApplyService:
                     stats['textbooks']['updated'] += 1
                 else:
                     stats['textbooks']['unchanged'] += 1
+            if discovery:
+                from plugins.bank.service.sync_issues import resolve_metadata_issue
+                await resolve_metadata_issue(db, textbook_id=row.textbook_id, key=external_id, error_type='metadata_identity', task_id=task_id, now=now)
         for external_id, row in textbooks_by_id.items():
-            if external_id not in target_textbook_ids and str(row.status or '0') != '1':
+            if external_id not in target_textbook_ids:
+                changes['missingTextbooks'].append({'externalId': external_id, 'textbookId': row.textbook_id, 'name': row.textbook_name})
+            if not discovery and external_id not in target_textbook_ids and str(row.status or '0') != '1':
                 row.status = '1'
                 row.update_time = now
                 stats['textbooks']['disabled'] += 1
+        if discovery:
+            from plugins.bank.service.sync_issues import resolve_metadata_issue
+            await resolve_metadata_issue(db, textbook_id=0, key='discovery', error_type='metadata_validation', task_id=task_id, now=now)
+            stats['changes'] = changes
         await db.flush()
         return stats
 

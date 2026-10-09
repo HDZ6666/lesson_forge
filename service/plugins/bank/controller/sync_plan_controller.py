@@ -83,6 +83,8 @@ async def save_book(plan_id: int, textbook_id: int, payload: BookOverride, db: D
 @sync_plan_controller.get('/control', dependencies=[READ])
 async def control(db: DB) -> Response:
     local = await sync_plans.control_status(db)
+    from plugins.bank.service.resource_guard import resource_status
+    local['serviceResources'] = resource_status()
     await db.rollback()
     try:
         client = CollectorClient()
@@ -119,6 +121,7 @@ async def issues(
     task_id: Annotated[int | None, Query(alias='taskId', gt=0)] = None,
     status: Literal['open', 'ignored', 'resolved'] | None = None,
     error_type: Annotated[str | None, Query(alias='errorType', max_length=50)] = None,
+    handling: Literal['manual', 'retry'] | None = None,
     since: datetime | None = None,
     until: datetime | None = None,
     before: Annotated[int | None, Query(gt=0)] = None,
@@ -135,7 +138,7 @@ async def issues(
             since=since.astimezone(timezone.utc).replace(tzinfo=None) if since and since.tzinfo else since,
             until=until.astimezone(timezone.utc).replace(tzinfo=None) if until and until.tzinfo else until,
             before=before,
-            page_size=page_size,
+            page_size=page_size, handling=handling,
         )
     )
 

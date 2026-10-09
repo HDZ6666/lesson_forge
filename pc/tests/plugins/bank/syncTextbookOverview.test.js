@@ -10,8 +10,8 @@ const page = readFileSync(resolve(here, '../../../plugins/bank/views/sync-textbo
 
 assert.match(api, /export function getMetadataTextbookOverview\(metadataRunId\)/)
 assert.match(api, /\/bank\/sync\/metadata\/textbook-overview/)
-assert.match(listPage, /<h2>\s*同步教材任务\s*<\/h2>/)
-assert.match(listPage, /新增同步教材任务/)
+assert.match(listPage, /<h2>\s*教材发现任务\s*<\/h2>/)
+assert.match(listPage, /新增教材发现任务/)
 assert.match(listPage, /\/bank\/sync-textbook\//)
 assert.match(page, /<h2>\s*\{\{ heading \}\}\s*<\/h2>/)
 assert.match(page, /id="fetched-title">本次抓取/)

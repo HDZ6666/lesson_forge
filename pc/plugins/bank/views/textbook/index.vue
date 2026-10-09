@@ -22,9 +22,10 @@
         <el-table-column prop="formalQuestionCount" label="累计正式题目" width="116" align="right" />
         <el-table-column label="当前启用题目" width="116" align="right"><template #default="{ row }">{{ row.activeQuestionCount ?? '未统计' }}</template></el-table-column>
         <el-table-column label="同步安排" min-width="180"><template #default="{row}">
-          <el-button v-if="row.latestTaskId" link type="primary" @click="router.push(`/bank/sync-question/${row.latestTaskId}`)">最近任务 {{row.latestTaskId}}</el-button>
+          <el-button v-if="row.status==='0' && !isManual(row)" v-hasPermi="['bank:sync:question:add']" link type="primary" @click="syncBook(row)">立即同步</el-button><el-button v-if="row.latestTaskId" link type="primary" @click="router.push(`/bank/sync-question/${row.latestTaskId}`)">最近任务 {{row.latestTaskId}}</el-button>
           <div>{{ row.automaticEnabled ? (row.nextDueAt ? formatImportTime(row.nextDueAt) : '首次覆盖待办') : '未启用自动同步' }}</div>
           <small v-if="row.unresolvedIssueCount">待处理 {{row.unresolvedIssueCount}} 项</small>
+          <div v-if="row.latestTaskOutcome"><small>最近扫描{{row.latestTaskOutcome.scanComplete?'完整':'未完整'}} · 入库 {{row.latestTaskOutcome.importStatus}} · 可用 {{row.latestTaskOutcome.usableQuestionCount}} 题<span v-if="row.savedImportRetries"> · 已重试入库 {{row.savedImportRetries}} 次</span></small></div>
         </template></el-table-column>
         <el-table-column label="已检查可用" width="112" align="right"><template #default="{ row }">{{ row.usableQuestionCount ?? '未统计' }}</template></el-table-column>
         <el-table-column label="待检查 / 不可用" width="132" align="right"><template #default="{ row }">{{ row.uncheckedQuestionCount ?? '未统计' }} / {{ row.unusableQuestionCount ?? '未统计' }}</template></el-table-column>
@@ -56,6 +57,7 @@ import SubjectSelect from "../../components/SubjectSelect.vue"
 import { computed, getCurrentInstance, onMounted, reactive, ref } from 'vue'
 import { Delete, Edit, Plus, Refresh, RefreshLeft, Search } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import request from '@/utils/request'
 import { addTextbook, deleteTextbooks, listTextbooks, listVersions, updateTextbook } from '../../api/bank'
 import { unwrapList, unwrapPage } from '../../utils/response'
 import { formatImportTime } from '../../utils/sync-task'
@@ -71,6 +73,7 @@ function search() { query.pageNum = 1; loadList() } function resetQuery() { quer
 async function submit() { if (!(await formRef.value?.validate().catch(() => false))) return; const editing = Boolean(form.textbookId); submitting.value = true; try { const result = editing ? await updateTextbook({ ...form }) : await addTextbook({ ...form }); Object.assign(form, unwrapOne(result) || form); ElMessage.success(editing ? '修改成功' : '新增成功'); dialogVisible.value = false; await loadList() } catch (error) { ElMessage.error(error?.message || '保存失败') } finally { submitting.value = false } }
 async function remove(row) { await removeRows([row.textbookId], `确定删除教材“${row.textbookName || row.textbookId}”吗？`) } async function removeSelected() { await removeRows(selected.value.map((item) => item.textbookId), '确定删除选中的人工教材吗？') } async function removeRows(ids, message) { try { await ElMessageBox.confirm(message, '删除确认', { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' }); await deleteTextbooks(ids); ElMessage.success('删除成功'); await loadList() } catch (error) { if (error !== 'cancel' && error !== 'close') ElMessage.error(error?.message || '删除失败') } }
 onMounted(async () => { await loadVersions(); await loadList() })
+async function syncBook(row){try{const r=await request({url:'/bank/sync/question/tasks',method:'post',data:{versionId:row.versionId,textbookId:row.textbookId}});const task=r.data || r;router.push(`/bank/sync-question/${task.taskId || task.runId}`)}catch(e){errorMessage.value=e.message || '同步任务创建失败'}}
 </script>
 <style scoped>
 .bank-admin-page { min-height:calc(100vh - 84px); color:var(--el-text-color-primary); }.page-heading { display:flex; align-items:flex-start; justify-content:space-between; margin-bottom:16px; }.page-heading h2 { margin:0; font-size:20px; font-weight:600; }.state-alert { margin-bottom:14px; }.panel { min-width:0; padding:16px; border:1px solid var(--el-border-color-light); border-radius:6px; background:var(--el-bg-color); }.filter-form { margin-bottom:4px; }.filter-form :deep(.el-form-item) { margin-bottom:10px; }.filter-form :deep(.el-input) { width:190px; }.wide-select { width:220px; }.small-select,.status-select { width:140px; }.toolbar { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:12px; }.data-table { width:100%; }.table-footer { display:flex; align-items:center; justify-content:space-between; gap:12px; padding-top:12px; color:var(--el-text-color-secondary); font-size:12px; }.table-footer :deep(.el-pagination) { flex-wrap:wrap; justify-content:flex-end; }.full-width { width:100%; }@media (max-width:760px) { .table-footer { align-items:flex-start; flex-direction:column; }.table-footer :deep(.el-pagination) { justify-content:flex-start; } }

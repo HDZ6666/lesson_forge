@@ -9,7 +9,11 @@
     <div class="actions"><el-button @click="router.push('/sync-center/plans')">自动同步计划</el-button><el-button @click="router.push('/sync-center/discovery')">教材发现</el-button><el-button type="primary" @click="router.push('/sync-center/tasks')">同步任务</el-button></div>
     <el-alert v-if="summary.control?.paused" :title="summary.control.reason || '同步已紧急暂停'" type="warning" :closable="false"/>
     <el-button v-hasPermi="['bank:sync:control']" :loading="controlling" @click="toggleControl">{{ summary.control?.paused ? '恢复同步' : '紧急暂停同步' }}</el-button>
-    <p>当前任务：{{ summary.currentTask?.taskId || '暂无' }}；下一项待办：{{ summary.nextTask?.taskId || '暂无' }}<span v-if="summary.nextTask?.reason"> · {{summary.nextTask.reason}}</span></p>
+    <p>当前任务：{{ summary.currentTask?.taskId || '暂无' }}；下一项到期待办：{{ summary.nextTask?.taskId || '暂无' }}<span v-if="summary.nextTask?.textbookName"> · {{summary.nextTask.textbookName}}</span><span v-if="summary.nextTask?.reason"> · {{summary.nextTask.reason}}</span></p>
+    <p class="note">待办按任务号排序，排除未到期、计划暂停及教材停用的任务；实际派发还须通过来源、资源与入库检查。</p>
+    <p v-if="summary.deferredTask">暂缓待办 {{summary.deferredTask.taskId}} {{summary.deferredTask.textbookName}}：{{summary.deferredTask.reason}}<span v-if="summary.deferredTask.notBefore"> · 最早 {{new Date(summary.deferredTask.notBefore).toLocaleString()}}</span></p>
+    <p v-if="control.serviceResources">后端可用内存 {{control.serviceResources.availableMemoryMiB}} MiB · 题库存储可用 {{control.serviceResources.freeDiskMiB}} MiB<span v-if="control.serviceResources.reason"> · {{control.serviceResources.reason}}</span></p>
+    <p v-if="summary.storage">教材素材（按摘要去重）{{summary.storage.uniqueAssetCount}} 份<span v-if="summary.storage.databaseBytes!=null"> · 数据库占用 {{(summary.storage.databaseBytes/1048576).toFixed(1)}} MiB</span></p>
     <el-alert v-if="control.collectorError" :title="`采集器：${control.collectorError}`" type="warning" :closable="false"/>
     <el-alert v-if="control.source?.paused" :title="control.source.reason || '来源已暂停'" type="warning" :closable="false"/>
     <el-alert v-if="control.collector?.resources?.reason" :title="control.collector.resources.reason" type="warning" :closable="false"/>
@@ -42,6 +46,10 @@ const stats = computed(() => [
   { name: '当前教材', value: summary.value.textbooks || 0 },
   { name: '有可用题的教材', value: summary.value.textbooksWithQuestions || 0 },
   { name: '尚无可用题的教材', value: summary.value.textbooksWithoutQuestions || 0 },
+  { name: '本轮固定目标', value: summary.value.cycleTargetCount || 0 },
+  { name: '本轮已尝试', value: summary.value.cycleAttemptedCount || 0 },
+  { name: '待补齐教材', value: summary.value.textbooksNeedingRefill || 0 },
+  { name: '待处理问题', value: summary.value.openIssueCount || 0 },
   { name: '执行中任务', value: ['starting','running','cancelling'].reduce((n,s) => n + (summary.value.taskCounts?.[s] || 0), 0) },
 ])
 async function loadControl(id) {

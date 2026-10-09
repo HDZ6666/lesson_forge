@@ -73,7 +73,7 @@ async def record_import_batch(db, row, issues, accepted_keys, now):
             key=str(issue['questionId']),
             error_type='question_quality',
             reason=issue['reason'],
-            evidence={'importId': row.import_id, 'batchNo': row.batch_no + 1, 'collectorRunId': row.collector_run_id},
+            evidence={'importId': row.import_id, 'scopeId': row.scope_id, 'batchNo': row.batch_no + 1, 'collectorRunId': row.collector_run_id, 'cursor': row.cursor, 'ordinal': issue.get('ordinal'), 'handling': 'manual'},
             now=now,
         )
     if accepted_keys:
@@ -128,6 +128,8 @@ def dump(row):
         'resolvedTaskId': row.resolved_task_id,
         'attempts': row.attempts,
         'evidence': row.evidence_json,
+        'handling': (row.evidence_json or {}).get('handling', 'manual'),
+        'nextAttemptAt': (row.evidence_json or {}).get('nextAttemptAt'),
         'operatorNote': row.operator_note,
         'revision': row.revision,
         'firstSeenAt': utc_datetime(row.first_seen_at),
@@ -148,6 +150,7 @@ async def list_issues(
     until=None,
     before=None,
     page_size=20,
+    handling=None,
 ):
     query = select(QbSyncIssue)
     for column, value in (
@@ -158,6 +161,10 @@ async def list_issues(
     ):
         if value is not None:
             query = query.where(column == value)
+    if handling == 'retry':
+        query = query.where(QbSyncIssue.evidence_json['handling'].as_string() == 'retry')
+    elif handling == 'manual':
+        query = query.where((QbSyncIssue.evidence_json['handling'].as_string().is_(None)) | (QbSyncIssue.evidence_json['handling'].as_string() != 'retry'))
     if task_id is not None:
         query = query.where(
             exists(
@@ -183,18 +190,15 @@ async def list_issues(
         else {}
     )
     available = (
-        set(
-            (
-                await db.scalars(select(QbSyncJob.run_id).where(QbSyncJob.run_id.in_([r.latest_task_id for r in rows])))
-            ).all()
-        )
+        dict((await db.execute(select(QbSyncJob.run_id, QbSyncJob.task_module).where(
+            QbSyncJob.run_id.in_([r.latest_task_id for r in rows])))).all())
         if rows
         else set()
     )
     return {
         'rows': [
             dict(
-                dump(row), textbookName=books.get(row.textbook_id), latestTaskAvailable=row.latest_task_id in available
+                dump(row), textbookName=books.get(row.textbook_id), latestTaskAvailable=row.latest_task_id in available, taskModule=available.get(row.latest_task_id, 'question')
             )
             for row in rows[:page_size]
         ],
@@ -274,3 +278,95 @@ async def resolve_scope_issues(db, job, scope, now):
         issue.revision += 1
         if await db.get(QbSyncIssueTask, (issue.issue_id, job.run_id)) is None:
             db.add(QbSyncIssueTask(issue_id=issue.issue_id, task_id=job.run_id, evidence_json=proof, observed_at=now))
+
+
+async def record_runtime_failure(db, row, *, stage, message, now):
+    """Preserve the failed execution's scope and recovery location."""
+    from plugins.bank.entity.do.bank_do import QbSyncJobScope
+    scope = await db.get(QbSyncJobScope, row.scope_id)
+    if scope is None:
+        return
+    next_at = getattr(row, 'next_attempt_at', None)
+    if stage == 'import':
+        from datetime import timedelta
+
+        from plugins.bank.entity.do.bank_do import QbSyncPlan
+        task = await db.get(QbSyncJob, row.task_id)
+        options = task.options_json or {} if task else {}
+        plan_id = options.get('autoPlanId')
+        plan = await db.get(QbSyncPlan, plan_id) if plan_id else None
+        if plan and plan.enabled and options.get('planImportRetryCount', 0) < 3:
+            next_at = now + timedelta(hours=plan.refill_hours)
+    evidence = {
+        'stage': stage, 'scopeId': row.scope_id, 'collectorRunId': row.collector_run_id,
+        'textbookExternalId': scope.external_textbook_id,
+        'importId': getattr(row, 'import_id', None), 'intakeId': getattr(row, 'intake_id', None),
+        'cursor': getattr(row, 'cursor', None), 'batchNo': getattr(row, 'batch_no', None),
+        'errorKind': getattr(row, 'error_kind', None), 'attempts': getattr(row, 'attempt_count', None),
+        'nextAttemptAt': utc_datetime(next_at).isoformat() if next_at else None, 'handling': 'retry' if next_at else 'manual',
+    }
+    await observe(db, subject_id=scope.subject_id, provider=scope.source_provider,
+        book_id=scope.local_textbook_id, task_id=row.task_id, kind='scope',
+        key=f'{scope.external_textbook_id}:{stage}', error_type=f'{stage}_failure',
+        reason=message, evidence=evidence, now=now)
+
+
+async def resolve_runtime_failures(db, row, *, stage, now):
+    from plugins.bank.entity.do.bank_do import QbSyncJobScope
+    scope = await db.get(QbSyncJobScope, row.scope_id)
+    if scope is None:
+        return
+    rows = (await db.scalars(select(QbSyncIssue).where(
+        QbSyncIssue.subject_id == scope.subject_id, QbSyncIssue.source_provider == scope.source_provider,
+        QbSyncIssue.textbook_id == scope.local_textbook_id, QbSyncIssue.object_kind == 'scope',
+        QbSyncIssue.object_key == f'{scope.external_textbook_id}:{stage}',
+        QbSyncIssue.error_type == f'{stage}_failure', QbSyncIssue.status != 'resolved',
+        QbSyncIssue.evidence_json['scopeId'].as_integer() == row.scope_id,
+        QbSyncIssue.evidence_json['collectorRunId'].as_integer() == row.collector_run_id,
+    ).with_for_update())).all()
+    for issue in rows:
+        proof = {'repair': f'{stage}_settled', 'collectorRunId': row.collector_run_id,
+                 'importId': getattr(row, 'import_id', None), 'intakeId': getattr(row, 'intake_id', None)}
+        issue.status, issue.resolved_task_id, issue.resolved_at = 'resolved', row.task_id, now
+        issue.evidence_json = proof
+        issue.revision += 1
+        occurrence = await db.get(QbSyncIssueTask, (issue.issue_id, row.task_id))
+        if occurrence:
+            occurrence.evidence_json = proof
+        else:
+            db.add(QbSyncIssueTask(issue_id=issue.issue_id, task_id=row.task_id, evidence_json=proof, observed_at=now))
+
+
+async def resolve_metadata_issue(db, *, textbook_id, key, error_type, task_id, now):
+    rows = (await db.scalars(select(QbSyncIssue).where(QbSyncIssue.subject_id == 1,
+        QbSyncIssue.source_provider == 'zujuan', QbSyncIssue.textbook_id == textbook_id,
+        QbSyncIssue.object_key == key, QbSyncIssue.error_type == error_type, QbSyncIssue.status != 'resolved').with_for_update())).all()
+    for row in rows:
+        row.status, row.resolved_task_id, row.resolved_at = 'resolved', task_id, now
+        row.revision += 1
+        proof = {'repair': 'matching_metadata_identity', 'taskId': task_id, 'externalId': key}
+        row.evidence_json = proof
+        occurrence = await db.get(QbSyncIssueTask, (row.issue_id, task_id))
+        if occurrence:
+            occurrence.evidence_json = proof
+        else:
+            db.add(QbSyncIssueTask(issue_id=row.issue_id, task_id=task_id, evidence_json=proof, observed_at=now))
+
+
+async def mark_runtime_retry(db, row, *, stage, now):
+    from plugins.bank.entity.do.bank_do import QbSyncJobScope
+    scope = await db.get(QbSyncJobScope, row.scope_id)
+    if scope is None:
+        return
+    issue = await db.scalar(select(QbSyncIssue).where(
+        QbSyncIssue.subject_id == scope.subject_id, QbSyncIssue.source_provider == scope.source_provider,
+        QbSyncIssue.textbook_id == scope.local_textbook_id, QbSyncIssue.object_kind == 'scope',
+        QbSyncIssue.object_key == f'{scope.external_textbook_id}:{stage}',
+        QbSyncIssue.error_type == f'{stage}_failure', QbSyncIssue.status != 'resolved',
+        QbSyncIssue.evidence_json['scopeId'].as_integer() == row.scope_id,
+        QbSyncIssue.evidence_json['collectorRunId'].as_integer() == row.collector_run_id,
+    ).with_for_update())
+    if issue:
+        issue.evidence_json = {**(issue.evidence_json or {}), 'handling': 'retry',
+                               'nextAttemptAt': utc_datetime(now).isoformat(), 'retryTaskId': row.task_id}
+        issue.revision += 1

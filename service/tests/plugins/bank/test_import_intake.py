@@ -236,6 +236,11 @@ async def test_resume_and_delete_wait_for_intake_even_before_registration(import
     await db.rollback()
     ticket = await claim_import_intake(db, registered['intakeId'])
     await fail_import_intake(db, ticket, 'snapshot', '人工判断', retryable=False)
+    from plugins.bank.entity.do.bank_do import QbSyncIssue
+    issue = await db.scalar(select(QbSyncIssue).where(QbSyncIssue.error_type == 'intake_failure'))
+    assert issue.status == 'open' and issue.textbook_id == 1 and issue.latest_task_id == 28
+    assert issue.evidence_json['handling'] == 'manual' and issue.evidence_json['stage'] == 'intake'
+    await db.rollback()
     with pytest.raises(ServiceException, match='人工判断'):
         await ensure_import_intake_finished(db, 28, automatic=True)
     await db.rollback()
@@ -336,3 +341,19 @@ async def test_mysql_competing_registrations_and_claims_have_one_owner(import_db
         await db.execute(text(migration.read_text()))
         await db.commit()
     assert await db.scalar(select(func.count()).select_from(QbQuestionImportIntake)) == 1
+
+
+@pytest.mark.asyncio
+async def test_intake_success_does_not_resolve_another_sealed_run(import_db, monkeypatch):
+    from plugins.bank.entity.do.bank_do import QbSyncIssue
+    from plugins.bank.service.sync_issues import observe
+    db=import_db
+    _,summary,_=_client(monkeypatch)
+    registered=await register_import_intake(db,30)
+    ticket=await claim_import_intake(db,registered['intakeId'])
+    await observe(db,subject_id=1,provider='zujuan',book_id=1,task_id=28,kind='scope',key='tb1:intake',
+        error_type='intake_failure',reason='另一个封存身份冲突',evidence={'scopeId':31,'collectorRunId':99},now=datetime.utcnow())
+    await db.commit()
+    await complete_import_intake(db,ticket,normalized(summary))
+    issue=await db.scalar(select(QbSyncIssue).where(QbSyncIssue.error_type=='intake_failure'))
+    assert issue.status=='open' and issue.evidence_json['collectorRunId']==99

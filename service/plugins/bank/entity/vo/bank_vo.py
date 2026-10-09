@@ -1,6 +1,6 @@
 from datetime import datetime
 from decimal import Decimal
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
 from pydantic.alias_generators import to_camel
@@ -129,6 +129,15 @@ class TextbookCoverageModel(TextbookModel):
     unchecked_question_count: int = Field(ge=0, description='启用范围内尚无当前有效检查事实的去重题数')
     unusable_question_count: int = Field(ge=0, description='启用范围内当前检查不通过的去重题数')
     latest_source_observation: SourceObservationModel | None = None
+    unresolved_issue_count: int = Field(default=0, ge=0)
+    latest_task_id: int | None = None
+    latest_task_status: str | None = None
+    latest_task_time: datetime | None = None
+    latest_task_outcome: dict[str, Any] | None = None
+    saved_import_retries: int = Field(default=0, ge=0)
+    next_due_at: datetime | None = None
+    automatic_enabled: bool = False
+    exception_kind: str | None = None
 
 
 class CatalogNodeModel(BankModel):
@@ -917,7 +926,9 @@ class QuestionApplyResponseModel(BankModel):
 class TextbookApplyResponseModel(BankModel):
     """Result and row counts returned by the formal textbook application."""
 
-    action: Literal['apply', 'rollback', 'restore']
+    action: Literal['apply', 'rollback', 'restore', 'discovery_merge', 'superseded']
+    changes: dict[str, list[dict[str, Any]]] = Field(default_factory=dict)
+    superseded_by: int | None = None
     already_applied: bool = Field(alias='alreadyApplied')
     target_task_id: int = Field(alias='targetTaskId', gt=0)
     previous_task_id: int | None = Field(default=None, alias='previousTaskId')
@@ -925,7 +936,7 @@ class TextbookApplyResponseModel(BankModel):
     snapshot_hash: str = Field(alias='snapshotHash', min_length=64, max_length=64)
     versions: dict[str, int] = Field(default_factory=dict)
     textbooks: dict[str, int] = Field(default_factory=dict)
-    stats: dict[str, dict[str, int]] = Field(default_factory=dict)
+    stats: dict[str, Any] = Field(default_factory=dict)
 
 
 class TaskComparisonQueryModel(BankPageQueryModel):

@@ -161,12 +161,17 @@ async def detail(db, draft_id, user):
             'revision': 1,
             'title': old['lesson'].get('title') or '历史教案',
             'textbookId': old['scheme']['textbookId'],
+            'textbookName': old['lesson'].get('textbookName') or f"教材 {old['scheme']['textbookId']}",
+            'manualCount': len(output),
             'groups': groups,
             'printSettings': {'showGroupTitles': True, 'blankLines': 2},
             'items': output,
         }
     scheme = await db.get(LpScheme, row.scheme_id)
     editor = row.editor_json
+    from plugins.bank.entity.do.bank_do import QbTextbook
+    book = await db.get(QbTextbook, scheme.textbook_id)
+    displayed_book_name = editor.get('textbookName') or (book.textbook_name if book else f'教材 {scheme.textbook_id}')
     saved_items = await items(db, draft_id)
     output = [public_item(item, editor) for item in saved_items]
     current = (
@@ -208,6 +213,9 @@ async def detail(db, draft_id, user):
         'readOnly': False,
         'revision': row.revision,
         'textbookId': scheme.textbook_id,
+        'textbookName': displayed_book_name,
+        'manualCount': sum(not item['ruleKey'] for item in output),
+        'groupSummaries': [{'groupKey': g['groupKey'], 'selectedCount': sum(i['groupKey'] == g['groupKey'] for i in output), 'manualCount': sum(i['groupKey'] == g['groupKey'] and not i['ruleKey'] for i in output)} for g in editor['groups']],
         **copy.deepcopy(editor),
         'items': output,
         'rules': summaries,
@@ -229,7 +237,10 @@ async def create(db, payload, user, *, source_id=None, copied_items=None, editor
         return old
     book = await book_scope(db, payload.textbook_id)
     book_id = book.textbook_id
+    book_name = book.textbook_name
     await db.rollback()
+    if editor is not None:
+        editor = {**editor, 'textbookName': book_name}
     timestamp = now()
     scheme = LpScheme(
         scheme_name=payload.title,
@@ -249,7 +260,7 @@ async def create(db, payload, user, *, source_id=None, copied_items=None, editor
             revision=1,
             source_generation_id=source_id,
             editor_json=editor
-            or {'title': payload.title, 'groups': [], 'printSettings': {'showGroupTitles': True, 'blankLines': 2}},
+            or {'title': payload.title, 'textbookName': book_name, 'groups': [], 'printSettings': {'showGroupTitles': True, 'blankLines': 2}},
             create_by=operator(user),
             create_time=timestamp,
             update_time=timestamp,

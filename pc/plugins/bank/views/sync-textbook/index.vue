@@ -2,17 +2,17 @@
   <div class="app-container sync-task-list-page">
     <header class="page-heading">
       <div>
-        <h2>同步教材任务</h2>
+        <h2>教材发现任务</h2>
         <p>每个任务抓取来源中的全部版本与教材，任务完成后再查看不可变快照对比。</p>
       </div>
       <div class="heading-actions">
         <el-button :icon="Refresh" :loading="loading" @click="loadTasks">刷新</el-button>
-        <el-button v-hasPermi="['bank:sync:textbook:add', 'bank:sync:run']" type="primary" :icon="Plus" @click="openCreate">新增同步教材任务</el-button>
+        <el-button v-hasPermi="['bank:sync:textbook:add', 'bank:sync:run']" type="primary" :icon="Plus" @click="openCreate">新增教材发现任务</el-button>
       </div>
     </header>
 
     <el-alert class="state-alert" type="info" :closable="false" show-icon>
-      “采集完成”只表示本次抓取成功，不代表已应用到当前正式数据。
+      新发现任务完成后自动登记正常新增与改名；本次缺席只保留观察，人工启停保持不变。历史任务保留旧快照应用方式。
     </el-alert>
     <el-alert v-if="errorMessage" class="state-alert" type="error" :closable="false" show-icon>{{ errorMessage }}</el-alert>
 
@@ -77,6 +77,7 @@
         <el-table-column prop="fetchedTextbookCount" label="抓取教材" width="96" align="right" />
         <el-table-column prop="newVersionCount" label="新增版本" width="96" align="right" />
         <el-table-column prop="newTextbookCount" label="新增教材" width="96" align="right" />
+        <el-table-column label="登记结果" min-width="170"><template #default="{row}">{{ row.discoveryMode ? (row.discoveryResult ? '已登记观察结果' : row.discoveryError ? '登记需处理' : '等待自动登记') : '历史快照' }}</template></el-table-column>
         <el-table-column label="创建人" min-width="110" show-overflow-tooltip><template #default="scope">{{ scope.row.createdBy || '—' }}</template></el-table-column>
         <el-table-column label="创建时间" min-width="166" show-overflow-tooltip><template #default="scope">{{ formatTaskTime(scope.row.createTime) }}</template></el-table-column>
         <el-table-column label="完成时间" min-width="166" show-overflow-tooltip><template #default="scope">{{ formatTaskTime(scope.row.completedAt) }}</template></el-table-column>
@@ -113,7 +114,7 @@
           </template>
         </el-table-column>
       </el-table>
-      <el-empty v-if="!loading && !tasks.length" :image-size="72" description="暂无同步教材任务" />
+      <el-empty v-if="!loading && !tasks.length" :image-size="72" description="暂无教材发现任务" />
       <footer class="table-footer">
         <span>共 {{ total }} 个任务</span>
         <el-pagination
@@ -129,12 +130,12 @@
       </footer>
     </section>
 
-    <el-dialog v-model="createVisible" title="新增同步教材任务" width="600px" append-to-body @closed="resetCreate">
+    <el-dialog v-model="createVisible" title="新增教材发现任务" width="600px" append-to-body @closed="resetCreate">
       <el-alert type="warning" :closable="false" show-icon>本任务会访问已配置的第三方来源，请先确认授权和采集规则。</el-alert>
       <ul class="create-rules">
         <li>本次抓取来源中的全部版本和教材。</li>
         <li>不抓取目录和题目。</li>
-        <li>不会自动修改当前正式数据。</li>
+        <li>正常新增和改名自动登记，归属冲突单独待人工核对。</li>
         <li>采集成功后保留本次任务绑定的 metadataRunId 快照。</li>
       </ul>
       <el-checkbox v-model="acknowledged">我已确认来源授权、站点规则和内容使用边界</el-checkbox>
@@ -248,7 +249,7 @@ async function loadTasks(silent = false) {
       tasks.value = []
       total.value = 0
     }
-    errorMessage.value = syncTaskErrorMessage(error, '同步教材任务加载失败')
+    errorMessage.value = syncTaskErrorMessage(error, '教材发现任务加载失败')
   } finally {
     if (!silent) loading.value = false
     scheduleRefresh()
@@ -285,10 +286,10 @@ async function createTask() {
     const task = unwrapSyncTask(await createTextbookSyncTask({ acknowledgeSourcePolicy: true }), 'textbook')
     if (!task?.taskId) throw new Error('服务端未返回任务编号')
     createVisible.value = false
-    ElMessage.success('同步教材任务已创建')
+    ElMessage.success('教材发现任务已创建')
     await router.push(`/bank/sync-textbook/${encodeURIComponent(task.taskId)}`)
   } catch (error) {
-    ElMessage.error(syncTaskErrorMessage(error, '同步教材任务创建失败'))
+    ElMessage.error(syncTaskErrorMessage(error, '教材发现任务创建失败'))
   } finally {
     creating.value = false
   }
@@ -322,7 +323,7 @@ async function retryTask(task) {
     actionId.value = task.taskId
     const retried = unwrapSyncTask(await retryTextbookSyncTask(task.taskId), 'textbook')
     if (!retried?.taskId) throw new Error('服务端未返回新任务编号')
-    ElMessage.success('已创建新的同步教材任务')
+    ElMessage.success('已创建新的教材发现任务')
     await router.push(`/bank/sync-textbook/${encodeURIComponent(retried.taskId)}`)
   } catch (error) {
     if (error !== 'cancel' && error !== 'close') ElMessage.error(syncTaskErrorMessage(error, '任务重试失败'))
@@ -340,7 +341,7 @@ async function deleteTask(task) {
     )
     actionId.value = task.taskId
     await deleteTextbookSyncTask(task.taskId)
-    ElMessage.success('同步教材任务已删除')
+    ElMessage.success('教材发现任务已删除')
     await loadTasks(true)
   } catch (error) {
     if (error !== 'cancel' && error !== 'close') ElMessage.error(syncTaskErrorMessage(error, '任务删除失败'))
