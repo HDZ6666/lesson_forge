@@ -29,7 +29,8 @@ function usage() {
   --db <path>                 SQLite 路径；默认 data/zujuan.sqlite3
   --data-dir <path>           原始页目录；默认 data/zujuan
   --profile-dir <path>        独立浏览器配置目录；默认 .cache/zujuan-sync-profile
-  --headful                   显示 Chrome 窗口（默认无头；冷档案或防护阻断时会自动改有头）
+  --headful                   使用有头 Chrome（默认；服务器通过 Xvfb 运行）
+  --headless                  显式使用无头 Chrome
   --timeout <ms>              页面超时；默认 30000
   --delay-min <ms>            每次请求最小间隔；默认 2200
   --delay-max <ms>            每次请求最大间隔；默认 3800
@@ -52,7 +53,7 @@ function parseArgs(argv) {
     delayMin: 2200,
     delayMax: 3800,
     timeout: 30000,
-    headless: true,
+    headless: false,
     saveRaw: true,
     dbPath: path.resolve(projectRoot, 'data/zujuan.sqlite3'),
     dataDir: path.resolve(projectRoot, 'data/zujuan'),
@@ -95,6 +96,9 @@ function parseArgs(argv) {
       case '--profile-dir':
         options.profileDir = path.resolve(cwd, needValue(i, arg));
         i += 1;
+        break;
+      case '--headless':
+        options.headless = true;
         break;
       case '--headful':
         options.headless = false;

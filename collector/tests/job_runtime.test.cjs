@@ -138,7 +138,7 @@ test('A3-3 run_created 事件立即回绑 collectorRunId；结构化 error 决�
       const textbookId = args[args.indexOf('--textbook-id') + 1];
       runId = seedChildRun(dbPath, textbookId, 'blocked');
       child = fakeChild();
-      assert.equal(args.includes('--headful'), false);
+      assert.equal(args.includes('--headful'), true);
       return child;
     },
   });
@@ -689,5 +689,20 @@ test('实际 HTTP 丢弃首次启动响应后重试仍只执行一次，提前�
     await new Promise((resolve) => server.close(resolve));
     manager.dispose();
     fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('部署浏览器模式统一传递给教材发现和内容子进程', async () => {
+  for (const headful of [true, false]) {
+    const { directory, dbPath } = temporaryDb();
+    const manager = new CollectorJobManager({ dbPath, headful });
+    try {
+      const args = manager.baseArgs();
+      assert.equal(args.includes('--headful'), headful);
+      assert.equal(args.includes('--headless'), !headful);
+    } finally {
+      await manager.shutdown();
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
   }
 });

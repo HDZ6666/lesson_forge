@@ -274,7 +274,8 @@ function sampleTextbook(overrides = {}) {
 test('默认参数和非法参数', () => {
   const options = parseArgs([]);
   assert.equal(options.seedUrl, 'https://zujuan.xkw.com/czsx/zj261314/o2/');
-  assert.equal(options.headless, true);
+  assert.equal(options.headless, false);
+  assert.equal(parseArgs(['--headless']).headless, true);
   assert.equal(options.saveRaw, true);
   assert.equal(options.acknowledgeSourcePolicy, false);
   assert.equal(options.statusOnly, false);

@@ -293,7 +293,7 @@ class ExecutionMethods {
       '--data-dir', this.dataDir,
       '--profile-dir', this.profileDir,
     ];
-    if (this.headful) args.push('--headful');
+    args.push(this.headful ? '--headful' : '--headless');
     return args;
   }
 

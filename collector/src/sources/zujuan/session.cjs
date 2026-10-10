@@ -62,7 +62,7 @@ function profileLooksWarm(profileDir) {
 }
 
 function chooseInitialHeadless(options = {}) {
-  if (options.headless === false) return false;
+  if (options.headless !== true) return false;
   if (!profileLooksWarm(options.profileDir)) return false;
   return true;
 }
@@ -260,7 +260,7 @@ async function launchCollectorContext(playwright, options) {
   markProfileCleanExit(options.profileDir);
   const launchOptions = {
     channel: 'chrome',
-    headless: options.headless,
+    headless: options.headless === true,
     locale: 'zh-CN',
     viewport: { width: 1440, height: 1000 },
     ignoreDefaultArgs: ['--enable-automation'],

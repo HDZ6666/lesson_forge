@@ -91,7 +91,7 @@ class CollectorJobManager {
     // read once here and never taken from a request payload.
     this.headful = deploymentBoolean(
       options.headful == null ? process.env.COLLECTOR_HEADFUL : options.headful,
-      false,
+      true,
     );
     // The API is often started independently of a crawl process.  Upgrade an
     // existing collector DB here so `/v1/runs/*` works immediately after a

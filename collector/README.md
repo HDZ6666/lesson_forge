@@ -82,7 +82,7 @@ npm start
 - `COLLECTOR_DATA_DIR`：原始页和素材目录，默认 `collector/data/zujuan`；
 - `COLLECTOR_PROFILE_DIR`：Chrome 配置，默认 `collector/.cache/zujuan-sync-profile`；
 - `COLLECTOR_NODE_BIN`：运行采集脚本的 Node 可执行文件。
-- `COLLECTOR_HEADFUL`：部署侧是否显示 Chrome 窗口（`true/false`，默认 `false`）；任务请求不能覆盖此配置。注意 `zujuan_question_sync.cjs` 自身默认有头，`server.cjs` 只在 `true` 时追加 `--headful`、不会追加 `--headless`，因此生产容器里内容任务仍是有头 Chrome 跑在 Xvfb 上；元数据脚本默认无头。
+- `COLLECTOR_HEADFUL`：教材发现和题目采集统一默认有头（`true`），服务器通过 Xvfb 虚拟显示运行，继续复用持久 Chrome 档案/Cookie。任务请求不能覆盖部署配置；显式设为 `false` 才给两种任务传入 `--headless`。独立 CLI 也默认有头。
 - `COLLECTOR_JOB_TIMEOUT_MS`：单个任务总时限，默认 24 小时；到期后按取消路径终止子进程，任务终态 `interrupted`（有可续采 run）或 `failed`，`errorCode=job_timeout`。
 - `COLLECTOR_STALL_TIMEOUT_MS`：停滞判定，默认 20 分钟；子进程在此期间没有任何结构化事件或日志输出即终止，`errorCode=stalled`。人工验证等待期间子进程持续发出 `verification_wait`，不会被判停滞。
 - `COLLECTOR_EVENT_CHANNEL`：子进程事件通道，`ipc`（默认，`process.send`）、`stdout`（`@@event {json}` 行，供 CLI 调试）或 `none`。
@@ -138,7 +138,7 @@ npm start
 
 内容任务排队/重启核对使用可选 `jobId` UUID；同 UUID 同范围返回原作业，不同范围或已清理的原作业拒绝新建。停止尚未确认的派发可在取消请求中提交 `reserveDispatch=true`，持久记录取消，迟到的同 UUID 启动不能执行。请求去重标记独立于终态 job 的保留上限，不能随普通日志清理一起删除。
 
-首次 429 保存 Retry-After（秒数或 HTTP 日期，最少一分钟）；主站验证/访问阻断在当前任务恢复流程最终失败后保存人工暂停。教材发现保留旧版的同一持久档案无头→有头单次恢复；题目采集保留当前会话的人工验证等待，不换身份或全新会话重试。发现、列表、目录及素材入口共享 SQLite 中的 provider 状态，换教材或新会话不能绕过；当前窗口已返回的成功页仍保留，缺少的素材保持明确失败。恢复只放开后续执行，已封存的阻断任务需要明确续采或后续计划再次安排。状态在当前 Collector 数据库内共享，不同独立部署尚未协调；不能据此扩容多个 Collector 或启用没有预算的全教材无人值守。
+首次 429 保存 Retry-After（秒数或 HTTP 日期，最少一分钟）；主站验证/访问阻断在当前任务恢复流程最终失败后保存人工暂停。教材发现默认有头；显式选择无头时仍保留同一持久档案无头→有头单次恢复；题目采集保留当前会话的人工验证等待，不换身份或全新会话重试。发现、列表、目录及素材入口共享 SQLite 中的 provider 状态，换教材或新会话不能绕过；当前窗口已返回的成功页仍保留，缺少的素材保持明确失败。恢复只放开后续执行，已封存的阻断任务需要明确续采或后续计划再次安排。状态在当前 Collector 数据库内共享，不同独立部署尚未协调；不能据此扩容多个 Collector 或启用没有预算的全教材无人值守。
 
 ### 共享配额与资源水位
 
