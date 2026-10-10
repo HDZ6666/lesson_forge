@@ -132,6 +132,7 @@
             <p>开启后每个目录最多请求 1000 页，达到边界后正常结束该目录并继续其他目录；这不代表网站总题目已全部抓完。</p>
           </div>
         </el-form-item>
+        <el-form-item v-if="concurrencyDefault.requiresPauseConfirmation" label="计划已暂停"><el-checkbox v-model="createForm.allowPaused">仅执行这一次，不恢复整个计划</el-checkbox></el-form-item>
         <el-form-item label="采集确认">
           <el-checkbox v-model="acknowledged">我已确认来源授权和采集规则，并了解合格成果会在后台自动分批入库。</el-checkbox>
         </el-form-item>
@@ -198,7 +199,7 @@ const optionError = ref('')
 const optionVersions = ref([])
 const acknowledged = ref(false)
 const concurrencyDefault=ref({})
-const createForm = reactive({ listConcurrency:0, subjectId: 1, versionId: '', textbookId: undefined, limitTo1000Pages: false })
+const createForm = reactive({ allowPaused:false, listConcurrency:0, subjectId: 1, versionId: '', textbookId: undefined, limitTo1000Pages: false })
 const filters = reactive({ subjectId: Number(route.query.subjectId) || undefined, planId: Number(route.query.planId) || undefined, cycleNo: Number(route.query.cycleNo) || undefined, cycleName: '', taskNo: '', status: undefined, versionName: '', createTimeRange: [], pageNum: 1, pageSize: 10 })
 watch(() => [route.query.tab, route.query.subjectId, route.query.planId, route.query.cycleNo], () => { activeTab.value = route.query.tab === 'issues' ? 'issues' : 'tasks'; filters.subjectId = Number(route.query.subjectId) || undefined; filters.planId=Number(route.query.planId)||undefined;filters.cycleNo=Number(route.query.cycleNo)||undefined; searchTasks() })
 let taskListRevision = 0
@@ -313,6 +314,7 @@ async function openCreate() {
 }
 
 function resetCreate() {
+  createForm.allowPaused=false
   createForm.listConcurrency=0
   createForm.versionId = ''
   createForm.textbookId = undefined
@@ -333,6 +335,7 @@ async function createTask() {
   try {
     const requestData = {
       listConcurrency:createForm.listConcurrency || null,
+      allowPaused:createForm.allowPaused,
       versionId: createForm.versionId,
       textbookId: createForm.textbookId,
     }

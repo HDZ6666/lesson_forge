@@ -398,6 +398,9 @@ class TextbookApplyService:
         try:
             task, scopes = await _load_task_and_scopes(db, task_id)
             discovery = discovery or (task.options_json or {}).get('discoveryMode') == 'merge'
+            if discovery:
+                from plugins.bank.service.plan_work import assert_options
+                assert_options(task.options_json)
             if discovery and (task.options_json or {}).get('discoveryResult'):
                 return task.options_json['discoveryResult']
             binding = _snapshot_binding(task, scopes)
@@ -426,6 +429,9 @@ class TextbookApplyService:
             # task only after acquiring it so a non-current task cannot be
             # deleted while this request waits for the lock.
             task, scopes = await _load_task_and_scopes(db, task_id, for_update=True)
+            if discovery:
+                from plugins.bank.service.plan_work import assert_options
+                assert_options(task.options_json)
             if _snapshot_binding(task, scopes) != binding:
                 raise ServiceException(message='同步教材任务或教材范围在快照读取期间发生变化，请刷新后重试')
             if discovery and (task.options_json or {}).get('discoveryResult'):

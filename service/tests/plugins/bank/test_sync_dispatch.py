@@ -565,7 +565,7 @@ async def test_manual_request_reuses_but_releases_automatic_pause(bank_db, monke
     from plugins.bank.entity.do.bank_do import QbSyncPlan
     from plugins.bank.service import sync_plans as plans
 
-    plan = await plans.save_plan(bank_db, PlanInput(subjectId=1, enabled=False))
+    plan = await plans.save_plan(bank_db, PlanInput(subjectId=1, enabled=True))
     automatic = await SyncTaskService.create_question(
         bank_db, {'versionId': 1, 'textbookId': 1}, 'automatic',
         automatic_options={'autoPlanId': plan['planId'], 'autoCycleNo': 1},
@@ -575,7 +575,8 @@ async def test_manual_request_reuses_but_releases_automatic_pause(bank_db, monke
     row.dispatch_error = '自动计划已暂停，待办保留'
     await bank_db.commit()
     monkeypatch.setenv('BANK_AUTOMATIC_SYNC_ENABLED', '0')
-    manual = await enqueue(bank_db)
+    await plans.save_plan(bank_db,PlanInput(subjectId=1,enabled=False,expectedRevision=plan['revision']))
+    manual = await enqueue(bank_db, allowPaused=True)
     assert manual['taskId'] == automatic['taskId']
     row = await bank_db.get(QbSyncJob, manual['taskId'], populate_existing=True)
     assert await plans.automatic_task_reason(bank_db, row) is None
@@ -588,7 +589,7 @@ async def test_paused_automatic_queue_does_not_starve_later_manual_book(bank_db,
     from plugins.bank.controller.sync_plan_controller import PlanInput
     from plugins.bank.service import sync_plans as plans
 
-    plan = await plans.save_plan(bank_db, PlanInput(subjectId=1, enabled=False))
+    plan = await plans.save_plan(bank_db, PlanInput(subjectId=1, enabled=True))
     now = datetime(2026, 10, 10, 0, 0, 0)
     for book_id in range(3, 15):
         bank_db.add(QbTextbook(textbook_id=book_id, subject_id=1, version_id=1,
@@ -598,7 +599,8 @@ async def test_paused_automatic_queue_does_not_starve_later_manual_book(bank_db,
     for book_id in range(3, 15):
         await SyncTaskService.create_question(bank_db, {'versionId': 1, 'textbookId': book_id},
             'automatic', automatic_options={'autoPlanId': plan['planId'], 'autoCycleNo': 1})
-    manual = await enqueue(bank_db)
+    await plans.save_plan(bank_db,PlanInput(subjectId=1,enabled=False,expectedRevision=plan['revision']))
+    manual = await enqueue(bank_db, allowPaused=True)
     clock = [now]
     async def current(_db):
         return clock[0]
@@ -650,14 +652,14 @@ async def test_manual_promotion_keeps_source_delay_and_emergency_pause(bank_db, 
     from plugins.bank.entity.do.bank_do import QbSyncControl
     from plugins.bank.service import sync_plans as plans
 
-    plan = await plans.save_plan(bank_db, PlanInput(subjectId=1, enabled=False))
+    plan = await plans.save_plan(bank_db, PlanInput(subjectId=1, enabled=True))
     auto = await SyncTaskService.create_question(bank_db, {'versionId': 1, 'textbookId': 1},
         'automatic', automatic_options={'autoPlanId': plan['planId'], 'autoCycleNo': 1})
     row = await bank_db.get(QbSyncJob, auto['taskId'])
     delay = await dispatch._clock(bank_db) + timedelta(minutes=5)
     row.dispatch_not_before, row.dispatch_error = delay, '来源冷却'
     await bank_db.commit()
-    await enqueue(bank_db)
+    await enqueue(bank_db, allowPaused=True)
     assert row.dispatch_not_before == delay and row.dispatch_error == '来源冷却'
     assert await dispatch.claim_next(bank_db) is None
     row.dispatch_not_before = None

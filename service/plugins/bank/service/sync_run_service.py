@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 from uuid import uuid4
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from config.database import DataSourceRegistry
@@ -39,6 +39,7 @@ from plugins.bank.entity.vo.bank_vo import (
     SyncRunStartRequestModel,
 )
 from plugins.bank.service.collector_client import CollectorClient
+from plugins.bank.service.plan_work import allowed_condition
 from plugins.bank.service.question_apply_service import _normalise_snapshot_summary
 
 if TYPE_CHECKING:
@@ -3120,6 +3121,26 @@ class SyncRunService:
             raise ServiceException(message='题库任务必须持久化教材范围')
         if run_type == 'content' and options.get('workflowVersion', 2) >= 2 and len(selected) != 1:
             raise ServiceException(message='新同步任务必须且只能选择一本教材')
+        plan_id=options.get('autoPlanId') or options.get('manualPlanId')
+        rank=0
+        if plan_id:
+            from plugins.bank.entity.do.bank_do import QbSyncPlan
+            plan=await db.get(QbSyncPlan,int(plan_id),with_for_update=True,populate_existing=True)
+            if plan is None:
+                raise ServiceException(message='所属学科计划不存在')
+            if plan.control_state in ('pausing','ending'):
+                raise ServiceException(message='学科计划正在停止')
+            if not plan.enabled or plan.control_state=='paused':
+                if not options.get('allowWhilePlanPaused'):
+                    raise ServiceException(message='学科计划已暂停，请确认仅执行这一次单本同步')
+            order=plan.textbook_order or []
+            local_id=_scope_field(selected_scope_rows[0],'local_textbook_id','localTextbookId') if selected_scope_rows else None
+            rank=order.index(local_id) if local_id in order else len(order)
+        priority=0
+        if options.get('resumeFirst'):
+            priority=(await db.scalar(select(func.max(QbSyncJob.dispatch_priority))) or 0)+1
+        options['planWorkPaused']=False
+        options['planWorkEnded']=False
         dispatch_key = None
         if defer_dispatch:
             from plugins.bank.service.sync_dispatch import (
@@ -3135,7 +3156,7 @@ class SyncRunService:
                 existing = await existing_book_task(db, dispatch_key, limit_to_1000_pages=False)
                 if existing is not None:
                     if not options.get('autoPlanId'):
-                        await request_manual_dispatch(db, existing, operator)
+                        await request_manual_dispatch(db, existing, operator, allow_paused=bool(options.get('allowWhilePlanPaused')))
                     return _status_from_row(existing) or {}
             elif task_module == 'question' and options.get('workflowVersion') == 2 and len(selected_scope_rows) == 1:
                 local_book_id = _scope_field(selected_scope_rows[0], 'local_textbook_id', 'localTextbookId')
@@ -3145,7 +3166,7 @@ class SyncRunService:
                 existing = await existing_book_task(db, dispatch_key, limit_to_1000_pages=options.get('limitTo1000Pages', False))
                 if existing is not None:
                     if not options.get('autoPlanId'):
-                        await request_manual_dispatch(db, existing, operator)
+                        await request_manual_dispatch(db, existing, operator, allow_paused=bool(options.get('allowWhilePlanPaused')))
                     return _status_from_row(existing, await SyncTaskDao.scopes(db, existing.run_id)) or {}
                 legacy = await legacy_unsettled_book_task(db, int(options['subjectId']), PROVIDER, selected[0])
                 if legacy is not None:
@@ -3168,6 +3189,8 @@ class SyncRunService:
             subject_id=int(options['subjectId']),
             active_slot=None if defer_dispatch else '1',
             dispatch_book_key=dispatch_key,
+            dispatch_rank=-1 if task_module=='textbook' else rank,
+            dispatch_priority=priority,
             dispatch_job_id=str(uuid4()) if defer_dispatch else None,
             created_by=operator,
             create_time=datetime.now(),
@@ -3206,7 +3229,7 @@ class SyncRunService:
                 existing = await existing_book_task(db, dispatch_key, limit_to_1000_pages=options.get('limitTo1000Pages', False))
                 if existing is not None:
                     if not options.get('autoPlanId'):
-                        await request_manual_dispatch(db, existing, operator)
+                        await request_manual_dispatch(db, existing, operator, allow_paused=bool(options.get('allowWhilePlanPaused')))
                     return _status_from_row(existing, await SyncTaskDao.scopes(db, existing.run_id)) or {}
             raise ServiceException(message='已有同步任务正在运行，请等待当前任务完成') from exc
 
@@ -3787,6 +3810,7 @@ class SyncRunService:
             result = await db.execute(
                 select(QbSyncJob)
                 .where(
+                    allowed_condition(),
                     QbSyncJob.task_module == 'question',
                     QbSyncJob.status == 'interrupted',
                 )

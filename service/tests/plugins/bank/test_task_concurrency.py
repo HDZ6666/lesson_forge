@@ -16,13 +16,13 @@ from tests.plugins.bank.test_incremental_merge import bank_db as bank_db
 async def test_precedence_snapshot_edit_and_dispatched_lock(bank_db, monkeypatch):
     monkeypatch.setenv('BANK_DEFAULT_LIST_CONCURRENCY', '2')
     assert (await task_concurrency.resolve(bank_db, 1))['listConcurrency'] == 2
-    plan = await sync_plans.save_plan(bank_db, PlanInput(subjectId=1, listConcurrency=4))
+    plan = await sync_plans.save_plan(bank_db, PlanInput(subjectId=1, enabled=True, listConcurrency=4))
     a = await SyncTaskService.create_question(bank_db, {'versionId':1, 'textbookId':1})
     b = await SyncTaskService.create_question(bank_db, {'versionId':1, 'textbookId':2, 'listConcurrency':1})
     rowa, rowb = await bank_db.get(QbSyncJob,a['taskId']), await bank_db.get(QbSyncJob,b['taskId'])
     assert rowa.options_json['listConcurrency'] == 4 and rowa.options_json['concurrencySource'] == 'plan'
     assert rowb.options_json['listConcurrency'] == 1 and rowb.options_json['concurrencySource'] == 'task'
-    await sync_plans.save_plan(bank_db, PlanInput(subjectId=1, expectedRevision=plan['revision'], listConcurrency=8))
+    await sync_plans.save_plan(bank_db, PlanInput(subjectId=1, enabled=True, expectedRevision=plan['revision'], listConcurrency=8))
     assert rowa.options_json['listConcurrency'] == 4
     old = task_payload(rowa)['concurrencyToken']
     await task_concurrency.update_waiting(bank_db,rowa.run_id,TaskConcurrencyUpdate(listConcurrency=2,expectedToken=old))

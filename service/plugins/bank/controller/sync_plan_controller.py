@@ -31,6 +31,7 @@ class PlanInput(BankModel):
     plan_name: str | None = Field(default=None, min_length=1, max_length=100)
     subject_id: int = Field(gt=0)
     expected_revision: int | None = Field(default=None, gt=0)
+    auto_update: bool = True
     enabled: bool = False
     refresh_days: int = Field(default=7, ge=1, le=365)
     refill_hours: int = Field(default=24, ge=1, le=720)
@@ -73,6 +74,46 @@ async def save_plan(payload: PlanInput, db: DB) -> Response:
 @sync_plan_controller.post('/plans/{plan_id}/discovery/retry', dependencies=[UserInterfaceAuthDependency('bank:sync:plans:edit')])
 async def retry_plan_discovery(plan_id: int, payload: RevisionInput, db: DB) -> Response:
     return ResponseUtil.success(data=await sync_plans.retry_plan_discovery(db, plan_id, payload.expected_revision))
+
+
+class PlanAction(BankModel):
+    expected_revision: int = Field(gt=0)
+    action: Literal['pause','resume','end','start']
+    keep_updates: bool = True
+
+
+class PlanOrder(BankModel):
+    expected_revision: int = Field(gt=0)
+    textbook_ids: list[int] = Field(max_length=10000)
+
+
+class SingleBook(BankModel):
+    expected_revision: int = Field(gt=0)
+    list_concurrency: int | None = Field(default=None,strict=True,ge=1,le=8)
+    allow_paused: bool = False
+
+
+@sync_plan_controller.post('/plans/{plan_id}/action',dependencies=[UserInterfaceAuthDependency('bank:sync:plans:edit')])
+async def plan_action(plan_id:int,payload:PlanAction,db:DB,user:USER)->Response:
+    from plugins.bank.service.plan_control import action
+    return ResponseUtil.success(data=await action(db,plan_id,payload,user.user.user_name))
+
+
+@sync_plan_controller.put('/plans/{plan_id}/order',dependencies=[UserInterfaceAuthDependency('bank:sync:plans:edit')])
+async def plan_order(plan_id:int,payload:PlanOrder,db:DB)->Response:
+    from plugins.bank.service.plan_control import set_order
+    return ResponseUtil.success(data=await set_order(db,plan_id,payload))
+
+
+@sync_plan_controller.post('/plans/{plan_id}/books/{textbook_id}/sync',dependencies=[UserInterfaceAuthDependency('bank:sync:question:add')])
+async def sync_book_once(plan_id:int,textbook_id:int,payload:SingleBook,db:DB,user:USER)->Response:
+    from plugins.bank.service.plan_control import sync_book_once
+    return ResponseUtil.success(data=await sync_book_once(db,plan_id,textbook_id,payload,user.user.user_name))
+
+
+@sync_plan_controller.get('/plans/{plan_id}/history',dependencies=[READ])
+async def plan_history(plan_id:int,db:DB,before:Annotated[int|None,Query(gt=0)]=None)->Response:
+    return ResponseUtil.success(data=await sync_plans.cycle_history(db,plan_id,before))
 
 
 @sync_plan_controller.get('/plans/{plan_id}/books', dependencies=[READ])

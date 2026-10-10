@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import exists, func, or_, select
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import aliased
 
 from config.database import DataSourceRegistry
 from exceptions.exception import ServiceException
@@ -29,6 +30,7 @@ from plugins.bank.entity.do.bank_do import (
 from plugins.bank.service.collector_client import CollectorClient
 from plugins.bank.service.import_dates import utc_datetime
 from plugins.bank.service.incremental_import import _clock
+from plugins.bank.service.plan_work import allowed_condition
 from plugins.bank.service.resource_guard import configured_limit, resource_status
 
 TERMINAL = ('completed', 'failed', 'blocked', 'cancelled', 'interrupted')
@@ -68,8 +70,12 @@ def dispatchable_plan_condition(*, manual_only=False):
     plan_id = QbSyncJob.options_json['autoPlanId'].as_integer()
     manual = or_(plan_id.is_(None), plan_id == 0,
                  QbSyncJob.options_json['manualDispatchRequested'].as_boolean().is_(True))
+    recovering=aliased(QbSyncJob)
+    same_plan=func.coalesce(recovering.options_json['autoPlanId'].as_integer(),recovering.options_json['manualPlanId'].as_integer()) == func.coalesce(plan_id,QbSyncJob.options_json['manualPlanId'].as_integer())
+    recovery_ready=~exists().where(same_plan,allowed_condition(recovering),
+        recovering.options_json['planResumePending'].as_boolean().is_(True))
     if manual_only or os.getenv('BANK_AUTOMATIC_SYNC_ENABLED') != '1':
-        return manual
+        return manual & allowed_condition() & recovery_ready
     enabled_plan = exists().where(QbSyncPlan.plan_id == plan_id, QbSyncPlan.enabled == 1)
     excluded_book = exists().where(
         QbSyncJobScope.run_id == QbSyncJob.run_id,
@@ -77,24 +83,30 @@ def dispatchable_plan_condition(*, manual_only=False):
         QbSyncBookState.textbook_id == QbSyncJobScope.local_textbook_id,
         or_(QbSyncBookState.enabled == 0, QbSyncBookState.exception_kind.is_not(None)),
     )
-    return or_(manual, enabled_plan & ~excluded_book)
+    return or_(manual, enabled_plan & ~excluded_book) & allowed_condition() & recovery_ready
 
 
-async def request_manual_dispatch(db, row, operator):
-    if not is_automatic_task(row) or row.status != 'queued' or row.active_slot:
+async def request_manual_dispatch(db, row, operator, *, allow_paused=False):
+    if row.status!='queued' or row.active_slot:
         return
-    await db.refresh(row, with_for_update=True)
-    if not is_automatic_task(row) or row.status != 'queued' or row.active_slot:
+    await db.refresh(row,with_for_update=True)
+    if row.status!='queued' or row.active_slot:
+        return
+    options=dict(row.options_json or {})
+    if options.get('planWorkEnded'):
+        raise ServiceException(message='本轮已结束，请重新创建单本任务')
+    if options.get('planWorkPaused') and not allow_paused:
+        raise ServiceException(message='计划已暂停，请确认仅执行这一次')
+    if not is_automatic_task(row) and not options.get('planWorkPaused'):
         return
     from plugins.bank.service.sync_plans import automatic_task_reason
-    previous_reason = await automatic_task_reason(db, row)
-    row.options_json = {**(row.options_json or {}), 'manualDispatchRequested': True,
-                        'manualDispatchRequestedBy': operator}
-    # Only remove a plan-pause delay. Source cooldowns and host/import delays
-    # remain effective, as do all normal dispatch checks.
-    if previous_reason and row.dispatch_error == previous_reason:
-        row.dispatch_error = None
-        row.dispatch_not_before = None
+    previous_reason=await automatic_task_reason(db,row)
+    options.update(manualDispatchRequested=True,manualDispatchRequestedBy=operator)
+    if allow_paused:
+        options.update(planWorkPaused=False,allowWhilePlanPaused=True)
+    row.options_json=options
+    if previous_reason and row.dispatch_error==previous_reason:
+        row.dispatch_error=None;row.dispatch_not_before=None
     await db.commit()
 
 
@@ -111,7 +123,7 @@ async def legacy_unsettled_book_task(db, subject_id, provider, external_id):
     """Older tasks have no book key; preserve their unfinished business work."""
     busy_import = exists().where(
         QbQuestionImport.task_id == QbSyncJob.run_id,
-        QbQuestionImport.status.in_(('queued', 'preparing', 'running')),
+        QbQuestionImport.status.in_(('queued', 'preparing', 'running', 'paused')),
     )
     busy_intake = exists().where(
         QbQuestionImportIntake.scope_id == QbSyncJobScope.scope_id,
@@ -145,7 +157,7 @@ async def release_finished_books(db) -> int:
     """Retain book reservation until intake/import and bounded resume settle."""
     busy_import = exists().where(
         QbQuestionImport.task_id == QbSyncJob.run_id,
-        QbQuestionImport.status.in_(('queued', 'preparing', 'running')),
+        QbQuestionImport.status.in_(('queued', 'preparing', 'running', 'paused')),
     )
     busy_scope = exists().where(
         QbSyncJobScope.run_id == QbSyncJob.run_id,
@@ -169,7 +181,8 @@ async def release_finished_books(db) -> int:
         QbSyncJob.dispatch_book_key.is_not(None), QbSyncJob.status.in_(TERMINAL),
         QbSyncJob.active_slot.is_(None), ~busy_import, ~busy_scope,
         func.coalesce(QbSyncJob.options_json['autoResumePending'].as_boolean(), False).is_(False),
-    ).order_by(QbSyncJob.run_id).limit(100).with_for_update()
+        func.coalesce(QbSyncJob.options_json['planResumePending'].as_boolean(), False).is_(False),
+    ).order_by(QbSyncJob.dispatch_priority.desc(),QbSyncJob.dispatch_rank,QbSyncJob.run_id).limit(100).with_for_update()
         .execution_options(populate_existing=True))).scalars().all()
     released = 0
     for row in rows:
@@ -244,7 +257,7 @@ async def claim_next(db, *, task_id=None) -> dict | None:
         dispatchable_plan_condition(),
         QbSyncJob.run_id == task_id if task_id is not None else True,
         or_(QbSyncJob.dispatch_not_before.is_(None), QbSyncJob.dispatch_not_before <= due_now),
-    ).order_by(QbSyncJob.run_id).limit(1).with_for_update(skip_locked=True)
+    ).order_by(QbSyncJob.dispatch_priority.desc(),QbSyncJob.dispatch_rank,QbSyncJob.run_id).limit(1).with_for_update(skip_locked=True)
         .execution_options(populate_existing=True))).scalars().first()
     if row is None:
         return None
@@ -275,7 +288,7 @@ async def claim_next(db, *, task_id=None) -> dict | None:
             QbQuestionImport.subject_id == row.subject_id,
             QbQuestionImport.source_provider == scope.source_provider,
             QbQuestionImport.external_textbook_id == scope.external_textbook_id,
-            QbQuestionImport.status.in_(('queued', 'preparing', 'running')),
+            QbQuestionImport.status.in_(('queued', 'preparing', 'running', 'paused')),
         ).limit(1))
         if busy_import is not None:
             row.dispatch_error = '该教材仍有未结束的分批入库，等待完成后派发'
@@ -329,17 +342,20 @@ async def dispatch_once(*, session_factory=None, client=None) -> int:
             QbSyncJob.dispatch_book_key.is_not(None), QbSyncJob.status == 'queued',
             QbSyncJob.active_slot.is_(None), dispatchable_plan_condition(),
             or_(QbSyncJob.dispatch_not_before.is_(None), QbSyncJob.dispatch_not_before <= await _clock(db)),
-        ).order_by(QbSyncJob.run_id).limit(1))
+        ).order_by(QbSyncJob.dispatch_priority.desc(),QbSyncJob.dispatch_rank,QbSyncJob.run_id).limit(1))
         backlog_reason = None
         if due is not None:
             try:
                 limit = configured_limit('BANK_SYNC_MAX_PENDING_IMPORTS')
                 if limit:
+                    runnable_tasks=select(QbSyncJob.run_id).where(allowed_condition())
                     imports = await db.scalar(select(func.count()).select_from(QbQuestionImport).where(
-                        QbQuestionImport.status.in_(('queued', 'preparing', 'running')),
+                        QbQuestionImport.status.in_(('queued', 'preparing', 'running', 'paused')),
+                        QbQuestionImport.task_id.in_(runnable_tasks),
                     ))
                     intakes = await db.scalar(select(func.count()).select_from(QbQuestionImportIntake).where(
                         QbQuestionImportIntake.status.in_(('pending', 'probing', 'retry')),
+                        QbQuestionImportIntake.task_id.in_(runnable_tasks),
                     ))
                     if imports + intakes >= limit:
                         backlog_reason = '封存核验或分批入库积压已达上限，等待处理后派发'
@@ -388,7 +404,7 @@ async def dispatch_once(*, session_factory=None, client=None) -> int:
                     QbSyncJob.dispatch_book_key.is_not(None), QbSyncJob.status == 'queued',
                     QbSyncJob.active_slot.is_(None), dispatchable_plan_condition(manual_only=True),
                     or_(QbSyncJob.dispatch_not_before.is_(None), QbSyncJob.dispatch_not_before <= await _clock(db)),
-                ).order_by(QbSyncJob.run_id).limit(1))
+                ).order_by(QbSyncJob.dispatch_priority.desc(),QbSyncJob.dispatch_rank,QbSyncJob.run_id).limit(1))
             if due is None:
                 return 0
     for key in ('sourceBudget', 'resources'):
@@ -436,6 +452,8 @@ async def dispatch_once(*, session_factory=None, client=None) -> int:
 async def _loop():
     while True:
         try:
+            from plugins.bank.service.plan_control import reconcile_controls
+            await reconcile_controls(DataSourceRegistry.session)
             from plugins.bank.service.metadata_discovery import merge_completed_discoveries
             await merge_completed_discoveries(session_factory=DataSourceRegistry.session)
             from plugins.bank.service.sync_plans import schedule_once

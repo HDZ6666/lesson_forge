@@ -44,7 +44,7 @@ async def test_cycle_targets_fixed_and_partial_refill_does_not_starve_other_book
     await bank_db.commit()
     await plans.tick_plan(bank_db, result['planId'], client=None)
     state = await bank_db.scalar(select(QbSyncBookState).where(QbSyncBookState.last_task_id == first_id))
-    assert state.last_cycle_no == 1 and state.next_due_at > datetime.utcnow()
+    assert state.last_cycle_no == 1 and state.next_due_at is None
     jobs = list((await bank_db.scalars(select(QbSyncJob).order_by(QbSyncJob.run_id))).all())
     assert len(jobs) == 2 and jobs[-1].options_json['textbookIds'] != jobs[0].options_json['textbookIds']
 
@@ -229,7 +229,7 @@ async def test_new_cycle_rescans_book_instead_of_inheriting_old_page_cursor(bank
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('import_state,accepted,expected_days', [('failed',0,1), ('partial',0,1), ('partial',2,1), ('completed',3,7)])
+@pytest.mark.parametrize('import_state,accepted,expected_days', [('failed',0,7), ('partial',0,7), ('partial',2,7), ('completed',3,7)])
 async def test_cycle_cadence_uses_import_and_usable_outcome(bank_db, monkeypatch, import_state, accepted, expected_days):
     from plugins.bank.entity.do.bank_do import QbSyncJobScope
     from plugins.bank.service.incremental_import import _new_import
@@ -265,6 +265,9 @@ async def test_cycle_cadence_uses_import_and_usable_outcome(bank_db, monkeypatch
         return rows
     monkeypatch.setattr(plans, 'list_books', books)
     plan_id, job_id = plan.plan_id, job.run_id
+    for other in (await bank_db.scalars(select(QbSyncJob).where(QbSyncJob.task_module=='question',QbSyncJob.run_id!=job_id))).all():
+        other.status=other.phase='failed';other.dispatch_book_key=None;other.active_slot=None
+    await bank_db.commit()
     await plans.tick_plan(bank_db, plan_id, client=None)
     await bank_db.refresh(job)
     state = await bank_db.scalar(select(QbSyncBookState).where(QbSyncBookState.last_task_id == job_id))
@@ -279,8 +282,7 @@ async def test_cycle_cadence_uses_import_and_usable_outcome(bank_db, monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_plan_recovers_saved_import_on_next_cycle_without_new_collection(bank_db, monkeypatch):
-    from datetime import timedelta
+async def test_manual_saved_import_retry_preserves_whole_round_deadline(bank_db, monkeypatch):
 
     from plugins.bank.entity.do.bank_do import QbQuestionImport, QbSyncJobScope
     from plugins.bank.service.incremental_import import _new_import
@@ -301,7 +303,8 @@ async def test_plan_recovers_saved_import_on_next_cycle_without_new_collection(b
     await bank_db.commit()
     await plans.tick_plan(bank_db,result['planId'],client=None)
     state=await bank_db.scalar(select(QbSyncBookState).where(QbSyncBookState.textbook_id==1))
-    state.next_due_at=now-timedelta(seconds=1)
+    deadline=(await bank_db.get(QbSyncPlan,result['planId'])).next_cycle_at
+    assert await plans.retry_saved_book_results(bank_db,1,now)
     plan=await bank_db.get(QbSyncPlan,result['planId']);plan.next_check_at=None
     await bank_db.commit()
     await plans.tick_plan(bank_db,result['planId'],client=None)
@@ -321,7 +324,8 @@ async def test_plan_recovers_saved_import_on_next_cycle_without_new_collection(b
     await plans.tick_plan(bank_db,result['planId'],client=None)
     state=await bank_db.scalar(select(QbSyncBookState).where(QbSyncBookState.textbook_id==1))
     job=await bank_db.scalar(select(QbSyncJob).where(QbSyncJob.task_module=='question'))
-    assert job.options_json['planOutcome']['importStatus']=='completed'
+    assert (await bank_db.get(QbSyncPlan,result['planId'])).next_cycle_at==deadline
+    assert (await bank_db.get(QbSyncPlan,result['planId'])).cycle_no==1
     assert 7*86400-5 <= (state.next_due_at-now).total_seconds() <= 7*86400+5
 
 

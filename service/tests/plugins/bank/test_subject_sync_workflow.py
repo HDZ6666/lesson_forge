@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from exceptions.exception import ServiceException
 from plugins.bank.controller.sync_plan_controller import PlanInput
 from plugins.bank.dao.sync_task_dao import SyncTaskDao
-from plugins.bank.entity.do.bank_do import QbSyncBookState, QbSyncJob, QbSyncJobScope, QbSyncPlan
+from plugins.bank.entity.do.bank_do import QbSyncJob, QbSyncJobScope, QbSyncPlan
 from plugins.bank.entity.vo.bank_vo import SyncTaskPageQueryModel
 from plugins.bank.service import sync_dispatch as dispatch
 from plugins.bank.service import sync_plans as plans
@@ -98,9 +98,10 @@ async def test_failed_book_does_not_fail_other_queued_books_and_next_round_is_fr
     await tick(bank_db, plan_id)
     books = await plans.list_books(bank_db, plan_id)
     assert all(b['taskStage'] == 'failed' and b['taskInCurrentCycle'] for b in books)
-    for state in (await bank_db.scalars(select(QbSyncBookState))).all():
-        state.next_due_at = datetime.utcnow() - timedelta(seconds=1)
+    plan=await bank_db.get(QbSyncPlan,plan_id)
+    plan.next_cycle_at=datetime.utcnow()-timedelta(seconds=1)
     await bank_db.commit()
+    monkeypatch.setattr(plans,'_discovery',_ready)
     await tick(bank_db, plan_id)
     next_jobs = list((await bank_db.scalars(select(QbSyncJob).where(QbSyncJob.options_json['autoCycleNo'].as_integer() == 2))).all())
     assert len(next_jobs) == 2
@@ -192,3 +193,7 @@ async def test_discovery_terminal_result_releases_execution_slot_and_preserves_l
     assert row.status == status and row.phase == status and row.active_slot is None
     assert row.finished_at is not None and row.log_tail == '发现26个版本，教材接口HTTP405'
     assert await dispatch.release_finished_books(bank_db) == 1
+
+
+async def _ready(*args,**kwargs):
+    return True

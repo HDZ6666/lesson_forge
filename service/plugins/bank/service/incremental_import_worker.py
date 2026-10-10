@@ -25,6 +25,7 @@ from plugins.bank.service.incremental_import import (
 from plugins.bank.service.incremental_merge import prepare_incremental_verdicts
 from plugins.bank.service.incremental_snapshot import SealedSnapshotReader, check_sealed_snapshot, read_checked_batch
 from plugins.bank.service.large_snapshot_spool import spool_snapshot
+from plugins.bank.service.plan_work import PlanWorkPaused, assert_task
 from plugins.bank.service.question_apply_service import _asset_root, _normalise_snapshot_summary
 from plugins.bank.service.resource_guard import ResourcePressure, assert_resources
 from plugins.bank.service.source_write_lock import SourceWriteBusy
@@ -39,8 +40,10 @@ class PreparationBusy(ServiceException):
     """An expired owner's staging thread has not released its file yet."""
 
 
-def _prepare(ticket: dict[str, Any], client: Any, path: Path, stop: threading.Event) -> dict[str, Any]:
+def _prepare(ticket: dict[str, Any], client: Any, path: Path, stop: threading.Event, paused: threading.Event | None = None) -> dict[str, Any]:
     def progress(*_args):
+        if paused is not None and paused.is_set():
+            raise PlanWorkPaused(message='学科计划暂停，已保留入库断点')
         if stop.is_set():
             raise ServiceException(message='入库准备执行权已失效，停止暂存写入')
         assert_resources(root=path.parent)
@@ -88,15 +91,25 @@ async def execute_incremental_import(
     client = client or CollectorClient()
     path = (root or _asset_root() / 'imports' / 'incremental') / f'import-{ticket["importId"]}.sqlite3'
     stop = threading.Event()
+    paused = threading.Event()
     owner = dict(ticket)
     current = asyncio.current_task()
 
     async def heartbeat():
+        elapsed=0
         try:
             while True:
-                await asyncio.sleep(HEARTBEAT_SECONDS)
+                interval=min(3,HEARTBEAT_SECONDS)
+                await asyncio.sleep(interval)
                 async with session_factory() as db:
-                    await renew_incremental_import(db, owner)
+                    await assert_task(db,owner['taskId'])
+                elapsed+=interval
+                if elapsed>=HEARTBEAT_SECONDS:
+                    elapsed=0
+                    async with session_factory() as db:
+                        await renew_incremental_import(db, owner)
+        except PlanWorkPaused:
+            paused.set()
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -109,7 +122,7 @@ async def execute_incremental_import(
         assert_resources(root=path.parent)
         async with session_factory() as db:
             await advance_incremental_preparation(db, owner, 'checking')
-        report = await asyncio.to_thread(_prepare, owner, client, path, stop)
+        report = await asyncio.to_thread(_prepare, owner, client, path, stop, paused)
         async with session_factory() as db:
             owner.update(await attach_incremental_quality(db, owner, report))
         while not owner['done']:
@@ -129,7 +142,7 @@ async def execute_incremental_import(
         # Expiry recovery will claim a new token; do not turn shutdown into
         # a permanent failure requiring manual retry.
         raise
-    except (SourceWriteBusy, PreparationBusy, ResourcePressure) as exc:
+    except (PlanWorkPaused, SourceWriteBusy, PreparationBusy, ResourcePressure) as exc:
         async with session_factory() as db:
             await defer_incremental_import(db, owner, exc.message)
     except Exception as exc:
@@ -156,6 +169,8 @@ async def dispatch_incremental_imports_once(
         try:
             async with session_factory() as db:
                 ticket = await claim_pending_incremental_import(db, import_id)
+        except PlanWorkPaused:
+            continue
         except ServiceException as exc:
             async with session_factory() as db:
                 await reject_pending_incremental_import(db, import_id, exc.message)

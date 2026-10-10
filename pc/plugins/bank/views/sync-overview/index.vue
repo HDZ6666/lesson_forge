@@ -31,7 +31,7 @@
         <div class="section-heading"><h3>本轮覆盖进度</h3><el-button link type="primary" @click="router.push({path:'/sync-center/plans',query:{subjectId}})">查看学科计划 <el-icon><ArrowRight /></el-icon></el-button></div>
         <div class="cycle-number"><strong>{{ number(summary.cycleAttemptedCount) }}</strong><span>/ {{ number(summary.cycleTargetCount) }} 本已尝试</span></div>
         <el-progress :percentage="cyclePercent" :show-text="false" :stroke-width="8" />
-        <p class="sync-muted">{{ summary.cycleTargetCount ? '每本教材先获得一次采集机会，再按结果安排补齐或刷新。' : '尚未开始本轮同步，请在学科计划中查看发现进度或创建计划。' }}</p>
+        <p class="sync-muted">{{ summary.cycleTargetCount ? '按计划顺序处理全部教材，本轮结束后再计算下一轮时间。' : '尚未开始本轮同步，请在学科计划中查看发现进度或创建计划。' }}</p>
         <div class="mini-stats"><div><strong>{{ activeCount }}</strong><span>执行中任务</span></div><div><strong>{{ number(summary.taskCounts?.queued) }}</strong><span>排队中</span></div><div><strong>{{ number(summary.retryIssueCount) }}</strong><span>自动重试问题</span></div></div>
         <p v-if="control.automaticReason" class="plan-note"><el-icon><InfoFilled /></el-icon>{{ control.automaticReason }}</p>
       </section>

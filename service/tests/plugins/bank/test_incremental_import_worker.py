@@ -296,7 +296,7 @@ async def test_heartbeat_loss_stops_one_owner_but_dispatcher_can_recover(import_
     prepare = worker._prepare
     renew = worker.renew_incremental_import
 
-    def wait_for_loss(_ticket, _client, _path, stop):
+    def wait_for_loss(_ticket, _client, _path, stop, paused=None):
         assert stop.wait(2)
         raise ServiceException(message='测试执行者已停止')
 

@@ -1,6 +1,6 @@
 <template>
   <section class="sync-workflow" aria-label="自动同步流程">
-    <div class="workflow-intro"><strong>只需创建计划，后续自动完成</strong><span>每本教材独立排队，正常成果自动入库，异常在任务中处理。</span></div>
+    <div class="workflow-intro"><strong>只需创建计划，后续自动完成</strong><span>每本教材独立排队，可保存顺序；每轮结束后按设定间隔重新同步。</span></div>
     <ol><li v-for="(step, index) in steps" :key="step.title"><span class="step-number">{{ index + 1 }}</span><div><strong>{{ step.title }}</strong><span>{{ step.description }}</span></div></li></ol>
   </section>
 </template>

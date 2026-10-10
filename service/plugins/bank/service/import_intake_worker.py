@@ -12,11 +12,13 @@ from plugins.bank.service.collector_client import CollectorClient
 from plugins.bank.service.import_intake import (
     claim_import_intake,
     complete_import_intake,
+    defer_plan_intake,
     due_import_intake_ids,
     fail_import_intake,
     register_import_intake,
     unregistered_terminal_scope_ids,
 )
+from plugins.bank.service.plan_work import PlanWorkPaused
 from plugins.bank.service.question_apply_service import _normalise_snapshot_summary, _summary_payload
 from utils.log_util import logger
 
@@ -104,6 +106,9 @@ async def dispatch_import_intakes_once(*, session_factory: Any = None, client: A
         try:
             async with factory() as db:
                 await complete_import_intake(db, ticket, summary)
+        except PlanWorkPaused:
+            async with factory() as db:
+                await defer_plan_intake(db,ticket)
         except ServiceException as exc:
             await _record_failure(factory, ticket, 'identity', exc.message, retryable=False)
         except asyncio.CancelledError:

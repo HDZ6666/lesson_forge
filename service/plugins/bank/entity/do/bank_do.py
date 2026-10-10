@@ -506,6 +506,8 @@ class QbSyncJob(Base):
     source_task_id = Column(BigInteger, nullable=True)
     retry_of_run_id = Column(BigInteger, nullable=True)
     collector_job_id = Column(String(64), nullable=True)
+    dispatch_priority = Column(BigInteger, nullable=False, server_default='0')
+    dispatch_rank = Column(Integer, nullable=False, server_default='0')
     options_json = Column(JSON, nullable=False)
     total_versions = Column(Integer, nullable=False, server_default='0')
     completed_versions = Column(Integer, nullable=False, server_default='0')
@@ -649,7 +651,7 @@ class QbQuestionImport(Base):
         Index('idx_qb_question_import_task', 'task_id', 'import_id'),
         Index('idx_qb_question_import_lease', 'status', 'lease_until'),
         Index('uk_qb_question_import_source_slot', 'active_source_slot', unique=True),
-        CheckConstraint("status IN ('queued','preparing','running','completed','partial','failed')", name='chk_qb_question_import_status'),
+        CheckConstraint("status IN ('queued','preparing','running','completed','partial','failed','paused','cancelled')", name='chk_qb_question_import_status'),
         CheckConstraint('committed_cursor >= 0 AND committed_cursor <= question_count', name='chk_qb_question_import_cursor'),
         {'comment': '封存题库结果的增量入库断点与租约'},
     )
@@ -818,6 +820,12 @@ class QbSyncPlan(Base):
     __table_args__ = (Index('uk_qb_sync_plan_subject', 'subject_id', unique=True),)
     plan_id = Column(BigInteger, primary_key=True, autoincrement=True)
     subject_id = Column(BigInteger, nullable=False)
+    auto_update = Column(SmallInteger, nullable=False, server_default='1')
+    control_state = Column(String(20), nullable=False, server_default='active')
+    cycle_state = Column(String(20), nullable=False, server_default='idle')
+    cycle_finished_at = Column(DateTime, nullable=True)
+    next_cycle_at = Column(DateTime, nullable=True)
+    textbook_order = Column(JSON, nullable=True)
     list_concurrency = Column(Integer, nullable=False, server_default='1')
     plan_name = Column(String(100), nullable=False, server_default='')
     cycle_name = Column(String(180), nullable=True)
@@ -839,6 +847,20 @@ class QbSyncPlan(Base):
     update_time = Column(DateTime, nullable=False)
 
 
+class QbSyncCycle(Base):
+    __tablename__ = 'qb_sync_cycle'
+    __table_args__ = (Index('uk_qb_sync_cycle', 'plan_id', 'cycle_no', unique=True),)
+    cycle_id = Column(BigInteger, primary_key=True, autoincrement=True)
+    plan_id = Column(BigInteger, nullable=False)
+    cycle_no = Column(Integer, nullable=False)
+    cycle_name = Column(String(180), nullable=False)
+    status = Column(String(20), nullable=False)
+    targets = Column(JSON, nullable=False)
+    summary_json = Column(JSON, nullable=True)
+    started_at = Column(DateTime, nullable=False)
+    finished_at = Column(DateTime, nullable=True)
+
+
 class QbSyncBookState(Base):
     __tablename__ = 'qb_sync_book_state'
     __table_args__ = (Index('uk_qb_sync_book_state', 'plan_id', 'textbook_id', unique=True),)
@@ -848,6 +870,7 @@ class QbSyncBookState(Base):
     enabled = Column(SmallInteger, nullable=False, server_default='1')
     exception_kind = Column(String(30), nullable=True)
     operator_note = Column(String(500), nullable=True)
+    last_manual_task_id = Column(BigInteger, nullable=True)
     last_task_id = Column(BigInteger, nullable=True)
     last_cycle_no = Column(Integer, nullable=False, server_default='0')
     next_due_at = Column(DateTime, nullable=True)

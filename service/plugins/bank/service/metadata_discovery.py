@@ -6,13 +6,14 @@ from sqlalchemy import or_, select, update
 
 from plugins.bank.entity.do.bank_do import QbSyncJob, QbSyncPlan
 from plugins.bank.service.incremental_import import _clock
+from plugins.bank.service.plan_work import PlanWorkPaused, allowed_condition
 from plugins.bank.service.textbook_apply_service import TextbookApplyService
 
 
 async def merge_completed_discoveries(*, session_factory):
     async with session_factory() as db:
         ids = list((await db.scalars(select(QbSyncJob.run_id).where(
-            QbSyncJob.task_module == 'textbook', QbSyncJob.status == 'completed',
+            allowed_condition(), QbSyncJob.task_module == 'textbook', QbSyncJob.status == 'completed',
             QbSyncJob.options_json['discoveryMode'].as_string() == 'merge',
             QbSyncJob.options_json['discoveryResult'].is_(None) |
             (QbSyncJob.options_json['discoveryResult'].as_string().is_(None)),
@@ -36,6 +37,9 @@ async def merge_completed_discoveries(*, session_factory):
                     ((QbSyncPlan.discovery_task_id.is_(None)) & (QbSyncPlan.discovery_processed_task_id == task_id))
                 ).values(discovery_error=None))
                 await db.commit()
+            except PlanWorkPaused:
+                await db.rollback()
+                continue
             except Exception as exc:
                 await db.rollback()
                 row = await db.get(QbSyncJob, task_id, with_for_update=True, populate_existing=True)

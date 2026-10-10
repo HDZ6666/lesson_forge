@@ -12,6 +12,7 @@ from plugins.bank.entity.do.bank_do import (
     QbQuestionImportIntake,
     QbSyncBookState,
     QbSyncControl,
+    QbSyncCycle,
     QbSyncJob,
     QbSyncJobScope,
     QbSyncPlan,
@@ -91,6 +92,11 @@ def plan_dump(row):
         'listConcurrency': row.list_concurrency,
         'cycleName': row.cycle_name,
         'enabled': bool(row.enabled),
+        'autoUpdate': bool(row.auto_update),
+        'controlState': row.control_state,
+        'cycleState': row.cycle_state,
+        'cycleFinishedAt': utc_datetime(row.cycle_finished_at),
+        'nextCycleAt': utc_datetime(row.next_cycle_at),
         'refreshDays': row.refresh_days,
         'refillHours': row.refill_hours,
         'discoveryDays': row.discovery_days,
@@ -137,6 +143,7 @@ async def save_plan(db, payload):
             cycle_no=0,
             revision=1,
             enabled=0,
+            auto_update=1,control_state='active' if payload.enabled else 'paused',cycle_state='idle',textbook_order=[],
             update_time=await _clock(db),
         )
         db.add(row)
@@ -147,6 +154,9 @@ async def save_plan(db, payload):
     name = payload.plan_name.strip() if payload.plan_name is not None else row.plan_name or f'{subject.subject_name}同步'
     if not name:
         raise ServiceException(message='计划名称不能为空')
+    row.auto_update=int(payload.auto_update)
+    if row.cycle_state in ('completed','stopped') and row.cycle_finished_at:
+        row.next_cycle_at=row.cycle_finished_at+timedelta(days=payload.refresh_days) if row.auto_update else None
     row.list_concurrency = payload.list_concurrency
     row.plan_name = name
     row.enabled = int(payload.enabled)
@@ -183,9 +193,20 @@ async def list_books(db, plan_id):
         counts.update(await book_stem_counts(db, [book.textbook_id for book, _, _ in books[offset : offset + 500]]))
     targets = set(plan.cycle_targets or [])
     task_progress = await _book_task_progress(db, states.values(), plan.cycle_no)
+    ordered=list(plan.textbook_order or [])
+    fallback=sorted(books,key=lambda item:(item[1]!='Y',item[0].textbook_id))
+    ordered += [book.textbook_id for book,_,_ in fallback if book.textbook_id not in ordered]
+    ranks={id:i for i,id in enumerate(ordered)}
+    books.sort(key=lambda item:ranks[item[0].textbook_id])
+    manual_ids=[state.last_manual_task_id for state in states.values() if state.last_manual_task_id]
+    manual={r.run_id:r for r in (await db.scalars(select(QbSyncJob).where(QbSyncJob.run_id.in_(manual_ids)))).all()} if manual_ids else {}
     return [
         {
             'textbookId': book.textbook_id,
+            'order': ranks[book.textbook_id]+1,
+            'lastFinishedAt': utc_datetime(states[book.textbook_id].last_finished_at) if book.textbook_id in states else None,
+            'manualTaskId': states[book.textbook_id].last_manual_task_id if book.textbook_id in states else None,
+            'manualTaskStatus': manual[states[book.textbook_id].last_manual_task_id].status if book.textbook_id in states and states[book.textbook_id].last_manual_task_id in manual else None,
             'textbookName': book.textbook_name,
             'versionId': book.version_id,
             'versionName': version_name,
@@ -231,6 +252,9 @@ async def _book_task_progress(db, states, cycle_no):
         elif job.status == 'completed':
             stage = 'failed'  # A collected task without import evidence is not finished.
             reason = reason or '采集结束，尚无入库结果'
+        if (job.options_json or {}).get('planWorkPaused') and (job.status not in TERMINAL or (job.options_json or {}).get('planResumePending') or stage in ('checking','importing','paused')):
+            stage='paused'
+            reason='学科计划已暂停，已有成果和断点保留'
         if stage in ('starting', 'running', 'cancelling'):
             stage = 'collecting'
         if stage in ('blocked', 'interrupted'):
@@ -293,7 +317,10 @@ async def save_book_override(db, plan_id, textbook_id, payload):
 
 
 async def automatic_task_reason(db, job):
-    plan_id = (job.options_json or {}).get('autoPlanId')
+    options=job.options_json or {}
+    if options.get('planWorkPaused') or options.get('planWorkEnded'):
+        return '学科计划已暂停' if options.get('planWorkPaused') else '本轮已结束'
+    plan_id = options.get('autoPlanId')
     if not plan_id or (job.options_json or {}).get('manualDispatchRequested'):
         return None
     plan = await db.get(QbSyncPlan, plan_id)
@@ -331,176 +358,116 @@ async def _claim_plan(db, plan_id):
 
 
 async def tick_plan(db, plan_id, *, client):
-    token = await _claim_plan(db, plan_id)
+    token=await _claim_plan(db,plan_id)
     if token is None:
         return
-    plan = await db.get(QbSyncPlan, plan_id, populate_existing=True)
     try:
-        await SubjectService.require(db, plan.subject_id, sync=True)
-        if not plan.cycle_no and await _discovery(db, plan_id, client) is False:
+        plan=await db.get(QbSyncPlan,plan_id,with_for_update=True,populate_existing=True)
+        if plan.control_state!='active':
             return
-        plan = await db.get(QbSyncPlan, plan_id, populate_existing=True)
-        now = await _clock(db)
-        books = await list_books(db, plan_id)
-        # Adopt any task committed before a crash in plan bookkeeping. Its
-        # plan/cycle identity was written in the same transaction as the job.
-        states = {
-            row.textbook_id: row
-            for row in (await db.scalars(select(QbSyncBookState).where(QbSyncBookState.plan_id == plan_id))).all()
-        }
-        for book in books:
-            if book['textbookId'] not in states:
-                row = QbSyncBookState(
-                    plan_id=plan_id, textbook_id=book['textbookId'], enabled=1, last_cycle_no=0, revision=1
-                )
-                db.add(row)
-                states[book['textbookId']] = row
-        jobs = (
-            (
-                await db.scalars(
-                    select(QbSyncJob)
-                    .where(
-                        QbSyncJob.options_json['autoPlanId'].as_integer() == plan_id,
-                        or_(QbSyncJob.options_json['autoCycleNo'].as_integer() == plan.cycle_no,
-                            QbSyncJob.run_id.in_([state.last_task_id for state in states.values() if state.last_task_id])),
-                    )
-                    .order_by(QbSyncJob.run_id)
-                )
-            ).all()
-            if plan.cycle_no
-            else []
-        )
-        scopes = (
-            {
-                scope.run_id: scope
-                for scope in (
-                    await db.scalars(
-                        select(QbSyncJobScope).where(QbSyncJobScope.run_id.in_([job.run_id for job in jobs]))
-                    )
-                ).all()
-            }
-            if jobs
-            else {}
-        )
+        await SubjectService.require(db,plan.subject_id,sync=True)
+        now=await _clock(db)
+        if plan.cycle_state in ('idle','completed','stopped'):
+            if plan.cycle_no and (not plan.auto_update or not plan.next_cycle_at or plan.next_cycle_at>now):
+                return
+            plan.cycle_state='discovering';plan.discovery_next_at=None;plan.discovery_error=None
+            await db.commit()
+        if plan.cycle_state=='discovering':
+            if await _discovery(db,plan_id,client) is False:
+                return
+            plan=await db.get(QbSyncPlan,plan_id,with_for_update=True,populate_existing=True)
+            if not plan.enabled or plan.control_state!='active':
+                return
+            books=await list_books(db,plan_id)
+            states={r.textbook_id:r for r in (await db.scalars(select(QbSyncBookState).where(QbSyncBookState.plan_id==plan_id))).all()}
+            targets=[b['textbookId'] for b in books if b['enabled'] and not b['exceptionKind']]
+            plan.textbook_order=[b['textbookId'] for b in books]
+            plan.cycle_no+=1
+            discovery=await db.get(QbSyncJob,plan.discovery_processed_task_id) if plan.discovery_processed_task_id else None
+            snapshot=(discovery.options_json or {}) if discovery else {}
+            plan.cycle_name=snapshot.get('autoCycleName') if snapshot.get('autoCycleNo')==plan.cycle_no else _cycle_name(plan,now,plan.cycle_no)
+            plan.cycle_targets=targets;plan.cycle_started_at=now;plan.cycle_finished_at=None;plan.next_cycle_at=None
+            plan.cycle_state='running'
+            db.add(QbSyncCycle(plan_id=plan_id,cycle_no=plan.cycle_no,cycle_name=plan.cycle_name,
+                              status='running',targets=targets,started_at=now))
+            for book in books:
+                if book['textbookId'] not in states:
+                    db.add(QbSyncBookState(plan_id=plan_id,textbook_id=book['textbookId'],enabled=1,last_cycle_no=0,revision=1))
+            await db.commit()
+        plan=await db.get(QbSyncPlan,plan_id,with_for_update=True,populate_existing=True)
+        if not plan.enabled or plan.control_state!='active' or plan.cycle_state!='running':
+            return
+        cycle_no,cycle_name,plan_name=plan.cycle_no,plan.cycle_name,plan.plan_name
+        books=await list_books(db,plan_id)
+        states={r.textbook_id:r for r in (await db.scalars(select(QbSyncBookState).where(QbSyncBookState.plan_id==plan_id))).all()}
+        jobs=list((await db.scalars(select(QbSyncJob).where(
+            QbSyncJob.options_json['autoPlanId'].as_integer()==plan_id,
+            QbSyncJob.options_json['autoCycleNo'].as_integer()==cycle_no).order_by(QbSyncJob.run_id))).all())
+        scopes={r.run_id:r for r in (await db.scalars(select(QbSyncJobScope).where(QbSyncJobScope.run_id.in_([j.run_id for j in jobs])))).all()} if jobs else {}
         for job in jobs:
-            scope = scopes.get(job.run_id)
+            scope=scopes.get(job.run_id)
             if scope is None or scope.local_textbook_id not in states:
                 continue
-            state = states[scope.local_textbook_id]
-            if state.last_task_id and state.last_task_id > job.run_id:
+            state=states[scope.local_textbook_id]
+            if state.last_task_id and state.last_task_id>job.run_id:
                 continue
-            state.last_task_id = job.run_id
-            if (
-                job.status in TERMINAL
-                and job.active_slot is None
-                and job.dispatch_book_key is None
-            ):
-                imported = await db.scalar(select(QbQuestionImport).where(
-                    QbQuestionImport.task_id == job.run_id,
-                    QbQuestionImport.collector_run_id == scope.collector_run_id,
-                ).order_by(QbQuestionImport.import_id.desc()).limit(1))
-                usable = next((b['usableQuestionCount'] for b in books if b['textbookId'] == scope.local_textbook_id), 0)
-                complete = bool(job.snapshot_complete and job.status == 'completed' and imported
-                                and imported.status == 'completed' and imported.accepted_count > 0 and usable > 0)
-                outcome = {'scanComplete': bool(job.snapshot_complete),
-                           'importStatus': imported.status if imported else 'missing',
-                           'acceptedCount': imported.accepted_count if imported else 0, 'usableQuestionCount': usable,
-                           'needsRefill': not complete}
-                task_cycle = int((job.options_json or {}).get('autoCycleNo', 0))
-                new_attempt = state.last_cycle_no < task_cycle
-                if new_attempt or (job.options_json or {}).get('planOutcome') != outcome:
-                    state.last_cycle_no = max(state.last_cycle_no, task_cycle)
-                    state.last_finished_at = now
-                    job.options_json = {**(job.options_json or {}), 'planOutcome': outcome}
-                    state.next_due_at = now + (timedelta(days=plan.refresh_days) if complete else timedelta(hours=plan.refill_hours))
-        eligible = [
-            book
-            for book in books
-            if states[book['textbookId']].enabled and not states[book['textbookId']].exception_kind
-        ]
-        targets = plan.cycle_targets or []
-        pending = [
-            book
-            for book in eligible
-            if book['textbookId'] in targets and states[book['textbookId']].last_cycle_no < plan.cycle_no
-        ]
+            state.last_task_id=job.run_id
+            if job.status in TERMINAL and job.active_slot is None and job.dispatch_book_key is None and not (job.options_json or {}).get('planResumePending'):
+                imported=await db.scalar(select(QbQuestionImport).where(QbQuestionImport.task_id==job.run_id,
+                    QbQuestionImport.collector_run_id==scope.collector_run_id).limit(1))
+                usable=next((b['usableQuestionCount'] for b in books if b['textbookId']==scope.local_textbook_id),0)
+                complete=bool(job.snapshot_complete and job.status=='completed' and imported
+                              and imported.status=='completed' and imported.accepted_count>0 and usable>0)
+                outcome={'scanComplete':bool(job.snapshot_complete),'importStatus':imported.status if imported else 'missing',
+                         'acceptedCount':imported.accepted_count if imported else 0,'usableQuestionCount':usable,'needsRefill':not complete}
+                if state.last_cycle_no<cycle_no or (job.options_json or {}).get('planOutcome')!=outcome:
+                    state.last_cycle_no=cycle_no;state.last_finished_at=now
+                    job.options_json={**(job.options_json or {}),'planOutcome':outcome}
+        targets=set(plan.cycle_targets or [])
+        eligible=[b for b in books if b['textbookId'] in targets and b['enabled'] and not b['exceptionKind']]
+        pending=[b for b in eligible if states[b['textbookId']].last_cycle_no<cycle_no]
         if not pending:
-            if plan.cycle_no and await _discovery(db, plan_id, client) is False:
-                return
-            plan = await db.get(QbSyncPlan, plan_id, populate_existing=True)
-            due = [
-                book
-                for book in eligible
-                if states[book['textbookId']].next_due_at is None or states[book['textbookId']].next_due_at <= now
-            ]
-            if due:
-                plan.cycle_no += 1
-                discovery = await db.get(QbSyncJob, plan.discovery_processed_task_id) if plan.discovery_processed_task_id else None
-                snapshot = (discovery.options_json or {}) if discovery else {}
-                plan.cycle_name = (snapshot.get('autoCycleName') if snapshot.get('autoCycleNo') == plan.cycle_no else None) or _cycle_name(plan, now, plan.cycle_no)
-                plan.cycle_targets = [book['textbookId'] for book in due]
-                plan.cycle_started_at = now
-                pending = due
-                targets = plan.cycle_targets
-        cycle_no = plan.cycle_no
-        cycle_name = plan.cycle_name
-        plan_name = plan.plan_name
-        refill_hours = plan.refill_hours
+            plan.cycle_state='completed';plan.cycle_finished_at=now
+            plan.next_cycle_at=now+timedelta(days=plan.refresh_days) if plan.auto_update else None
+            cycle=await db.scalar(select(QbSyncCycle).where(QbSyncCycle.plan_id==plan_id,QbSyncCycle.cycle_no==cycle_no))
+            if cycle:
+                cycle.status='completed';cycle.finished_at=now
+                cycle.summary_json={'targetCount':len(targets),'handledCount':len(eligible),
+                    'completeCount':sum(1 for b in eligible if any(j.run_id==states[b['textbookId']].last_task_id and not (j.options_json or {}).get('planOutcome',{}).get('needsRefill',True) for j in jobs))}
+            for state in states.values():
+                if state.textbook_id in targets:
+                    state.next_due_at=plan.next_cycle_at
+            await db.commit()
+            return
         await db.commit()
-        # Existing manual/automatic work on one book must not keep the
-        # planner from queuing other targets. The original cycle stays fixed.
-        busy_books = set(
-            (
-                await db.scalars(
-                    select(QbSyncJobScope.local_textbook_id)
-                    .join(QbSyncJob, QbSyncJob.run_id == QbSyncJobScope.run_id)
-                    .where(or_(QbSyncJob.dispatch_book_key.is_not(None), QbSyncJob.status.not_in(TERMINAL)))
-                )
-            ).all()
-        )
-        pending = [book for book in pending if book['textbookId'] not in busy_books]
-        if pending:
-            # Persist the full finite queue: new editions first, then old.
-            pending.sort(
-                key=lambda book: (
-                    not book['isNew'],
-                    book['usableQuestionCount'] > 0,
-                    book['lastCycleNo'],
-                    book['textbookId'],
-                )
-            )
-            from plugins.bank.service.task_service import SyncTaskService
-
-            for book in pending:
-                held = await retry_saved_book_results(db, book['textbookId'], now)
-                if held:
-                    state = await db.scalar(select(QbSyncBookState).where(
-                        QbSyncBookState.plan_id == plan_id, QbSyncBookState.textbook_id == book['textbookId']))
-                    state.last_cycle_no = cycle_no
-                    state.next_due_at = now + timedelta(hours=refill_hours)
-                    await db.commit()
-                    continue
-                # Each new cycle observes current pages. Explicit task resume
-                # remains available, but a new cycle is not an old page cursor.
-                result = await SyncTaskService.create_question(
-                    db, {'versionId': book['versionId'], 'textbookId': book['textbookId']},
-                    operator='automatic',
-                    automatic_options={'autoPlanId': plan_id, 'autoCycleNo': cycle_no,
-                                       'autoCycleName': cycle_name, 'autoPlanName': plan_name},
-                )
-                state = await db.scalar(select(QbSyncBookState).where(
-                    QbSyncBookState.plan_id == plan_id, QbSyncBookState.textbook_id == book['textbookId']))
-                state.last_task_id = result.get('taskId') or result['runId']
-                await db.commit()
+        busy=set((await db.scalars(select(QbSyncJobScope.local_textbook_id).join(QbSyncJob,QbSyncJob.run_id==QbSyncJobScope.run_id)
+                  .where(or_(QbSyncJob.dispatch_book_key.is_not(None),QbSyncJob.status.not_in(TERMINAL))))).all())
+        from plugins.bank.service.task_service import SyncTaskService
+        for book in pending:
+            if book['textbookId'] in busy:
+                continue
+            result=await SyncTaskService.create_question(db,{'versionId':book['versionId'],'textbookId':book['textbookId']},
+                operator='automatic',automatic_options={'autoPlanId':plan_id,'autoCycleNo':cycle_no,
+                'autoCycleName':cycle_name,'autoPlanName':plan_name})
+            state=await db.scalar(select(QbSyncBookState).where(QbSyncBookState.plan_id==plan_id,QbSyncBookState.textbook_id==book['textbookId']))
+            state.last_task_id=result.get('taskId') or result['runId']
+            await db.commit()
     finally:
         await db.rollback()
-        now = await _clock(db)
-        await db.execute(
-            update(QbSyncPlan)
-            .where(QbSyncPlan.plan_id == plan_id, QbSyncPlan.worker_token == token)
-            .values(worker_token=None, lease_until=None, next_check_at=now + timedelta(seconds=30), update_time=now)
-        )
+        now=await _clock(db)
+        await db.execute(update(QbSyncPlan).where(QbSyncPlan.plan_id==plan_id,QbSyncPlan.worker_token==token)
+                         .values(worker_token=None,lease_until=None,next_check_at=now+timedelta(seconds=30),update_time=now))
         await db.commit()
+
+
+async def cycle_history(db,plan_id,before=None):
+    query=select(QbSyncCycle).where(QbSyncCycle.plan_id==plan_id)
+    if before:query=query.where(QbSyncCycle.cycle_no<before)
+    rows=(await db.scalars(query.order_by(QbSyncCycle.cycle_no.desc()).limit(21))).all()
+    return {'rows':[{'cycleNo':r.cycle_no,'cycleName':r.cycle_name,'status':r.status,
+                    'targetCount':len(r.targets or []),'summary':r.summary_json or {},
+                    'startedAt':utc_datetime(r.started_at),'finishedAt':utc_datetime(r.finished_at)} for r in rows[:20]],
+            'nextCursor':rows[19].cycle_no if len(rows)>20 else None}
 
 
 def _cycle_name(plan, now, number):

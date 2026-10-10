@@ -159,6 +159,8 @@ export function questionTaskMeaning(task = {}) {
 
 export function incrementalImportMeta(task = {}) {
   const status = task.incrementalImport?.status
+  if (status === 'paused') return { type: 'info', label: '入库已暂停', message: '计划已暂停，已提交批次和剩余断点保留，继续计划后恢复。' }
+  if (status === 'cancelled') return { type: 'info', label: '本轮已停止入库', message: '已提交题目保留，本轮剩余成果不再自动处理。' }
   if (status === 'queued') return { type: 'info', label: '等待入库', message: '后台将准备本次封存成果，页面可以关闭。' }
   if (status === 'preparing') return { type: 'warning', label: '入库准备中', message: '后台正在读取封存成果并检查题目，尚未检查完成的题目不会写入正式题库。' }
   if (status === 'running') return { type: 'warning', label: '分批入库中', message: '合格批次逐步合并，已提交的成果会保留。' }
@@ -174,6 +176,8 @@ export function incrementalImportMeta(task = {}) {
 }
 
 export function questionTaskStatusMeta(task = {}) {
+  if (task.planPaused && (isActiveSyncTask(task.status) || task.collectionResumePending || ['queued','preparing','running','paused'].includes(task.incrementalImport?.status) || ['pending','probing','retry'].includes(task.importIntake?.status))) return {type:'info',label:'计划已暂停'}
+  if (task.planEnded && task.incrementalImport?.status==='cancelled') return {type:'info',label:'本轮已结束'}
   if (!isActiveSyncTask(task.status) && task.workflowVersion === 2 &&
       (task.incrementalImport || task.importIntake || task.awaitingImportIntake)) return incrementalImportMeta(task)
   return syncTaskStatusMeta(task.status)

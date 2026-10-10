@@ -442,6 +442,9 @@ def task_payload(row: object, scopes: list[object] | None = None) -> dict[str, A
         'sourceTaskId': _pick(row, 'source_task_id', 'sourceTaskId'),
         'retryOfRunId': _pick(row, 'retry_of_run_id', 'retryOfRunId'),
         **task_concurrency.snapshot(options),
+        'planPaused': bool(options.get('planWorkPaused')),
+        'planEnded': bool(options.get('planWorkEnded')),
+        'collectionResumePending': bool(options.get('planResumePending')),
         'concurrencyToken': task_concurrency.token(options),
         'concurrencyEditable': str(_pick(row, 'status')) == 'queued' and bool(_pick(row, 'dispatch_job_id')) and not _pick(row, 'active_slot') and not _pick(row, 'collector_job_id'),
         'autoPlanId': options.get('autoPlanId'),
@@ -1482,7 +1485,8 @@ class SyncTaskService:
             scope_rows=retry_scopes,
             defer_dispatch=int(options.get('workflowVersion', 1)) >= 2,
             extra_options={
-                **concurrency,
+                **{k:v for k,v in options.items() if k in ('autoPlanId','autoPlanName','autoCycleNo','autoCycleName','manualPlanId','manualSingle','manualDispatchRequested','allowWhilePlanPaused','resumeFirst')},
+                **task_concurrency.snapshot(concurrency),
                 'workflowVersion': int(options.get('workflowVersion', 1)),
                 'subjectId': int(_pick(row, 'subject_id', 'subjectId', default=1) or 1),
                 'versionId': int(version_id),
@@ -1645,6 +1649,10 @@ class SyncTaskService:
         )
         version, books = await cls._resolve_question_scope(db, request)
         concurrency = await task_concurrency.resolve(db, int(_pick(version, 'subject_id', 'subjectId', default=1) or 1), request.list_concurrency)
+        plan=await task_concurrency.find_plan(db,int(_pick(version,'subject_id',default=1) or 1))
+        plan_options={'manualPlanId':plan.plan_id,'manualSingle':True,'manualDispatchRequested':True,
+                      'allowWhilePlanPaused':request.allow_paused} if plan and not automatic_options else {}
+
         scope_rows: list[dict[str, Any]] = []
         external_ids: list[str] = []
         for book in books:
@@ -1704,8 +1712,9 @@ class SyncTaskService:
             source_task_id=None,
             scope_rows=scope_rows,
             extra_options={
+                **plan_options,
                 **(automatic_options or {}),
-                **concurrency,
+                **task_concurrency.snapshot(concurrency),
                 'workflowVersion': 2,
                 'subjectId': int(_pick(version, 'subject_id', 'subjectId', default=1) or 1),
                 'sourceProfile': 'zujuan_czsx',

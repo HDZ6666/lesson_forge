@@ -29,6 +29,7 @@ from plugins.bank.service.incremental_import import (
     attach_coverage_evidence,
     import_status,
 )
+from plugins.bank.service.plan_work import allowed_condition, assert_options
 from plugins.bank.service.question_apply_service import _coerce_datetime
 
 INTAKE_LEASE_SECONDS = 60
@@ -90,7 +91,7 @@ async def register_import_intake(db: Any, scope_id: int) -> dict[str, Any] | Non
             now = await _clock(db)
             row = QbQuestionImportIntake(
                 task_id=task.run_id, scope_id=scope_id, collector_run_id=scope.collector_run_id,
-                binding_hash=_digest(_descriptor(task, scope)), status='pending',
+                binding_hash=_digest(_descriptor(task, scope)), status='discarded' if (task.options_json or {}).get('planWorkEnded') else 'pending',
                 attempt_count=0, attempt_limit=INTAKE_MAX_ATTEMPTS, create_time=now, update_time=now,
             )
             db.add(row)
@@ -129,9 +130,9 @@ async def unregistered_terminal_scope_ids(db: Any, *, limit: int = 25) -> list[i
 
 async def due_import_intake_ids(db: Any, *, limit: int = 10) -> list[int]:
     now = await _clock(db)
-    return list((await db.scalars(select(QbQuestionImportIntake.intake_id).join(
-        QbSubject, QbSubject.subject_id == 1,
-    ).where(QbSubject.status == '0', QbSubject.source_profile == 'zujuan_czsx', or_(
+    return list((await db.scalars(select(QbQuestionImportIntake.intake_id).join(QbSyncJob,QbSyncJob.run_id==QbQuestionImportIntake.task_id).join(
+        QbSubject, QbSubject.subject_id == QbSyncJob.subject_id,
+    ).where(allowed_condition(), QbSubject.subject_id == 1, QbSubject.status == '0', QbSubject.source_profile == 'zujuan_czsx', or_(
         QbQuestionImportIntake.status == 'pending',
         (QbQuestionImportIntake.status == 'retry') & (QbQuestionImportIntake.next_attempt_at <= now),
         (QbQuestionImportIntake.status == 'probing') & (QbQuestionImportIntake.lease_until <= now),
@@ -178,6 +179,7 @@ async def claim_import_intake(db: Any, intake_id: int) -> dict[str, Any] | None:
             await record_runtime_failure(db, row, stage='intake', message=exc.message, now=now)
             await db.commit()
             return None
+        assert_options(task.options_json)
         book = await db.get(QbTextbook, scope.local_textbook_id, with_for_update=True, populate_existing=True)
         if (
             book is None or book.subject_id != 1 or book.status != '0'
@@ -229,6 +231,7 @@ async def complete_import_intake(db: Any, ticket: dict[str, Any], summary: dict[
         now = await _clock(db)
         _owned(row, ticket, now)
         task, scope = await _binding(db, row.scope_id, require_seal=False)
+        assert_options(task.options_json)
         if _digest(_descriptor(task, scope)) != row.binding_hash:
             raise ServiceException(message='采集运行绑定在核验期间发生变化，不能提交旧成果')
         lock = summary.get('snapshot_locked_at') or _coerce_datetime(
@@ -356,3 +359,16 @@ async def retry_import_intake(db: Any, task_id: int) -> dict[str, Any]:
     except BaseException:
         await db.rollback()
         raise
+
+
+async def defer_plan_intake(db, ticket):
+    _fresh_transaction(db)
+    row=await db.get(QbQuestionImportIntake,ticket['intakeId'],with_for_update=True,populate_existing=True)
+    now=await _clock(db)
+    _owned(row,ticket,now)
+    task=await db.get(QbSyncJob,row.task_id)
+    row.status='discarded' if (task.options_json or {}).get('planWorkEnded') else 'pending'
+    row.attempt_count=max(0,row.attempt_count-1)
+    _release(row)
+    row.update_time=now
+    await db.commit()

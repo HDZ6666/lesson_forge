@@ -699,6 +699,7 @@ class TaskConcurrencyUpdate(TaskConcurrencyInput):
 
 
 class QuestionTaskCreateModel(TaskConcurrencyInput):
+    allow_paused: bool = False
     """Create a question task from one formal version and its textbooks.
 
     No collector identifiers, URLs, commands, or acknowledgement switches

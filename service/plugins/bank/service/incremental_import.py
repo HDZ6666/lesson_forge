@@ -24,6 +24,7 @@ from plugins.bank.entity.do.bank_do import (
 from plugins.bank.service.import_dates import utc_datetime
 from plugins.bank.service.incremental_merge import MAX_MERGE_QUESTIONS, merge_prepared_incremental_batch
 from plugins.bank.service.incremental_snapshot import QC_FORMAT
+from plugins.bank.service.plan_work import allowed_condition, assert_options
 from plugins.bank.service.question_apply_service import (
     _coerce_datetime,
     _empty_stats,
@@ -297,8 +298,8 @@ async def _claim_source_slot(db: Any, row: QbQuestionImport, now: Any) -> bool:
 async def pending_incremental_import_ids(db: Any, *, limit: int = 10) -> list[int]:
     """Expired owners come first so their source slot can be recovered."""
     now = await _clock(db)
-    return list((await db.scalars(select(QbQuestionImport.import_id).where(or_(
-        QbQuestionImport.status == 'queued',
+    return list((await db.scalars(select(QbQuestionImport.import_id).join(QbSyncJob, QbSyncJob.run_id == QbQuestionImport.task_id).where(allowed_condition(), or_(
+        QbQuestionImport.status.in_(['queued','paused']),
         QbQuestionImport.status.in_(['preparing', 'running']) & (QbQuestionImport.lease_until <= now),
     )).order_by(
         case((QbQuestionImport.active_source_slot.is_not(None), 0), else_=1),
@@ -312,13 +313,14 @@ async def claim_pending_incremental_import(db: Any, import_id: int) -> dict[str,
         await _source_lock(db)
         row = await db.get(QbQuestionImport, import_id, with_for_update=True, populate_existing=True)
         now = await _clock(db)
-        if row is None or row.status not in {'queued', 'preparing', 'running'}:
+        if row is None or row.status not in {'queued', 'paused', 'preparing', 'running'}:
             await db.rollback()
             return None
         if row.worker_token and row.lease_until and row.lease_until > now:
             await db.rollback()
             return None
-        _, scope = await _binding(db, row.scope_id)
+        task, scope = await _binding(db, row.scope_id)
+        assert_options(task.options_json)
         if row.identity_hash != _identity(scope, {'qualityHash': row.quality_hash}):
             raise ServiceException(message='任务封存身份已变化，停止后台入库')
         if not await _claim_source_slot(db, row, now):
@@ -371,7 +373,8 @@ async def advance_incremental_preparation(db: Any, ticket: dict[str, Any], stage
         row = await db.get(QbQuestionImport, ticket['importId'], with_for_update=True, populate_existing=True)
         now = await _clock(db)
         _owned(row, ticket, now)
-        _, scope = await _binding(db, row.scope_id)
+        task, scope = await _binding(db, row.scope_id)
+        assert_options(task.options_json)
         if row.identity_hash != _identity(scope, {'qualityHash': row.quality_hash}):
             raise ServiceException(message='任务封存身份已变化，停止入库准备')
         row.stage = stage
@@ -390,7 +393,8 @@ async def attach_incremental_quality(db: Any, ticket: dict[str, Any], report: di
         row = await db.get(QbQuestionImport, ticket['importId'], with_for_update=True, populate_existing=True)
         now = await _clock(db)
         _owned(row, ticket, now)
-        _, scope = await _binding(db, row.scope_id)
+        task, scope = await _binding(db, row.scope_id)
+        assert_options(task.options_json)
         if row.identity_hash != _identity(scope, {'qualityHash': row.quality_hash}):
             raise ServiceException(message='任务封存身份已变化，停止入库检查')
         _check_report(scope, report)
@@ -544,8 +548,10 @@ async def defer_incremental_import(db: Any, ticket: dict[str, Any], message: str
         row = await db.get(QbQuestionImport, ticket['importId'], with_for_update=True, populate_existing=True)
         now = await _clock(db)
         _owned(row, ticket, now)
-        row.status = 'queued'
-        row.stage = 'queued'
+        task=await db.get(QbSyncJob,row.task_id)
+        options=task.options_json or {}
+        row.status = 'cancelled' if options.get('planWorkEnded') else 'paused' if options.get('planWorkPaused') else 'queued'
+        row.stage = row.status
         row.error_message = str(message)[:2000]
         row.worker_token = None
         row.lease_until = None
@@ -609,7 +615,8 @@ async def submit_incremental_import_batch(
         _owned(locked, ticket, await _clock(session))
         if locked.status != 'running' or not locked.quality_hash:
             raise ServiceException(message='质量检查尚未完成，不能提交正式入库批次')
-        _, scope = await _binding(session, locked.scope_id)
+        task, scope = await _binding(session, locked.scope_id)
+        assert_options(task.options_json)
         if _identity(scope, {'qualityHash': locked.quality_hash}) != locked.identity_hash:
             raise ServiceException(message='任务绑定在素材准备期间发生变化，停止本批入库')
         if locked.cursor != expected_cursor or expected_cursor + len(verdicts) > locked.question_count:
