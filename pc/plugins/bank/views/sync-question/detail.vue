@@ -976,7 +976,7 @@ onBeforeUnmount(() => { mounted = false; taskLoadRevision++; clearPoll() })
 .section-heading { margin-bottom: 8px; }
 .section-heading h3, .workspace-heading h3 { margin: 0; font-size: 15px; }
 .section-heading span, .tree-toolbar, .pane-heading span { color: var(--el-text-color-secondary); font-size: 12px; }
-.log-panel pre { max-height: 260px; margin: 0; overflow: auto; padding: 12px; border-radius: 6px; background: var(--el-fill-color-extra-light); white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.65 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.log-panel pre { color: var(--el-text-color-primary); max-height: 260px; margin: 0; overflow: auto; padding: 12px; border-radius: 6px; background: var(--el-fill-color-extra-light); white-space: pre-wrap; overflow-wrap: anywhere; font: 13px/1.8 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 .workspace-heading { align-items: flex-start; padding-bottom: 12px; border-bottom: 1px solid var(--el-border-color-lighter); }
 .workspace-heading p { margin: 5px 0 0; color: var(--el-text-color-secondary); font-size: 12px; }
 .scope-select { width: min(380px, 48%); }

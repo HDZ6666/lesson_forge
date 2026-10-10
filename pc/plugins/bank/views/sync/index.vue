@@ -1118,7 +1118,7 @@ onBeforeUnmount(() => {
 .task-empty { padding: 12px 0 2px; color: var(--el-text-color-secondary); font-size: 12px; }
 .task-logs { margin-top: 12px; border-top: 1px solid var(--el-border-color-lighter); }
 .task-logs summary { padding-top: 10px; color: var(--el-text-color-regular); cursor: pointer; font-size: 12px; }
-.task-logs pre { max-height: 180px; margin: 8px 0 0; padding: 10px; overflow: auto; border: 1px solid var(--el-border-color-lighter); background: var(--el-fill-color-lighter); color: var(--el-text-color-secondary); font: 12px/1.65 var(--el-font-family); white-space: pre-wrap; overflow-wrap: anywhere; }
+.task-logs pre { max-height: 180px; margin: 8px 0 0; padding: 10px; overflow: auto; border: 1px solid var(--el-border-color-lighter); background: var(--el-fill-color-lighter); color: var(--el-text-color-primary); font: 13px/1.8 var(--el-font-family); white-space: pre-wrap; overflow-wrap: anywhere; }
 .sync-tabs :deep(.el-tabs__header) { margin-bottom: 14px; }
 .workspace-panel, .history-panel { margin-bottom: 0; }
 .section-heading { align-items: flex-start; margin-bottom: 14px; }

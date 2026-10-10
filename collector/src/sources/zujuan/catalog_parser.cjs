@@ -56,18 +56,28 @@ function normalizeCatalogTree(raw, {
   }
   const nodes = [];
   const byId = new Map();
+  // A knowledge point can appear under several textbook sections. Preserve
+  // both memberships instead of treating the provider's point ID as a tree ID.
+  const pointOccurrences = new Map();
+  const countPoints = (children) => {
+    for (const source of Array.isArray(children) ? children : []) {
+      if (Number(source?.isKnowledge) === 1 || source?.isKnowledge === true) {
+        const id = normalizeId(source.id);
+        pointOccurrences.set(id, (pointOccurrences.get(id) || 0) + 1);
+      }
+      countPoints(source?.children);
+    }
+  };
+  countPoints(root.children);
   const walk = (children, displayParent, ancestors, names) => {
     (Array.isArray(children) ? children : []).forEach((source, index) => {
       if (!source || typeof source !== 'object') {
         throw new QuestionSyncError('目录树包含非法节点。', 'tree_contract');
       }
-      const externalId = normalizeId(source.id);
+      const sourceId = normalizeId(source.id);
       const name = normalizeWhitespace(source.title);
-      if (!externalId || !name) {
+      if (!sourceId || !name) {
         throw new QuestionSyncError('目录节点缺少稳定 ID 或标题。', 'tree_contract');
-      }
-      if (byId.has(externalId)) {
-        throw new QuestionSyncError(`目录 ID 重复：${externalId}`, 'tree_contract');
       }
       const isKnowledge = Number(source.isKnowledge) === 1 || source.isKnowledge === true;
       const level = ancestors.length + 1;
@@ -75,15 +85,15 @@ function normalizeCatalogTree(raw, {
       const nearestCategory = [...ancestorNodes].reverse().find((node) => !node.isKnowledge);
       const hrefQuery = parseCatalogQueryFromHref(
         source.href,
-        isKnowledge ? (nearestCategory?.externalId || displayParent || externalId) : externalId,
+        isKnowledge ? (nearestCategory?.externalId || displayParent || sourceId) : sourceId,
       );
       if (isKnowledge && hrefQuery.parsed && hrefQuery.catelogTokpointId === '0') {
         throw new QuestionSyncError(`知识点目录缺少 ctk 参数：${source.href}`, 'tree_contract');
       }
       if (isKnowledge && hrefQuery.parsed
-        && hrefQuery.catelogTokpointId !== externalId) {
+        && hrefQuery.catelogTokpointId !== sourceId) {
         throw new QuestionSyncError(
-          `知识点目录 ctk=${hrefQuery.catelogTokpointId} 与节点 ID=${externalId} 不一致：${source.href}`,
+          `知识点目录 ctk=${hrefQuery.catelogTokpointId} 与节点 ID=${sourceId} 不一致：${source.href}`,
           'tree_contract',
         );
       }
@@ -91,12 +101,21 @@ function normalizeCatalogTree(raw, {
         throw new QuestionSyncError(`普通目录意外包含 ctk 参数：${source.href}`, 'tree_contract');
       }
       const categoryId = isKnowledge
-        ? (nearestCategory?.externalId || hrefQuery.categoryId || displayParent || externalId)
-        : (hrefQuery.categoryId || externalId);
-      const catelogTokpointId = isKnowledge ? externalId : '0';
+        ? (nearestCategory?.externalId || hrefQuery.categoryId || displayParent || sourceId)
+        : (hrefQuery.categoryId || sourceId);
+      const catelogTokpointId = isKnowledge ? sourceId : '0';
+      const externalId = isKnowledge && pointOccurrences.get(sourceId) > 1
+        ? `ctk_${categoryId}_${sourceId}` : sourceId;
+      if (byId.has(externalId)) {
+        throw new QuestionSyncError(
+          `目录 ID 重复：${sourceId}；位置：${byId.get(externalId).path} / ${[...names, name].join(' › ')}`,
+          'tree_contract',
+        );
+      }
       const ancestorIds = [...ancestors, externalId];
       const node = {
         externalId,
+        sourceExternalId: sourceId,
         textbookExternalId: String(textbookId),
         parentExternalId: displayParent ? String(displayParent) : null,
         rawParentExternalId: source.parentId == null ? null : String(source.parentId),
@@ -140,11 +159,12 @@ function selectCatalogs(tree, options = {}) {
   const requestedIds = Array.isArray(options.catalogIds) ? options.catalogIds.map(String) : [];
   let selected;
   if (requestedIds.length > 0) {
-    const missing = requestedIds.filter((id) => !byId.has(id));
+    const matches = (id) => byId.has(id) ? [byId.get(id)] : nodes.filter((node) => node.sourceExternalId === id);
+    const missing = requestedIds.filter((id) => !matches(id).length);
     if (missing.length > 0) {
       throw new QuestionSyncError(`目录树中未找到 catalog-id：${missing.join('、')}`, 'catalog_not_found');
     }
-    selected = requestedIds.map((id) => byId.get(id));
+    selected = [...new Map(requestedIds.flatMap(matches).map(node => [node.externalId, node])).values()];
   } else {
     const levels = Array.isArray(options.catalogLevels) && options.catalogLevels.length > 0
       ? new Set(options.catalogLevels.map(Number))

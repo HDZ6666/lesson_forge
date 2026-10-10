@@ -386,7 +386,7 @@ onBeforeUnmount(() => {
 .section-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 8px; }
 .section-heading h3 { margin: 0; font-size: 15px; }
 .section-heading span { color: var(--el-text-color-secondary); font-size: 12px; }
-.log-panel pre { max-height: 260px; margin: 0; overflow: auto; padding: 12px; border-radius: 6px; background: var(--el-fill-color-extra-light); color: var(--el-text-color-regular); white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.65 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.log-panel pre { max-height: 260px; margin: 0; overflow: auto; padding: 12px; border-radius: 6px; background: var(--el-fill-color-extra-light); color: var(--el-text-color-primary); white-space: pre-wrap; overflow-wrap: anywhere; font: 13px/1.8 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 .comparison-panel { min-width: 0; margin-bottom: 16px; }
 .waiting-panel { min-height: 220px; }
 @media (max-width: 900px) { .task-descriptions :deep(.el-descriptions__body) { overflow-x: auto; } }

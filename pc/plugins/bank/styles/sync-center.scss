@@ -36,7 +36,7 @@
   .sync-disclosure {border-top:1px solid var(--el-border-color-lighter);margin-top:18px;padding-top:14px}
   .sync-disclosure>summary{cursor:pointer;color:var(--el-text-color-secondary);font-size:13px;line-height:26px}
   .sync-disclosure[open]>summary{margin-bottom:12px}
-  .sync-disclosure pre{max-height:300px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;padding:16px;border-radius:8px;background:#172437;color:#c9d7e8;font:12px/1.8 ui-monospace,SFMono-Regular,Consolas,monospace}
+  .sync-disclosure pre{max-height:300px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;padding:16px;border-radius:8px;background:var(--el-fill-color-light);color:var(--el-text-color-primary);border:1px solid var(--el-border-color);font:13px/1.8 ui-monospace,SFMono-Regular,Consolas,monospace}
   .sync-disclosure summary:focus-visible{outline:2px solid var(--el-color-primary);outline-offset:4px}
   .sync-stat-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:16px;margin-bottom:20px}
   .sync-stat{padding:20px;background:var(--el-bg-color);border:1px solid var(--el-border-color-lighter);border-radius:12px}

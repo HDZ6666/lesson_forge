@@ -854,6 +854,16 @@ def _summary_counts(  # noqa: PLR0912
     return result
 
 
+def _missing_snapshot_message(task_id, textbook_external_id, counts, run):
+    labels = {'catalogs': '目录', 'questions': '题目', 'questionCatalogs': '题目与目录关联'}
+    missing = '、'.join(label for key, label in labels.items() if counts.get(key, 0) <= 0)
+    stats = '，'.join(f'{label} {counts.get(key, 0)} 条' for key, label in labels.items())
+    cause = _pick(run, 'message', 'errorMessage', 'error_message', default='')
+    reason = f'；采集停止原因：{cause}' if cause else ''
+    return (f'任务 {task_id} 教材 {textbook_external_id} 本次成果无法入库：未采集到{missing}。'
+            f'已保存{stats}{reason}。请检查采集日志后重新采集，重试核验不会补齐缺失内容。')
+
+
 def _normalise_snapshot_summary(  # noqa: PLR0912, PLR0915
     raw: Mapping[str, Any],
     task_id: int,
@@ -1021,7 +1031,7 @@ def _normalise_snapshot_summary(  # noqa: PLR0912, PLR0915
 
     counts = _summary_counts(payload, run, textbook_external_id, task_id=task_id)
     if not allow_incomplete and (counts['catalogs'] <= 0 or counts['questions'] <= 0 or counts['questionCatalogs'] <= 0):
-        raise ServiceException(message=f'任务 {task_id} 教材 {textbook_external_id} 缺少必要目录、题目或目录关系')
+        raise ServiceException(message=_missing_snapshot_message(task_id, textbook_external_id, counts, run))
     if allow_incomplete and (counts['catalogs'] <= 0 or counts['questions'] <= 0 or counts['questionCatalogs'] <= 0):
         raise ServiceException(message=f'任务 {task_id} 教材 {textbook_external_id} 没有可安全续采的完整页快照')
     try:
@@ -1229,7 +1239,7 @@ def _normalise_snapshot(raw: Mapping[str, Any], task_id: int, textbook_external_
                 f'{len(rows[key])}/{expected[key]}'
             )
     if expected['catalogs'] <= 0 or expected['questions'] <= 0 or expected['questionCatalogs'] <= 0:
-        raise ServiceException(message=f'任务 {task_id} 教材 {textbook_external_id} 缺少必要目录、题目或目录关系')
+        raise ServiceException(message=_missing_snapshot_message(task_id, textbook_external_id, expected, run))
 
     def row_scope(row: Mapping[str, Any]) -> str:
         value = _pick(

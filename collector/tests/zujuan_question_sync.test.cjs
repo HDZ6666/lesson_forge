@@ -1613,3 +1613,32 @@ test('封存部分成果的补采可以保留非瞬时失败的有效页，旧�
     assert.equal(validateQuestionListResumeSourceRun(dbPath,runId,scope).resumable,true);
   } finally {store.close();fs.rmSync(directory,{recursive:true,force:true});}
 });
+
+test('跨章节重复知识点持久化两处目录关系，各自保存页码断点', () => {
+  const {directory, dbPath} = tempDb();
+  const store = new QuestionSyncStore(dbPath, {dataDir:directory});
+  try {
+    const raw = {id:'195861',title:'七年级上册',children:['196009','196010'].map(id=>({
+      id,title:`章节 ${id}`,href:`/czsx/zj${id}/`,children:[{
+        id:'4712',title:'数轴正负',isKnowledge:1,href:`/czsx/zj${id}/ctk4712`,
+      }],
+    }))};
+    const {nodes} = normalizeCatalogTree(raw,{textbookId:'195861'});
+    const runId = store.beginRun({textbookId:'195861',bankId:2,bankPath:'czsx'});
+    store.saveCatalogTree(runId,'195861',nodes);
+    const question = parseQuestionListPayload({code:'0',data:{total:1,html:LIST_HTML}}).questions[0];
+    for (const catalog of nodes.filter(n=>n.isKnowledge)) {
+      store.savePage({runId,textbookExternalId:'195861',catalog,nodes,pageNumber:1,
+        expectedTotal:1,expectedPages:1,questions:[question],queryFingerprint:catalog.externalId});
+      assert.equal(store.getRunCheckpoint(runId,catalog.externalId),1);
+    }
+    assert.equal(store.db.prepare('SELECT COUNT(*) AS n FROM sync_run_catalog_items').get().n,4);
+    assert.equal(store.db.prepare('SELECT COUNT(*) AS n FROM sync_run_question_items').get().n,1);
+    assert.equal(store.db.prepare('SELECT COUNT(*) AS n FROM sync_run_question_catalogs').get().n,4);
+    const relations = store.db.prepare('SELECT catalog_external_id FROM sync_run_question_catalogs').all();
+    assert.deepEqual(relations.map(r=>r.catalog_external_id).sort(),nodes.map(n=>n.externalId).sort());
+  } finally {
+    store.close();
+    fs.rmSync(directory,{recursive:true,force:true});
+  }
+});

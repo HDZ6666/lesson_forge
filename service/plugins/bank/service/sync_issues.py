@@ -6,8 +6,16 @@ import json
 from sqlalchemy import exists, func, select
 
 from exceptions.exception import ServiceException
-from plugins.bank.entity.do.bank_do import QbSyncIssue, QbSyncIssueTask, QbSyncJob, QbTextbook
+from plugins.bank.entity.do.bank_do import (
+    QbSyncIssue,
+    QbSyncIssueTask,
+    QbSyncJob,
+    QbSyncJobScope,
+    QbTextbook,
+    QbTextbookVersion,
+)
 from plugins.bank.service.import_dates import utc_datetime
+from plugins.bank.service.issue_diagnostics import describe_issue
 
 
 def identity(subject, provider, book, kind, key, error):
@@ -179,16 +187,14 @@ async def list_issues(
     if before is not None:
         query = query.where(QbSyncIssue.issue_id < before)
     rows = (await db.scalars(query.order_by(QbSyncIssue.issue_id.desc()).limit(page_size + 1))).all()
-    books = (
-        {
-            book.textbook_id: book.textbook_name
-            for book in (
-                await db.scalars(select(QbTextbook).where(QbTextbook.textbook_id.in_([r.textbook_id for r in rows])))
-            ).all()
-        }
-        if rows
-        else {}
-    )
+    books = dict((await db.execute(select(QbTextbook.textbook_id, QbTextbook.textbook_name)
+        .where(QbTextbook.textbook_id.in_([r.textbook_id for r in rows])))).all()) if rows else {}
+    versions = dict((await db.execute(select(QbTextbook.textbook_id, QbTextbookVersion.version_name)
+        .join(QbTextbookVersion, QbTextbook.version_id == QbTextbookVersion.version_id)
+        .where(QbTextbook.textbook_id.in_([r.textbook_id for r in rows])))).all()) if rows else {}
+    scopes = list((await db.scalars(select(QbSyncJobScope).where(
+        QbSyncJobScope.run_id.in_([r.latest_task_id for r in rows])))).all()) if rows else []
+    scope_map = {(s.run_id, s.local_textbook_id, s.collector_run_id): s for s in scopes}
     available = (
         dict((await db.execute(select(QbSyncJob.run_id, QbSyncJob.task_module).where(
             QbSyncJob.run_id.in_([r.latest_task_id for r in rows])))).all())
@@ -198,7 +204,9 @@ async def list_issues(
     return {
         'rows': [
             dict(
-                dump(row), textbookName=books.get(row.textbook_id), latestTaskAvailable=row.latest_task_id in available, taskModule=available.get(row.latest_task_id, 'question')
+                dump(row), textbookName=books.get(row.textbook_id), versionName=versions.get(row.textbook_id),
+                diagnosis=describe_issue(row, scope_map.get((row.latest_task_id, row.textbook_id, (row.evidence_json or {}).get('collectorRunId')))),
+                latestTaskAvailable=row.latest_task_id in available, taskModule=available.get(row.latest_task_id, 'question')
             )
             for row in rows[:page_size]
         ],
@@ -302,6 +310,8 @@ async def record_runtime_failure(db, row, *, stage, message, now):
         'textbookExternalId': scope.external_textbook_id,
         'importId': getattr(row, 'import_id', None), 'intakeId': getattr(row, 'intake_id', None),
         'cursor': getattr(row, 'cursor', None), 'batchNo': getattr(row, 'batch_no', None),
+        'collectionError': scope.error_message,
+        'snapshotCounts': {'catalogs': scope.catalog_count, 'questions': scope.question_count, 'relations': scope.question_catalog_count} if scope.snapshot_locked_at else None,
         'errorKind': getattr(row, 'error_kind', None), 'attempts': getattr(row, 'attempt_count', None),
         'nextAttemptAt': utc_datetime(next_at).isoformat() if next_at else None, 'handling': 'retry' if next_at else 'manual',
     }

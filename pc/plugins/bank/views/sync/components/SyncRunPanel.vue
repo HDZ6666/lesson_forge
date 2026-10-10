@@ -289,7 +289,7 @@ onBeforeUnmount(() => {
 .run-stat strong { display: block; margin-top: 3px; font-size: 16px; line-height: 1.2; }
 .run-log-details { margin-top: 12px; border-top: 1px solid var(--el-border-color-lighter); }
 .run-log-details summary { padding-top: 10px; color: var(--el-text-color-regular); cursor: pointer; font-size: 12px; }
-.run-log { max-height: 190px; margin: 8px 0 0; padding: 10px; overflow: auto; border: 1px solid var(--el-border-color-lighter); background: var(--el-fill-color-lighter); color: var(--el-text-color-secondary); font: 12px/1.65 var(--el-font-family); white-space: pre-wrap; overflow-wrap: anywhere; }
+.run-log { max-height: 190px; margin: 8px 0 0; padding: 10px; overflow: auto; border: 1px solid var(--el-border-color-lighter); background: var(--el-fill-color-lighter); color: var(--el-text-color-primary); font: 13px/1.8 var(--el-font-family); white-space: pre-wrap; overflow-wrap: anywhere; }
 @media (max-width: 980px) { .run-stat-grid { grid-template-columns: repeat(2, minmax(100px, 1fr)); } }
 @media (max-width: 760px) {
   .run-toolbar, .run-state-line { align-items: flex-start; flex-direction: column; }

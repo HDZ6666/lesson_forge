@@ -236,3 +236,27 @@ test('目录树与列表请求：知识点节点映射 catelogTokpointId，普�
   assert.equal(body.get('curPage'), '7');
   assert.equal(request.credentials, 'include');
 });
+
+test('重复知识点按教材章节保留两处，原始来源 ID 仍用于请求', () => {
+  const raw = {id:'195861',title:'七年级上册',children:['196009','196010'].map(id => ({
+    id,title:`章节 ${id}`,href:`/czsx/zj${id}/`,children:[{
+      id:'4712',title:'根据点在数轴的位置判断式子的正负',isKnowledge:1,
+      href:`/czsx/zj${id}/ctk4712`,
+    }],
+  }))};
+  const tree = normalizeCatalogTree(raw, {textbookId:'195861'});
+  const points = selectCatalogs(tree, {catalogIds:['4712']});
+  assert.deepEqual(points.map(p => p.externalId), ['ctk_196009_4712','ctk_196010_4712']);
+  for (const point of points) {
+    assert.equal(point.parentExternalId, point.categoryId);
+    assert.deepEqual(point.ancestorIds, [point.categoryId, point.externalId]);
+    const body = new URLSearchParams(buildQuestionListRequest({bankId:2},point,1).body);
+    assert.equal(body.get('categoryId'), point.categoryId);
+    assert.equal(body.get('catelogTokpointId'), '4712');
+  }
+  assert.deepEqual(selectCatalogs(tree,{catalogIds:['ctk_196009_4712','4712']}),points);
+  const reversed = normalizeCatalogTree({...raw,children:[...raw.children].reverse()},{textbookId:'195861'});
+  assert.deepEqual(reversed.nodes.map(n=>n.externalId).sort(),tree.nodes.map(n=>n.externalId).sort());
+  raw.children[0].children.push({...raw.children[0].children[0]});
+  assert.throws(()=>normalizeCatalogTree(raw,{textbookId:'195861'}),/目录 ID 重复：4712；位置/);
+});
