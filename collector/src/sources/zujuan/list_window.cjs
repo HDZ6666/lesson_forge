@@ -81,10 +81,9 @@ async function postQuestionList(page, options, catalog, pageNumber, {
     options.resourceGuard?.assertAllowed();
     options.sourceBudget?.request();
     const result = await evaluateFetch(page, request.url, request);
-    options.sourceControl?.observe(Number(result.status || 0), result.headers);
+    options.sourceControl?.observe(Number(result.status || 0), result.headers, { verification: false });
     const classification = classifyQuestionResponse(result);
     if (classification.kind === 'verification') {
-      options.sourceControl?.requireManual('题目列表返回验证/防护，请人工核对后恢复');
       if (!allowVerificationWait) {
         throw new VerificationRequiredError(
           `题目列表返回验证/防护：目录 ${catalog?.externalId || ''} 第 ${pageNumber} 页`,
@@ -266,7 +265,7 @@ async function navigateToTextbook(page, url, options) {
       continue;
     }
     const status = responseStatus(response);
-    options.sourceControl?.observe(status, responseHeaders(response));
+    options.sourceControl?.observe(status, responseHeaders(response), { verification: false });
     if (status === 401 || status === 403) {
       if (verificationStartedAt == null) verificationStartedAt = Date.now();
       const configuredTimeout = Number(options.verificationTimeout ?? DEFAULT_VERIFICATION_TIMEOUT);

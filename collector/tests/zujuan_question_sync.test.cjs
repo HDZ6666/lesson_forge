@@ -1168,7 +1168,7 @@ test('列表默认 8 路并发请求，空页仍结束目录', async () => {
   }
 });
 
-test('风控页触发公共暂停，保留同窗口成功页，后续教材也不能换会话继续', async () => {
+test('人工验证仍失败才公共暂停，保留同窗口成功页，后续教材也不能换会话继续', async () => {
   const { directory, dbPath } = tempDb();
   let persistentLaunches = 0;
   let freshLaunches = 0;
@@ -1214,7 +1214,7 @@ test('风控页触发公共暂停，保留同窗口成功页，后续教材也�
     }), {
       playwright,
       catalogTree: SAMPLE_TREE,
-    }), (error) => error.code === 'source_verification');
+    }), (error) => error.code === 'waiting_verification');
     assert.equal(persistentLaunches, 1);
     assert.equal(freshLaunches, 0);
     const replay = new QuestionSyncStore(dbPath, { dataDir: directory });

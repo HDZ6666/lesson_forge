@@ -31,12 +31,10 @@ const {
   assertAllowedUrl: assertAllowedUrlShared,
 } = require('../shared/url_policy.cjs');
 const {
-  COOKIE_SWITCH_WAIT_MS,
   DEFAULT_CONSECUTIVE_EMPTY_PAGES,
   DEFAULT_LIST_CONCURRENCY,
   DEFAULT_PAGE_CAPACITY,
   DEFAULT_STALL_WINDOWS,
-  MAX_SESSION_SWITCHES,
   PAGE_RESULT,
   PROVIDER,
   SITE_PAGE_LIMIT,
@@ -52,7 +50,6 @@ const {
   closeCollectorContext,
   connectCollectorOverCDP,
   launchCollectorContext,
-  launchFreshCollectorSession,
   loadPlaywright,
   waitForVerification,
 } = require('../sources/zujuan/session.cjs');
@@ -121,8 +118,6 @@ async function runSync(options, dependencies = {}) {
   let connectedOverCDP = false;
   let ownedPage = false;
   let ownedBrowser = null;
-  let sessionSwitches = 0;
-  let justRotated = false;
   let cookieWaitCycles = 0;
   const counters = {
     pagesOk: 0,
@@ -428,8 +423,6 @@ async function runSync(options, dependencies = {}) {
     const listConcurrency = opts.limit > 0
       ? 1
       : Math.max(1, Number(opts.concurrency) || DEFAULT_LIST_CONCURRENCY);
-    const maxSessionSwitches = Math.max(0, Number(opts.maxSessionSwitches) || MAX_SESSION_SWITCHES);
-    const injectedSession = Boolean(connectedOverCDP || dependencies.context || dependencies.page);
 
     const normalizedCatalogOf = (catalog) => ({
       ...catalog,
@@ -694,73 +687,7 @@ async function runSync(options, dependencies = {}) {
       return listWindow(start, endBound, listConcurrency);
     };
 
-    async function rotateToFreshSession(reason) {
-      opts.sourceControl?.requireManual(String(reason || '来源要求验证，请人工核对后恢复'));
-      if (injectedSession) {
-        throw new VerificationRequiredError(String(reason || '当前会话需要验证'), { code: 'waiting_verification' });
-      }
-      if (sessionSwitches >= maxSessionSwitches) {
-        throw new VerificationRequiredError(
-          `${reason}；已达到全新会话切换上限 ${maxSessionSwitches}。`,
-          { code: 'waiting_verification' },
-        );
-      }
-      sessionSwitches += 1;
-      console.warn(`[会话] ${reason}，打开全新无痕会话 ${sessionSwitches}/${maxSessionSwitches}`);
-      await disposeCollectorSession();
-      await (opts.sleepFn || sleep)(COOKIE_SWITCH_WAIT_MS);
-      playwrightRef = playwrightRef || await loadPlaywright();
-      const fresh = await launchFreshCollectorSession(playwrightRef, opts);
-      ownedBrowser = fresh.browser;
-      context = fresh.context;
-      page = fresh.page;
-      ownedPage = false;
-      let lastError = null;
-      for (let attempt = 1; attempt <= 3; attempt += 1) {
-        try {
-          await navigateToTextbook(page, initialTextbookUrl(opts), opts);
-          lastError = null;
-          break;
-        } catch (error) {
-          lastError = error;
-          console.warn(`[会话] 新会话打开教材失败（${attempt}/3）：${error.message}`);
-          await (opts.sleepFn || sleep)(2000);
-        }
-      }
-      if (lastError) throw lastError;
-      justRotated = true;
-    }
-
     async function recoverBlockedSession(reason, error) {
-      const canRotate = !injectedSession && sessionSwitches < maxSessionSwitches;
-      if (justRotated) {
-        try {
-          await waitForVerification(page, {
-            ...opts,
-            requireProbe: true,
-            verificationReason: error?.code || 'waiting_verification',
-          });
-          cookieWaitCycles += 1;
-          if (cookieWaitCycles > 2) {
-            if (canRotate) {
-              cookieWaitCycles = 0;
-              await rotateToFreshSession(reason);
-            } else {
-              throw error;
-            }
-          }
-        } catch (waitError) {
-          if (!canRotate) throw waitError;
-          cookieWaitCycles = 0;
-          await rotateToFreshSession(String(waitError.message || reason));
-        }
-        return;
-      }
-      if (canRotate) {
-        cookieWaitCycles = 0;
-        await rotateToFreshSession(reason);
-        return;
-      }
       cookieWaitCycles += 1;
       if (cookieWaitCycles > 2) throw error;
       await waitForVerification(page, {
@@ -954,8 +881,7 @@ async function runSync(options, dependencies = {}) {
               if (sessionPages.has(row.pageNumber)) continue;
               const saved = await settleFetchedPage(state, row);
               noteFetchSlot(state, row.pageNumber, saved);
-              cookieWaitCycles = 0;
-              justRotated = false;
+              if (saved.newCount > 0) cookieWaitCycles = 0;
               newCount += Number(saved.newCount || 0);
               if (opts.limit > 0 && counters.questionsSeen >= opts.limit) break catalogPages;
             }
@@ -967,8 +893,7 @@ async function runSync(options, dependencies = {}) {
           for (const row of rows) {
             const saved = await settleFetchedPage(state, row);
             noteFetchSlot(state, row.pageNumber, saved);
-            cookieWaitCycles = 0;
-            justRotated = false;
+            if (saved.newCount > 0) cookieWaitCycles = 0;
             newCount += Number(saved.newCount || 0);
             if (opts.limit > 0 && counters.questionsSeen >= opts.limit) break catalogPages;
           }
@@ -1025,6 +950,10 @@ async function runSync(options, dependencies = {}) {
     });
     return { runId, status: finalStatus, counters, completeness };
   } catch (error) {
+    if (['waiting_verification', 'challenge', 'http_401', 'http_403', 'http_405'].includes(error.code)) {
+      try { opts.sourceControl.markManual(error.message); }
+      catch (pauseError) { console.warn(`[暂停记录失败] ${pauseError.message}`); }
+    }
     counters.errors += 1;
     finalMessage = String(error.message || error);
     if (runId) {

@@ -85,12 +85,14 @@ test('列表首次 429 即暂停，换教材/元数据/目录/素材入口均不
   } finally { fs.rmSync(f.directory, { recursive: true, force: true }); }
 });
 
-test('验证/防护列表停止并保留公共状态；素材并发池等待已发请求收尾后传播暂停', async () => {
+test('验证列表交给人工等待；素材并发池等待已发请求收尾后传播公共暂停', async () => {
   const f = fixture();
   try {
     await assert.rejects(postQuestionList({ evaluate: async () => ({ status: 200, text: '<html>captcha</html>' }) },
-      { sourceControl: f.control }, { externalId: 'c1' }, 1), SourcePausedError);
-    assert.equal(f.control.status().manualRequired, true);
+      { sourceControl: f.control, verificationTimeout: 0 }, { externalId: 'c1' }, 1),
+      (error) => error.code === 'waiting_verification');
+    assert.equal(f.control.status().manualRequired, false);
+    f.control.markManual('人工验证最终失败');
     let settled = false;
     const pause = new SourcePausedError(f.control.status());
     await assert.rejects(prefetchAssets([{ sourceUrl: 'a' }, { sourceUrl: 'b' }, { sourceUrl: 'c' }], {

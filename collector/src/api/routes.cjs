@@ -24,6 +24,7 @@ const { readJson, safeEqual, sendAssetResponse, sendJson } = require('./http.cjs
 const { CollectorJobManager, intInRange } = require('./job_manager.cjs');
 const { publicJob } = require('./progress.cjs');
 const { collectorReadiness } = require('../policies/collector_readiness.cjs');
+const { readFailurePage } = require('../storage/failure_pages.cjs');
 
 function queryBoolean(url, key) {
   const value = url.searchParams.get(key);
@@ -85,6 +86,11 @@ function createCollectorServer(options = {}) {
           return;
         }
         sendJson(response, 200, publicJob(job, { dbPath: manager.dbPath }));
+        return;
+      }
+      const failurePageMatch = url.pathname.match(/^\/v1\/metadata\/runs\/(\d+)\/failure-page$/);
+      if (request.method === 'GET' && failurePageMatch) {
+        sendJson(response, 200, readFailurePage(manager.dataDir, Number(failurePageMatch[1])));
         return;
       }
       const runCatalogMatch = url.pathname.match(/^\/v1\/runs\/([^/]+)\/catalogs\/?$/i);

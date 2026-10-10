@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Annotated
 
 from fastapi import Depends, Path, Query, Request, Response
@@ -19,6 +20,7 @@ from common.router import APIRouterPro
 from common.vo import DataResponseModel, PageResponseModel, ResponseBaseModel
 from exceptions.exception import ServiceException
 from module_admin.entity.vo.user_vo import CurrentUserModel  # noqa: TC001
+from plugins.bank.dao.sync_task_dao import SyncTaskDao
 from plugins.bank.entity.vo.bank_vo import (
     BatchModel,
     BatchPageQueryModel,
@@ -62,6 +64,7 @@ from plugins.bank.entity.vo.bank_vo import (
     TextbookVersionQueryModel,
 )
 from plugins.bank.service.bank_service import BankService
+from plugins.bank.service.collector_client import CollectorClient
 from plugins.bank.service.question_apply_service import QuestionApplyService
 from plugins.bank.service.question_review_service import QuestionReviewService
 from plugins.bank.service.sync_run_service import SyncRunService
@@ -295,6 +298,23 @@ async def get_textbook_sync_task(
     db: Annotated[AsyncSession, DBSessionDependency()],
 ) -> Response:
     return ResponseUtil.success(data=await SyncTaskService.textbook_detail(db, task_id))
+
+
+@bank_controller.get(
+    '/sync/textbook/tasks/{task_id}/failure-page',
+    dependencies=[UserInterfaceAuthDependency(_TEXTBOOK_TASK_QUERY_PERMISSIONS)],
+)
+async def get_textbook_failure_page(
+    task_id: Annotated[int, Path(gt=0)],
+    db: Annotated[AsyncSession, DBSessionDependency()],
+) -> Response:
+    task = await SyncTaskDao.get(db, task_id, 'textbook')
+    if not task:
+        raise ServiceException(message='教材发现任务不存在')
+    run_id = task.metadata_run_id
+    await db.rollback()
+    data = await asyncio.to_thread(CollectorClient().metadata_failure_page, run_id) if run_id else {'available': False}
+    return ResponseUtil.success(data=data)
 
 
 @bank_controller.post(

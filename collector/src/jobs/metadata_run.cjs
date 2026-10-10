@@ -57,6 +57,7 @@ const {
   writeJsonOutput,
 } = require('../storage/metadata_store.cjs');
 const { saveRawHtml } = require('../storage/raw_pages.cjs');
+const { captureFailurePage } = require('../storage/failure_pages.cjs');
 const { createProcessEventEmitter } = require('../jobs/events.cjs');
 const { assertMathSource } = require('../sources/registry.cjs');
 const { SourceControl } = require('../policies/source_control.cjs');
@@ -158,7 +159,7 @@ async function fetchTextbooksForVersion(page, version, options) {
       return { status: 0, text: '', error: String(error && error.message ? error.message : error) };
     }
   }, requestUrl);
-  options.sourceControl?.observe(payload.status, payload.headers);
+  options.sourceControl?.observe(payload.status, payload.headers, { verification: false });
   if (payload.error) throw new Error(`教材列表接口失败：${payload.error}`);
   if ([401, 403].includes(payload.status)) {
     throw new StopCrawlError(`HTTP ${payload.status}，任务已熔断。`, `http_${payload.status}`);
@@ -166,7 +167,6 @@ async function fetchTextbooksForVersion(page, version, options) {
   if (payload.status >= 400) throw new Error(`教材列表接口返回 HTTP ${payload.status}`);
   const protection = classifyHtmlProtection(payload.text);
   if (protection.terminalBlock || (protection.transientChallenge && !protection.hasContent)) {
-    options.sourceControl?.requireManual(protectionStopMessage(protection));
     throw new StopCrawlError(protectionStopMessage(protection), 'challenge');
   }
   const textbooks = parseTextbooksFromApiHtml(payload.text, {
@@ -205,7 +205,7 @@ async function readBootstrapChapter(page) {
   });
 }
 
-async function runDiscovery(options) {
+async function runDiscovery(options, dependencies = {}) {
   assertMathSource(options);
   if (!options.acknowledgeSourcePolicy) {
     throw new Error(
@@ -213,7 +213,7 @@ async function runDiscovery(options) {
     );
   }
 
-  const playwright = await loadPlaywright();
+  const playwright = dependencies.playwright || await loadPlaywright();
   ensureDir(options.dataDir);
   ensureDir(options.profileDir);
   const store = new MetadataStore(options.dbPath);
@@ -272,6 +272,7 @@ async function runDiscovery(options) {
     console.log(`[环境] ${describeChromeMode(options)}，入口 ${options.seedUrl}`);
     const boot = async () => {
       const next = await launchCollectorContext(playwright, options);
+      let page;
       try {
         const createPage = createCollectorPageFactory(next, options);
         const robots = await inspectRobots(next, options);
@@ -281,7 +282,7 @@ async function runDiscovery(options) {
         if (robots.status !== 'allowed') {
           console.warn(`[提醒] robots.txt 状态未知：${robots.reason || robots.status}。仅按已确认的授权范围运行。`);
         }
-        const page = await createPage();
+        page = await createPage();
         await safeGoto(page, options.seedUrl, gate, options, '加载元数据入口页');
         await settleSourcePage(page, options, {
           contentSelector: '#chapter_textbook_version a[versionid]',
@@ -289,6 +290,7 @@ async function runDiscovery(options) {
         });
         return { context: next, page };
       } catch (error) {
+        await captureFailurePage(page, options, runId, error);
         await closeCollectorContext(next);
         throw error;
       }
@@ -382,6 +384,11 @@ async function runDiscovery(options) {
     console.log(formatReport(report));
     writeJsonOutput(options.jsonOutput, report);
   } catch (error) {
+    if (context) await captureFailurePage(context.pages()[0], options, runId, error);
+    if (['challenge', 'http_401', 'http_403', 'http_405'].includes(error.code)) {
+      try { options.sourceControl.markManual(error.message); }
+      catch (pauseError) { console.warn(`[暂停记录失败] ${pauseError.message}`); }
+    }
     counters.errors += 1;
     finalStatus = signalName === 'SIGINT' || signalName === 'SIGTERM'
       ? 'cancelled'

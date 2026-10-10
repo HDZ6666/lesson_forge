@@ -78,9 +78,14 @@ class SourceControl {
     if (verification && [401, 403, 405].includes(status)) this.requireManual(`来源返回 HTTP ${status}，请人工核对访问状态`);
   }
 
-  requireManual(reason = '来源要求验证，请人工核对后恢复') {
+  markManual(reason = '来源要求验证，请人工核对后恢复') {
     this.withDb((db) => db.prepare(`UPDATE collector_source_control
       SET manual_required=1, reason=?, revision=revision+1 WHERE provider='zujuan'`).run(String(reason).slice(0, 500)));
+    return this.status();
+  }
+
+  requireManual(reason) {
+    this.markManual(reason);
     this.assertAllowed();
   }
 

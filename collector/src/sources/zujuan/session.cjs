@@ -389,7 +389,6 @@ async function settleSourcePage(page, options, extras = {}) {
     }
     if (lastState.hasContent) return lastState;
     if (lastState.terminalBlock) {
-      options.sourceControl?.requireManual(protectionStopMessage(lastState));
       throw new StopCrawlError(protectionStopMessage(lastState), 'challenge');
     }
     if (lastState.transientChallenge && !sawChallenge) {
@@ -399,7 +398,6 @@ async function settleSourcePage(page, options, extras = {}) {
     await sleep(200);
   }
   if (lastState.terminalBlock || lastState.transientChallenge || lastState.hasChallengeInputs) {
-    options.sourceControl?.requireManual(protectionStopMessage(lastState));
     throw new StopCrawlError(protectionStopMessage(lastState), 'challenge');
   }
   throw new StopCrawlError(
@@ -440,7 +438,7 @@ async function safeGoto(page, url, gate, options, label) {
         timeout: options.timeout,
       });
       const status = response?.status() || 0;
-      options.sourceControl?.observe(status, response?.headers() || {});
+      options.sourceControl?.observe(status, response?.headers() || {}, { verification: false });
       if ([401, 403].includes(status)) {
         throw new StopCrawlError(`HTTP ${status}，任务已熔断。`, `http_${status}`);
       }
@@ -477,7 +475,7 @@ async function inspectRobots(context, options) {
       timeout: Math.min(options.timeout, 10000),
       failOnStatusCode: false,
     });
-    try { options.sourceControl?.observe(response.status(), response.headers()); }
+    try { options.sourceControl?.observe(response.status(), response.headers(), { verification: false }); }
     catch (error) { try { await response.dispose?.(); } catch {} throw error; }
     if ([401, 403].includes(response.status())) {
       try { await response.dispose?.(); } catch {}
@@ -525,7 +523,6 @@ async function waitForVerification(page, options = {}) {
   const poll = Math.max(100, Number.isFinite(pollValue) ? pollValue : DEFAULT_VERIFICATION_POLL);
   const requiresProbe = options.requireProbe === true;
   options.sourceControl?.assertAllowed();
-  if (requiresProbe) options.sourceControl?.requireManual('来源要求验证，请人工核对后恢复');
   const probeValue = Number(options.verificationProbeInterval ?? DEFAULT_VERIFICATION_PROBE_INTERVAL);
   const probeInterval = Math.max(100, Number.isFinite(probeValue)
     ? probeValue : DEFAULT_VERIFICATION_PROBE_INTERVAL);
@@ -591,7 +588,6 @@ async function waitForVerification(page, options = {}) {
     }
     const challenge = Boolean(state?.challenge)
       || (!state?.hasContent && isProtectionText(`${state?.title || ''} ${state?.text || ''}`));
-    if (challenge) options.sourceControl?.requireManual('来源要求验证，请人工核对后恢复');
     if (!challenge) {
       if (requiresProbe) {
         console.warn('[验证] 当前页未显示挑战控件；将以间隔 API probe，恢复后继续同一目录/页。');

@@ -117,6 +117,7 @@
         <el-descriptions-item v-if="!task.discoveryMode" label="最近应用时间">{{ formatTaskTime(task.appliedAt) }}</el-descriptions-item>
       </el-descriptions></details>
       <el-alert v-if="task.errorMessage" class="inner-alert" type="error" :closable="false" show-icon>{{ task.errorMessage }}</el-alert>
+      <el-button v-if="['failed','blocked'].includes(task.status)" :loading="failureLoading" @click="showFailurePage">查看出错现场</el-button>
       <details class="log-panel sync-disclosure">
         <summary>运行日志 · 自动刷新最后 100 条</summary>
         <pre v-if="task.logs.length">{{ task.logs.join('\n') }}</pre>
@@ -124,6 +125,17 @@
       </details>
     </section>
 
+    <el-dialog v-model="failureVisible" title="采集器出错现场" width="min(960px, 94vw)">
+      <p class="sync-muted">这是服务器采集浏览器保存的页面，截图只能查看；需要验证时须在同一个服务器浏览器中人工处理。</p>
+      <template v-if="failurePage?.available">
+        <p>{{ failurePage.title }} · {{ formatTaskTime(failurePage.capturedAt) }}</p>
+        <p>{{ failurePage.url }}</p>
+        <el-link v-if="failureSourceUrl" :href="failureSourceUrl" target="_blank" rel="noopener noreferrer" type="primary">在本机打开来源页面</el-link>
+        <img v-if="failurePage.screenshot" :src="failurePage.screenshot" alt="服务器采集浏览器出错页面" style="display:block;max-width:100%;margin-top:16px" />
+        <pre style="white-space:pre-wrap;overflow-wrap:anywhere">{{ failurePage.text }}</pre>
+      </template>
+      <el-empty v-else description="本次未保存页面现场。旧任务没有截图；更新后的任务会在浏览器关闭前保存现场。" />
+    </el-dialog>
   </div>
 </template>
 
@@ -134,6 +146,23 @@ import request from '@/utils/request'
 const discoveryLabels={newVersions:'新增版本',renamedVersions:'版本改名',missingVersions:'本次未发现版本',newTextbooks:'新增教材',renamedTextbooks:'教材改名',missingTextbooks:'本次未发现教材',conflicts:'归属冲突'}
 
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+const failureVisible = ref(false)
+const failureLoading = ref(false)
+const failurePage = ref(null)
+const failureSourceUrl = computed(() => {
+  try {
+    const url = new URL(failurePage.value?.url)
+    return url.protocol === 'https:' && url.hostname === 'zujuan.xkw.com' ? url.href : null
+  } catch { return null }
+})
+async function showFailurePage() {
+  failureLoading.value = true
+  try {
+    const response = await request({ url: `/bank/sync/textbook/tasks/${task.value.taskId}/failure-page`, method: 'get' })
+    failurePage.value = response.data
+    failureVisible.value = true
+  } finally { failureLoading.value = false }
+}
 import { ArrowLeft, Refresh, RefreshRight, Upload, VideoPause } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useRoute, useRouter } from 'vue-router'

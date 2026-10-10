@@ -220,6 +220,9 @@ class CollectorClient:
     def source_control(self):
         return self._request('GET', '/v1/source-control')
 
+    def metadata_failure_page(self, run_id: int):
+        return self._request('GET', f'/v1/metadata/runs/{int(run_id)}/failure-page')
+
     def resume_source(self, revision):
         return self._request('POST', '/v1/source-control/resume', payload={'expectedRevision': revision})
 
