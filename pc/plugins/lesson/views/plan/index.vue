@@ -215,7 +215,7 @@
       </section>
     </div>
 
-    <el-drawer v-model="historyVisible" title="历史教案" direction="rtl" size="min(720px, 92vw)" append-to-body>
+    <el-drawer v-model="historyVisible" class="detail-scroll-drawer" title="历史教案" direction="rtl" size="min(720px, 92vw)" append-to-body>
       <div class="history-toolbar">
         <el-input v-model="historyQuery.keyword" placeholder="按课题搜索" clearable @keyup.enter="loadHistory" @clear="loadHistory" />
         <el-button :icon="Refresh" :loading="loadingHistory" @click="loadHistory">刷新</el-button>

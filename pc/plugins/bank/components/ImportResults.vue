@@ -15,7 +15,7 @@
     <p v-if="!state.selectedId && !state.historyLoading" class="result-note">本轮尚未提交入库批次；之前的记录可从上方选择。</p>
     <el-tabs v-if="state.selectedId" v-model="state.activeTab" @tab-change="loadActive">
       <el-tab-pane label="已提交批次" name="batches">
-        <el-table :data="state.pages.batches.items" v-loading="state.pageLoading" empty-text="当前范围暂无已提交批次">
+        <el-table max-height="min(560px, 60vh)" scrollbar-always-on :data="state.pages.batches.items" v-loading="state.pageLoading" empty-text="当前范围暂无已提交批次">
           <el-table-column prop="batchNo" label="批次" width="80" />
           <el-table-column prop="processedCount" label="处理题数" width="110" />
           <el-table-column prop="acceptedCount" label="合格合并" width="110" />
@@ -27,7 +27,7 @@
       </el-tab-pane>
       <el-tab-pane label="暂缓题目" name="issues">
         <p class="result-note">以下题目在该次入库中被暂缓，原因不会改变已提交的合格成果。后续是否修复需要对应题目的新检查结果。</p>
-        <el-table :data="state.pages.issues.items" v-loading="state.pageLoading" row-key="resultKey" empty-text="当前范围暂无暂缓题目">
+        <el-table max-height="min(560px, 60vh)" scrollbar-always-on :data="state.pages.issues.items" v-loading="state.pageLoading" row-key="resultKey" empty-text="当前范围暂无暂缓题目">
           <el-table-column prop="questionId" label="来源题目 ID" width="190" />
           <el-table-column prop="batchNo" label="批次" width="80" />
           <el-table-column prop="reason" label="暂缓原因" min-width="260" />

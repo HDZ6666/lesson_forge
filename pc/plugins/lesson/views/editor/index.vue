@@ -66,7 +66,7 @@
           </div>
         </section>
       </div>
-      <el-dialog v-model="groupVisible" title="教学内容与条件组" width="min(720px,95vw)" :close-on-click-modal="false" @closed="groupClosed">
+      <el-dialog v-model="groupVisible" class="detail-scroll-dialog" title="教学内容与条件组" width="min(720px,95vw)" :close-on-click-modal="false" @closed="groupClosed">
         <el-input v-model="groupForm.name" placeholder="例如：同号相加" maxlength="100"/>
         <el-tree-select v-model="groupForm.catalogIds" :data="catalogs" :props="treeProps" node-key="catalogId" multiple show-checkbox check-strictly placeholder="选择该内容的目录范围"/>
         <el-tabs v-model="editingRule"><el-tab-pane v-for="r in groupForm.rules" :key="r.ruleKey" :label="r.name" :name="r.ruleKey">
@@ -76,7 +76,7 @@
         <el-button @click="addRule">新增条件组</el-button>
         <template #footer><el-button v-if="groupForm.existing" type="danger" :disabled="busy" @click="deleteGroup">删除内容（题目转待整理）</el-button><el-button @click="groupVisible=false">取消</el-button><el-button type="primary" :loading="saving" :disabled="!!failed" @click="saveGroup">保存内容与条件</el-button></template>
       </el-dialog>
-      <el-dialog v-model="previewVisible" title="题目预览" width="min(900px,95vw)">
+      <el-dialog v-model="previewVisible" class="detail-scroll-dialog" title="题目预览" width="min(900px,95vw)">
         <div class="print-settings"><el-checkbox v-model="printSettings.showGroupTitles" :disabled="draft.readOnly || busy" @change="savePrint">显示分组标题</el-checkbox><el-select v-model="printSettings.blankLines" :disabled="draft.readOnly || busy" @change="savePrint"><el-option v-for="n in [0,2,4]" :key="n" :value="n" :label="`题后留白 ${n} 行`"/></el-select></div>
         <article><h2>{{ draft.title }}</h2><div v-for="g in printGroups" :key="g.groupKey || 'supplement'">
           <h3 v-if="printSettings.showGroupTitles">{{ g.name }}</h3><div v-for="item in g.items" :key="item.itemId"><strong>{{ item.number }}.</strong><QuestionStem :question="item.question" :draft-id="draft.draftId"/><div :style="{height:`${printSettings.blankLines*24}px`}"/></div>
@@ -84,7 +84,7 @@
         <template #footer><el-button type="primary" :disabled="busy" @click="exportWord">导出当前已保存版本</el-button></template>
       </el-dialog>
     </template>
-    <el-drawer v-model="historyVisible" title="历史与草稿" size="500px">
+    <el-drawer v-model="historyVisible" class="detail-scroll-drawer" title="历史与草稿" size="min(500px, 96vw)">
       <h3>可编辑草稿</h3><div v-for="item in history" :key="item.draftId" class="history-row"><el-button link @click="openDraft(item.draftId)">{{item.title}}</el-button><el-button link @click="copyDraft(item.draftId)">复制</el-button><el-button v-hasPermi="['lesson:plan:remove']" link type="danger" @click="deleteDraft(item)">删除</el-button></div>
       <el-pagination v-if="historyTotal>20" v-model:current-page="historyPage" :page-size="20" :total="historyTotal" layout="prev,pager,next" @current-change="loadHistory"/><h3>历史教案（只读）</h3><div v-for="item in legacy" :key="item.generationId" class="history-row"><el-button link @click="openDraft(item.generationId)">{{item.title || item.schemeName}}</el-button><el-button link @click="copyDraft(item.generationId)">复制为草稿</el-button></div>
       <el-pagination v-if="legacyTotal>20" v-model:current-page="legacyPage" :page-size="20" :total="legacyTotal" layout="prev,pager,next" @current-change="loadHistory"/>

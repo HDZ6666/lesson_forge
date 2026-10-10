@@ -95,7 +95,7 @@
       <el-alert v-if="task.errorMessage" class="inner-alert" type="error" :closable="false" show-icon>{{ task.errorMessage }}</el-alert>
       <details class="log-panel sync-disclosure">
         <summary>运行日志 · 自动刷新最后 100 条</summary>
-        <pre v-if="task.logs.length">{{ task.logs.join('\n') }}</pre>
+        <pre v-if="task.logs.length" tabindex="0" aria-label="运行日志">{{ task.logs.join('\n') }}</pre>
         <el-empty v-else :image-size="54" description="暂无运行日志" />
       </details>
     </section>
@@ -202,7 +202,7 @@
             <el-form-item><el-button type="primary" :icon="Search" @click="searchQuestions">查询</el-button><el-button :icon="RefreshLeft" @click="resetQuestionFilters">重置</el-button></el-form-item>
           </el-form>
           <div class="review-list-toolbar"><span>当前筛选：抓取 {{ formatLiveCount(questionSummary.captured) }} 题 · 已排除 {{ formatLiveCount(questionSummary.excluded) }} 题 · 待同步 {{ formatLiveCount(questionSummary.included) }} 题</span><div><el-button :disabled="!selectedQuestions.length || acting" @click="changeQuestionSelection(selectedQuestions, true)">批量删除</el-button><el-button :disabled="!selectedQuestions.length || acting" @click="changeQuestionSelection(selectedQuestions, false)">批量恢复</el-button></div></div>
-          <el-table v-loading="questionLoading" :data="questionRows" stripe size="small" row-key="key" class="question-table" @row-click="openQuestionDetail" @selection-change="selectedQuestions = $event">
+          <el-table max-height="min(560px, 60vh)" scrollbar-always-on v-loading="questionLoading" :data="questionRows" stripe size="small" row-key="key" class="question-table" @row-click="openQuestionDetail" @selection-change="selectedQuestions = $event">
             <el-table-column type="selection" width="42" />
             <el-table-column label="同步" width="82" align="center"><template #default="scope"><el-tag size="small" :type="scope.row.excluded ? 'info' : 'success'">{{ scope.row.excluded ? '已排除' : '待同步' }}</el-tag></template></el-table-column>
             <el-table-column label="基础内容对比" width="118" align="center"><template #default="scope"><el-tag size="small" :type="scope.row.comparisonStatus === 'new' ? 'success' : scope.row.comparisonStatus === 'modified' ? 'warning' : 'info'">{{ scope.row.comparisonStatus === 'new' ? '新增' : scope.row.comparisonStatus === 'modified' ? '修改' : '基础内容相同' }}</el-tag></template></el-table-column>
@@ -221,7 +221,7 @@
     </section>
 
 
-    <el-drawer v-model="questionDetailVisible" title="本次抓取题目详情" direction="rtl" size="min(900px, 96vw)" append-to-body>
+    <el-drawer v-model="questionDetailVisible" class="detail-scroll-drawer" title="本次抓取题目详情" direction="rtl" size="min(900px, 96vw)" append-to-body>
       <el-skeleton v-if="questionDetailLoading" :rows="10" animated />
       <el-alert v-else-if="questionDetailError" type="error" :closable="false" show-icon>{{ questionDetailError }}</el-alert>
       <template v-else-if="questionDetail">

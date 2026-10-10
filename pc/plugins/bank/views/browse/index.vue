@@ -192,7 +192,7 @@
       </main>
     </div>
 
-    <el-drawer v-model="detailVisible" title="题目详情" direction="rtl" size="min(720px, 92vw)" append-to-body>
+    <el-drawer v-model="detailVisible" class="detail-scroll-drawer" title="题目详情" direction="rtl" size="min(720px, 92vw)" append-to-body>
       <el-alert v-if="detailError" type="error" :closable="false" show-icon>{{ detailError }}</el-alert>
       <el-skeleton v-if="loadingDetail" :rows="10" animated />
       <el-empty v-else-if="!detail" description="未找到题目" />

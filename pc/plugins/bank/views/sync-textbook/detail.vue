@@ -46,7 +46,7 @@
       <el-button v-if="task.discoveryError" v-hasPermi="['bank:sync:textbook:apply']" :loading="acting" @click="retryDiscovery">重试登记当前快照</el-button>
       <template v-if="task.discoveryResult"><p v-if="task.discoveryResult.action==='superseded'">已有更新的发现任务 {{task.discoveryResult.supersededBy}}，本次仅保留历史。</p>
         <details v-for="(label,key) in discoveryLabels" :key="key" class="sync-disclosure"><summary>{{label}} · {{task.discoveryResult.changes?.[key]?.length || 0}} 项</summary>
-          <el-table v-if="task.discoveryResult.changes?.[key]?.length" :data="task.discoveryResult.changes[key]"><el-table-column prop="externalId" label="来源ID"/><el-table-column prop="oldName" label="原名称"/><el-table-column prop="name" label="名称"/><el-table-column v-if="key==='conflicts'" prop="observedVersionId" label="来源版本ID"/><el-table-column prop="reason" label="说明"/></el-table>
+          <el-table max-height="min(560px, 60vh)" scrollbar-always-on v-if="task.discoveryResult.changes?.[key]?.length" :data="task.discoveryResult.changes[key]"><el-table-column prop="externalId" label="来源ID"/><el-table-column prop="oldName" label="原名称"/><el-table-column prop="name" label="名称"/><el-table-column v-if="key==='conflicts'" prop="observedVersionId" label="来源版本ID"/><el-table-column prop="reason" label="说明"/></el-table>
           <p v-if="!task.discoveryResult.changes?.[key]?.length" class="sync-muted">本次没有此类变化。</p>
         </details>
       </template>
@@ -120,19 +120,19 @@
       <el-button v-if="['failed','blocked'].includes(task.status)" :loading="failureLoading" @click="showFailurePage">查看出错现场</el-button>
       <details class="log-panel sync-disclosure">
         <summary>运行日志 · 自动刷新最后 100 条</summary>
-        <pre v-if="task.logs.length">{{ task.logs.join('\n') }}</pre>
+        <pre v-if="task.logs.length" tabindex="0" aria-label="运行日志">{{ task.logs.join('\n') }}</pre>
         <el-empty v-else :image-size="54" description="暂无运行日志" />
       </details>
     </section>
 
-    <el-dialog v-model="failureVisible" title="采集器出错现场" width="min(960px, 94vw)">
+    <el-dialog v-model="failureVisible" class="detail-scroll-dialog" title="采集器出错现场" width="min(960px, 94vw)">
       <p class="sync-muted">这是服务器采集浏览器保存的页面，截图只能查看；需要验证时须在同一个服务器浏览器中人工处理。</p>
       <template v-if="failurePage?.available">
         <p>{{ failurePage.title }} · {{ formatTaskTime(failurePage.capturedAt) }}</p>
         <p>{{ failurePage.url }}</p>
         <el-link v-if="failureSourceUrl" :href="failureSourceUrl" target="_blank" rel="noopener noreferrer" type="primary">在本机打开来源页面</el-link>
         <img v-if="failurePage.screenshot" :src="failurePage.screenshot" alt="服务器采集浏览器出错页面" style="display:block;max-width:100%;margin-top:16px" />
-        <pre style="white-space:pre-wrap;overflow-wrap:anywhere">{{ failurePage.text }}</pre>
+        <pre class="detail-log" tabindex="0" aria-label="出错页面文本">{{ failurePage.text }}</pre>
       </template>
       <el-empty v-else description="本次未保存页面现场。旧任务没有截图；更新后的任务会在浏览器关闭前保存现场。" />
     </el-dialog>
