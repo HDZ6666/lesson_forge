@@ -7,6 +7,8 @@
 !.env.*.example
 !.env.*.sample
 !.env.*.template
+# Frontend production values are public and required for reproducible builds.
+!pc/.env.production
 *.local
 *.secret
 *.secrets
