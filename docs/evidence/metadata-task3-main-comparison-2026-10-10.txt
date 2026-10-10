@@ -1,0 +1,23 @@
+基线：main / 1608b55
+环境：同生产服务器、Collector镜像4c3e047、现有浏览器档案的隔离临时副本
+数据库与成果：独立临时SQLite，不写MySQL；未修改主分支源码
+结果：与任务3相同，在第一个版本教材列表请求返回HTTP405
+
+(node:10) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+[启动] metadata-run=1，数据库：/compare/results.sqlite3
+[环境] Chrome 无头，档案已有会话，入口 https://zujuan.xkw.com/czsx/zj261314/o2/
+[版本] 发现 26 个版本
+[版本] 人教版 (195846)
+[限速] 拉取版本教材 人教版，等待 2.1 秒
+[完成] metadata-run=1 status=failed {
+  versionsSeen: 26,
+  textbooksSeen: 0,
+  inserted: 0,
+  updated: 0,
+  unchanged: 0,
+  errors: 1
+}
+
+[错误] 教材列表接口返回 HTTP 405
+使用 --help 查看参数。
