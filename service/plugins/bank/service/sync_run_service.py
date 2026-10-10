@@ -2869,7 +2869,7 @@ async def _finish(  # noqa: PLR0913
     owner = _QUEUE_OWNER.get()
     if owner:
         async with DataSourceRegistry.session() as db:
-            parent = await SyncTaskDao.get_for_update(db, run_id, 'question')
+            parent = await SyncTaskDao.get_for_update(db, run_id, handle.task_module)
             if parent is None or parent.worker_token != owner[1] or parent.status not in (
                 'queued', 'starting', 'running', 'cancelling',
             ):
@@ -2887,8 +2887,9 @@ async def _finish(  # noqa: PLR0913
                     scope.error_message = error_message
                     scope.finished_at = scope.update_time = datetime.now()
             await db.commit()
-        from plugins.bank.service.import_intake_worker import register_task_intake
-        await register_task_intake(run_id)
+        if handle.task_module == 'question':
+            from plugins.bank.service.import_intake_worker import register_task_intake
+            await register_task_intake(run_id)
         return
     expected_statuses = (
         ('queued', 'starting', 'running', 'cancelling')

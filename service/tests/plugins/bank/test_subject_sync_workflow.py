@@ -164,3 +164,31 @@ async def test_failed_discovery_retries_from_plan_without_losing_name(bank_db):
     second = await bank_db.get(QbSyncJob, plan.discovery_task_id)
     assert second.options_json['autoCycleName'] == first_name
     assert not list((await bank_db.scalars(select(QbSyncJob).where(QbSyncJob.task_module == 'question'))).all())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('status', ['completed', 'failed', 'blocked', 'cancelled'])
+async def test_discovery_terminal_result_releases_execution_slot_and_preserves_logs(bank_db, monkeypatch, status):
+    task = await SyncTaskService.create_textbook(bank_db, {'acknowledgeSourcePolicy': True}, 'teacher')
+    claim = await dispatch.claim_next(bank_db)
+    row = await bank_db.get(QbSyncJob, task['taskId'])
+    row.status = 'running'
+    row.log_tail = '发现26个版本，教材接口HTTP405'
+    await bank_db.commit()
+    factory = async_sessionmaker(bank_db.bind, expire_on_commit=False)
+    monkeypatch.setattr(runs.DataSourceRegistry, 'session', factory)
+    from plugins.bank.service import import_intake_worker
+    async def no_question_intake(*args, **kwargs):
+        raise AssertionError('教材发现不应提交题目入库核验')
+    monkeypatch.setattr(import_intake_worker, 'register_task_intake', no_question_intake)
+    await bank_db.rollback()
+    token = runs._QUEUE_OWNER.set((task['taskId'], claim['token']))
+    try:
+        await runs._finish(task['taskId'], runs._WorkerHandle(token=claim['token'], task_module='textbook', run_type='metadata'),
+                           status, status, None if status == 'completed' else '教材列表接口返回 HTTP 405')
+    finally:
+        runs._QUEUE_OWNER.reset(token)
+    row = await bank_db.get(QbSyncJob, task['taskId'], populate_existing=True)
+    assert row.status == status and row.phase == status and row.active_slot is None
+    assert row.finished_at is not None and row.log_tail == '发现26个版本，教材接口HTTP405'
+    assert await dispatch.release_finished_books(bank_db) == 1
