@@ -12,6 +12,12 @@ from plugins.bank.service.task_service import SyncTaskService, task_payload
 from tests.plugins.bank.test_incremental_merge import bank_db as bank_db
 
 
+def test_new_plan_and_server_default_are_eight(monkeypatch):
+    monkeypatch.delenv('BANK_DEFAULT_LIST_CONCURRENCY',raising=False)
+    assert PlanInput(subjectId=1).list_concurrency==8
+    assert task_concurrency.server_default()==8
+
+
 @pytest.mark.asyncio
 async def test_precedence_snapshot_edit_and_dispatched_lock(bank_db, monkeypatch):
     monkeypatch.setenv('BANK_DEFAULT_LIST_CONCURRENCY', '2')

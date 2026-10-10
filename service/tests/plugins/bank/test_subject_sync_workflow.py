@@ -26,7 +26,7 @@ async def tick(db, plan_id):
 
 
 async def registered_plan(db):
-    result = await plans.save_plan(db, PlanInput(subjectId=1, planName='数学全教材', enabled=True))
+    result = await plans.save_plan(db, PlanInput(subjectId=1, planName='数学全教材', enabled=True, listConcurrency=1))
     plan_id = result['planId']
     await tick(db, plan_id)
     plan = await db.get(QbSyncPlan, plan_id)
@@ -43,7 +43,7 @@ async def registered_plan(db):
 @pytest.mark.asyncio
 async def test_discovery_must_register_before_full_queue_and_names_are_snapshots(bank_db, monkeypatch):
     monkeypatch.setenv('BANK_AUTOMATIC_SYNC_ENABLED', '1')
-    result = await plans.save_plan(bank_db, PlanInput(subjectId=1, planName='数学全教材', enabled=True))
+    result = await plans.save_plan(bank_db, PlanInput(subjectId=1, planName='数学全教材', enabled=True, listConcurrency=1))
     plan_id = result['planId']
     await tick(bank_db, plan_id)
     jobs = list((await bank_db.scalars(select(QbSyncJob))).all())

@@ -27,7 +27,7 @@ READ = UserInterfaceAuthDependency(
 
 
 class PlanInput(BankModel):
-    list_concurrency: int = Field(default=1, strict=True, ge=1, le=8)
+    list_concurrency: int = Field(default=8, strict=True, ge=1, le=8)
     plan_name: str | None = Field(default=None, min_length=1, max_length=100)
     subject_id: int = Field(gt=0)
     expected_revision: int | None = Field(default=None, gt=0)

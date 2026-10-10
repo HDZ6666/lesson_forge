@@ -19,6 +19,7 @@ async def run(db):
     })
     await add_columns(db, 'qb_sync_job', {'dispatch_priority':'BIGINT NOT NULL DEFAULT 0', 'dispatch_rank':'INT NOT NULL DEFAULT 0'})
     await add_columns(db, 'qb_sync_book_state', {'last_manual_task_id':'BIGINT NULL'})
+    await db.execute(text('ALTER TABLE qb_sync_plan ALTER COLUMN list_concurrency SET DEFAULT 8'))
     await db.execute(text("UPDATE qb_sync_plan SET cycle_state='running' WHERE cycle_no>0 AND cycle_state='idle'"))
     await db.execute(text("UPDATE qb_sync_plan SET control_state='paused' WHERE enabled=0 AND control_state='active'"))
     connection=await db.connection()

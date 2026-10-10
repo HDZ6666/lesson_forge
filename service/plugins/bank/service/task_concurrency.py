@@ -10,7 +10,7 @@ from plugins.bank.entity.do.bank_do import QbSyncJob, QbSyncPlan
 
 
 def server_default():
-    value = int(os.getenv('BANK_DEFAULT_LIST_CONCURRENCY', '1'))
+    value = int(os.getenv('BANK_DEFAULT_LIST_CONCURRENCY', '8'))
     if not 1 <= value <= 16:
         raise ServiceException(message='服务器题目分页并发配置无效')
     return value
