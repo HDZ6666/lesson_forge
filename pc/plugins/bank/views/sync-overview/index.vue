@@ -2,7 +2,7 @@
   <div class="app-container sync-center-page">
     <header class="page-heading">
       <div><h2>同步中心</h2><p>逐本建立题库，查看采集进度，集中处理需要你关注的问题。</p></div>
-      <div class="heading-actions"><SubjectSelect v-model="subjectId" @change="load" /><el-button :icon="Refresh" :loading="loading" @click="load">刷新</el-button></div>
+      <div class="heading-actions"><SubjectSelect v-model="subjectId" @change="load" /><SourceBudgetSettings @updated="load" /><el-button :icon="Refresh" :loading="loading" @click="load">刷新</el-button></div>
     </header>
     <SyncCenterNav active="overview" :subject-id="subjectId" />
     <SyncWorkflow />
@@ -66,6 +66,7 @@ import { Refresh, Collection, ArrowRight, InfoFilled } from '@element-plus/icons
 import { ElMessage, ElMessageBox } from 'element-plus'
 import request from '@/utils/request'
 import SubjectSelect from '../../components/SubjectSelect.vue'
+import SourceBudgetSettings from '../../components/SourceBudgetSettings.vue'
 import SyncWorkflow from '../../components/SyncWorkflow.vue'
 import SyncCenterNav from '../../components/SyncCenterNav.vue'
 import { formatTaskTime, syncTaskStatusMeta } from '../../utils/sync-task'

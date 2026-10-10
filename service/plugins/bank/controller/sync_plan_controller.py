@@ -55,6 +55,14 @@ class RevisionInput(BankModel):
     expected_revision: int = Field(ge=0)
 
 
+class BudgetInput(BankModel):
+    expected_revision: int = Field(strict=True, ge=0)
+    requests: int = Field(strict=True, ge=0, le=9007199254740991)
+    books: int = Field(strict=True, ge=0, le=9007199254740991)
+    active_seconds: int = Field(strict=True, ge=0, le=9007199254740)
+    download_mib: int = Field(alias='downloadMiB', strict=True, ge=0, le=8589934591)
+
+
 class IssueInput(BankModel):
     expected_revision: int = Field(gt=0)
     status: Literal['open', 'ignored']
@@ -158,6 +166,18 @@ async def change_control(payload: ControlInput, db: DB, user: USER) -> Response:
 async def resume_source(payload: RevisionInput) -> Response:
     return ResponseUtil.success(
         data=await asyncio.to_thread(CollectorClient().resume_source, payload.expected_revision)
+    )
+
+
+@sync_plan_controller.get('/control/budget', dependencies=[READ])
+async def source_budget() -> Response:
+    return ResponseUtil.success(data=await asyncio.to_thread(CollectorClient().source_budget))
+
+
+@sync_plan_controller.put('/control/budget', dependencies=[UserInterfaceAuthDependency('bank:sync:control')])
+async def save_source_budget(payload: BudgetInput) -> Response:
+    return ResponseUtil.success(
+        data=await asyncio.to_thread(CollectorClient().update_source_budget, payload.model_dump(by_alias=True))
     )
 
 

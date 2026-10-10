@@ -93,12 +93,12 @@ async def test_issues_dedupe_keep_middle_task_after_archive_and_close_only_same_
     assert (await list_issues(bank_db, task_id=11))['rows'][0]['status'] == 'resolved'
 
 
-def test_unattended_gate_requires_real_budget_and_host_settings(monkeypatch):
+def test_unattended_gate_allows_unlimited_budget_and_requires_host_settings(monkeypatch):
     monkeypatch.setenv('BANK_AUTOMATIC_SYNC_ENABLED', '1')
-    assert '预算' in plans.unattended_reason({})
+    assert '资源水位' in plans.unattended_reason({})
     for name in ('BANK_MIN_DISK_FREE_MIB', 'BANK_MIN_MEMORY_FREE_MIB', 'BANK_SYNC_MAX_PENDING_IMPORTS'):
         monkeypatch.setenv(name, '1')
-    health = {'sourceBudget': {'allDailyLimitsConfigured': True}, 'resources': {'diskAndMemoryLimitsConfigured': True}}
+    health = {'sourceBudget': {'allDailyLimitsConfigured': False}, 'resources': {'diskAndMemoryLimitsConfigured': True}}
     monkeypatch.setattr(plans, 'resource_status', lambda: {'reason': None})
     assert plans.unattended_reason(health) is None
     health['sourceControl'] = {'paused': True, 'reason': '验证码'}
@@ -370,3 +370,15 @@ async def test_plan_discovery_waits_for_shared_worker_then_records_result(bank_d
     await plans._discovery(bank_db,result['planId'],None)
     assert plan.discovery_task_id is None and plan.discovery_processed_task_id==task_id
     assert plan.discovery_error==(None if registered else '封存不完整')
+
+
+def test_budget_input_validates_and_serializes_collector_contract():
+    from pydantic import ValidationError
+
+    from plugins.bank.controller.sync_plan_controller import BudgetInput
+
+    payload = dict(expectedRevision=0, requests=0, books=0, activeSeconds=3600, downloadMiB=1024)
+    assert BudgetInput(**payload).model_dump(by_alias=True) == payload
+    for key, value in [('books', -1), ('requests', True), ('activeSeconds', 0.5), ('downloadMiB', 8589934592)]:
+        with pytest.raises(ValidationError):
+            BudgetInput(**{**payload, key: value})

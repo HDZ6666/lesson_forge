@@ -146,7 +146,7 @@ test('健康组合状态取所有限制的最晚时间，解除来源不绕过�
   } finally { fs.rmSync(f.directory, { recursive: true, force: true }); }
 });
 
-test('API 显示只读预算；调用方不能用任务载荷提高额度或借恢复入口清零', async () => {
+test('API 预算配置需认证；任务载荷不能覆盖额度', async () => {
   const f = fixture({ requestLimit: 1 });
   const manager = new CollectorJobManager({ dbPath: f.dbPath,
     sourceBudgetOptions: { requestLimit: 1 }, spawnImpl: () => { throw new Error('must not start'); } });
@@ -167,6 +167,13 @@ test('API 显示只读预算；调用方不能用任务载荷提高额度或借�
     assert.equal((await response.json()).error.code, 'source_budget');
     const budget = await (await fetch(`${base}/v1/source-budget`, { headers })).json();
     assert.equal(budget.usage.requests, 1);
+    const payload = { expectedRevision: 0, requests: 0, books: 0, activeSeconds: 0, downloadMiB: 0 };
+    assert.equal((await fetch(`${base}/v1/source-budget`, { method: 'PUT', body: JSON.stringify(payload) })).status, 401);
+    const changed = await fetch(`${base}/v1/source-budget`, { method: 'PUT', headers, body: JSON.stringify(payload) });
+    assert.equal(changed.status, 200);
+    assert.equal((await changed.json()).paused, false);
+    assert.equal(manager.sourceBudget.status().usage.requests, 1);
+    assert.equal((await fetch(`${base}/v1/source-budget`, { method: 'PUT', headers, body: JSON.stringify(payload) })).status, 409);
   } finally {
     await manager.shutdown(); await new Promise((resolve) => server.close(resolve));
     fs.rmSync(f.directory, { recursive: true, force: true });
@@ -215,4 +222,32 @@ test('真实流式素材复用会话且拒绝越界重定向，超额停止读�
   await assert.rejects(openAssetResponse(context,'https://img.xkw.com/a.png',{
     assetFetch:async()=>new Response('',{status:302,headers:{location:'https://evil.example/a'}}),
   }),/域名|host|允许/);
+});
+
+test('额度配置持久化、跨实例即时生效，解除额度不清空用量或解除来源验证', () => {
+  const f = fixture({ requestLimit: 2, bookLimit: 1, activeSeconds: 1, downloadMiB: 1 });
+  try {
+    const worker = new SourceBudget(f.dbPath, { clock: f.budget.clock, requestLimit: 1 });
+    f.budget.request();
+    f.budget.startRun('content:1', 'content');
+    const source = new SourceControl(f.dbPath, { clock: f.budget.clock });
+    source.markManual('需要人工验证');
+    const saved = f.budget.updateSettings({ expectedRevision: 0, requests: 0, books: 0, activeSeconds: 0, downloadMiB: 0 });
+    assert.equal(saved.revision, 1);
+    assert.equal(saved.paused, false);
+    assert.equal(saved.usage.requests, 1);
+    assert.equal(saved.usage.bookStarts, 1);
+    assert.equal(worker.request(), 2);
+    const restarted = new SourceBudget(f.dbPath, { clock: f.budget.clock, requestLimit: 1 });
+    assert.equal(restarted.status().settings.requests, 0);
+    assert.equal(restarted.request(), 3);
+    assert.equal(source.status().manualRequired, true);
+    assert.throws(() => worker.updateSettings({ expectedRevision: 0, requests: 5, books: 0, activeSeconds: 0, downloadMiB: 0 }), /已被修改/);
+    restarted.updateSettings({ expectedRevision: 1, requests: 3, books: 0, activeSeconds: 2, downloadMiB: 2 });
+    assert.throws(() => worker.request(), SourceBudgetError);
+    assert.equal(worker.status().limits.activeMilliseconds, 2000);
+    assert.equal(worker.status().limits.downloadBytes, 2097152);
+    assert.throws(() => worker.updateSettings({ expectedRevision: 2, requests: -1, books: 0, activeSeconds: 0, downloadMiB: 0 }), /非负整数/);
+    assert.equal(worker.status().revision, 2);
+  } finally { fs.rmSync(f.directory, { recursive: true, force: true }); }
 });

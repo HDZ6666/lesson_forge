@@ -67,9 +67,9 @@ async def set_control(db, paused, revision, reason, operator):
 def unattended_reason(health):
     if os.getenv('BANK_AUTOMATIC_SYNC_ENABLED') != '1':
         return '全教材自动运行尚未启用'
-    budget, resources = health.get('sourceBudget') or {}, health.get('resources') or {}
-    if not budget.get('allDailyLimitsConfigured') or not resources.get('diskAndMemoryLimitsConfigured'):
-        return '请先配置来源请求、教材启动、时长、下载预算及采集主机资源水位'
+    resources = health.get('resources') or {}
+    if not resources.get('diskAndMemoryLimitsConfigured'):
+        return '请先配置采集主机资源水位'
     if not all(
         configured_limit(name) > 0
         for name in (

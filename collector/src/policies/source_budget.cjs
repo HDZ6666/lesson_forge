@@ -29,16 +29,22 @@ class SourceBudget {
   constructor(dbPath, { clock = Date.now, requestLimit, bookLimit, activeSeconds, downloadMiB } = {}) {
     this.dbPath = dbPath;
     this.clock = clock;
-    this.limits = {
+    this.defaults = {
       requests: nonnegativeLimit(requestLimit ?? process.env.COLLECTOR_SOURCE_DAILY_REQUEST_LIMIT, 'COLLECTOR_SOURCE_DAILY_REQUEST_LIMIT'),
       books: nonnegativeLimit(bookLimit ?? process.env.COLLECTOR_SOURCE_DAILY_BOOK_LIMIT, 'COLLECTOR_SOURCE_DAILY_BOOK_LIMIT'),
       activeMilliseconds: scaledLimit(activeSeconds ?? process.env.COLLECTOR_SOURCE_DAILY_ACTIVE_SECONDS, 'COLLECTOR_SOURCE_DAILY_ACTIVE_SECONDS', 1000),
       downloadBytes: scaledLimit(downloadMiB ?? process.env.COLLECTOR_SOURCE_DAILY_DOWNLOAD_MIB, 'COLLECTOR_SOURCE_DAILY_DOWNLOAD_MIB', 1024 * 1024),
     };
+    this.limits = { ...this.defaults };
+    this.revision = 0;
+    this.initialized = false;
     this.timing = null;
     this.timer = null;
     this.withDb((db) => {
       db.exec(`
+      CREATE TABLE IF NOT EXISTS collector_budget_settings (
+        provider TEXT PRIMARY KEY, revision INTEGER NOT NULL, limits_json TEXT NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS collector_source_usage (
         provider TEXT NOT NULL, day TEXT NOT NULL,
         requests INTEGER NOT NULL DEFAULT 0, book_starts INTEGER NOT NULL DEFAULT 0,
@@ -53,6 +59,7 @@ class SourceBudget {
         if (!columns.has(name)) db.exec(`ALTER TABLE collector_source_usage ADD COLUMN ${name} INTEGER NOT NULL DEFAULT 0`);
       }
     }, true);
+    this.initialized = true;
   }
 
   withDb(fn, transaction = false) {
@@ -60,6 +67,11 @@ class SourceBudget {
     try {
       db.exec('PRAGMA busy_timeout=1000');
       if (transaction) db.exec('BEGIN IMMEDIATE');
+      if (this.initialized) {
+        const settings = db.prepare("SELECT * FROM collector_budget_settings WHERE provider='zujuan'").get();
+        this.limits = settings ? JSON.parse(settings.limits_json) : { ...this.defaults };
+        this.revision = settings?.revision || 0;
+      }
       const result = fn(db);
       if (transaction) db.exec('COMMIT');
       return result;
@@ -85,6 +97,9 @@ class SourceBudget {
     const next = new Date(`${row.day}T00:00:00Z`).getTime() + 86400000;
     return {
       provider: 'zujuan', day: row.day, limits: { ...this.limits },
+      revision: this.revision, resetAt: new Date(next).toISOString(),
+      settings: { requests: this.limits.requests, books: this.limits.books,
+        activeSeconds: this.limits.activeMilliseconds / 1000, downloadMiB: this.limits.downloadBytes / 1048576 },
       usage: { requests: row.requests, bookStarts: row.book_starts, activeMilliseconds: row.active_ms, downloadBytes: row.download_bytes },
       paused: reasons.length > 0, manualRequired: false,
       reason: reasons.join('；') || null,
@@ -95,6 +110,25 @@ class SourceBudget {
   }
 
   status(runType = 'content') { return this.withDb((db) => this.project(this.usage(db), runType)); }
+
+  updateSettings(input) {
+    for (const key of ['expectedRevision', 'requests', 'books', 'activeSeconds', 'downloadMiB']) {
+      if (!Number.isSafeInteger(input?.[key]) || input[key] < 0) throw new Error(`${key} 必须是非负整数`);
+    }
+    const limits = { requests: input.requests, books: input.books,
+      activeMilliseconds: scaledLimit(input.activeSeconds, 'activeSeconds', 1000),
+      downloadBytes: scaledLimit(input.downloadMiB, 'downloadMiB', 1048576) };
+    return this.withDb((db) => {
+      if (input.expectedRevision !== this.revision) {
+        const error = new Error('额度配置已被修改，请刷新后重试'); error.statusCode = 409; throw error;
+      }
+      this.revision += 1;
+      db.prepare("INSERT INTO collector_budget_settings(provider,revision,limits_json) VALUES('zujuan',?,?) ON CONFLICT(provider) DO UPDATE SET revision=excluded.revision,limits_json=excluded.limits_json")
+        .run(this.revision, JSON.stringify(limits));
+      this.limits = limits;
+      return this.project(this.usage(db));
+    }, true);
+  }
 
   assertCanStart(runType = 'content') {
     const state = this.status(runType);

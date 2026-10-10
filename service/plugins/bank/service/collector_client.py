@@ -217,6 +217,12 @@ class CollectorClient:
     def health(self) -> dict[str, Any]:
         return self._request('GET', '/v1/health')
 
+    def source_budget(self):
+        return self._request('GET', '/v1/source-budget')
+
+    def update_source_budget(self, settings):
+        return self._request('PUT', '/v1/source-budget', payload=settings)
+
     def source_control(self):
         return self._request('GET', '/v1/source-control')
 

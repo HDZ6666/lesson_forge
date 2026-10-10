@@ -68,6 +68,10 @@ function createCollectorServer(options = {}) {
         sendJson(response, 200, manager.sourceBudget.status());
         return;
       }
+      if (request.method === 'PUT' && url.pathname === '/v1/source-budget') {
+        sendJson(response, 200, manager.sourceBudget.updateSettings(await readJson(request)));
+        return;
+      }
       if (request.method === 'POST' && url.pathname === '/v1/source-control/resume') {
         // Deployment token is checked above. No provider/session override.
         const body = await readJson(request);
