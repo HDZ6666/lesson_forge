@@ -25,6 +25,7 @@
       <div class="section-heading"><div><h3>{{ plan.planId ? '同步安排' : '创建本学科的计划' }}</h3><p>先覆盖全部教材，再定期更新。新版优先，旧版保留；无需分别创建发现、采集和入库任务。</p></div><el-tag :type="plan.enabled ? 'success' : 'info'">{{ plan.enabled ? '计划已启用' : '计划未启用' }}</el-tag></div>
       <el-form label-position="top" @submit.prevent="save">
         <el-form-item label="计划名称"><el-input v-model="form.planName" maxlength="100" placeholder="例如：初中数学全教材同步；留空使用学科名称"/></el-form-item>
+        <el-form-item label="题目分页并发"><div><el-select v-model="form.listConcurrency" style="width:200px"><el-option v-for="n in [1,2,4,8]" :key="n" :value="n" :label="`${n} 页并发`"/></el-select><p class="field-hint">一本教材内同时请求的页数，每页通常 10 道题。仅影响之后创建的任务；已有待办可在任务中单独修改，各教材仍逐本排队。</p></div></el-form-item>
         <details class="plan-settings"><summary>更新频率设置（默认每 7 天更新，未完成教材 24 小时后补采）</summary><div class="plan-fields">
           <el-form-item label="正常刷新间隔"><div><el-input-number v-model="form.refreshDays" :min="1" :max="365" controls-position="right"/><span class="unit">天</span><p class="field-hint">本次完整入库后，再次检查新题的间隔。</p></div></el-form-item>
           <el-form-item label="未完成教材的补采间隔"><div><el-input-number v-model="form.refillHours" :min="1" :max="720" controls-position="right"/><span class="unit">小时</span><p class="field-hint">已有成果保留，下轮重新扫描并合并新增、变化的题目。</p></div></el-form-item>
@@ -65,7 +66,7 @@ import request from '@/utils/request'
 import SubjectSelect from '../../components/SubjectSelect.vue'
 const route = useRoute()
 const router = useRouter(), subjectId = ref(Number(route.query.subjectId) || 1), books = ref([]), plan = ref({}), control = ref({}), loading = ref(false), saving = ref(false), error = ref('')
-const form = ref({planName:'',enabled:true,refreshDays:7,refillHours:24,discoveryDays:7}), bookForm = ref({}), bookDialog = ref(false)
+const form = ref({listConcurrency:1,planName:'',enabled:true,refreshDays:7,refillHours:24,discoveryDays:7}), bookForm = ref({}), bookDialog = ref(false)
 const exceptionLabels = {no_questions:'来源无题',inaccessible:'长期不可访问'}
 const progress = computed(() => planProgress(books.value))
 const phase = computed(() => planPhase(plan.value, progress.value))
@@ -83,7 +84,7 @@ async function load(silent=false) {
     const current=data(p)[0] || {}, b=current.planId ? data(await request({url:`/bank/sync/plans/${current.planId}/books`})) : []
     if(id!==epoch)return
     plan.value=current;books.value=b;control.value=data(c)
-    if (!silent) form.value={planName:current.planName || '',enabled:current.planId ? current.enabled : true,refreshDays:current.refreshDays || 7,refillHours:current.refillHours || 24,discoveryDays:current.discoveryDays || 7}
+    if (!silent) form.value={listConcurrency:current.listConcurrency || 1,planName:current.planName || '',enabled:current.planId ? current.enabled : true,refreshDays:current.refreshDays || 7,refillHours:current.refillHours || 24,discoveryDays:current.discoveryDays || 7}
   } catch(e){if(id===epoch)error.value=e.message || '计划读取失败'} finally{if(id===epoch)loading.value=false;if(silent)polling=false}
 }
 async function resumeSource(){saving.value=true;try{await request({url:'/bank/sync/control/source/resume',method:'post',data:{expectedRevision:control.value.source.revision}});await load()}catch(e){error.value=e.message}finally{saving.value=false}}

@@ -237,6 +237,7 @@ class CollectorClient:
         limit_to_1000_pages: bool | None = None,
         workflow_version: int | None = None,
         job_id: str | None = None,
+        list_concurrency: int | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             'runType': run_type,
@@ -259,6 +260,10 @@ class CollectorClient:
         # persisted task choice when enabled.
         if limit_to_1000_pages is not None:
             payload['limitTo1000Pages'] = bool(limit_to_1000_pages)
+        if list_concurrency is not None:
+            if type(list_concurrency) is not int or not 1 <= list_concurrency <= 16:
+                raise ServiceException(message='题目分页并发数无效')
+            payload['listConcurrency'] = list_concurrency
         if job_id is not None:
             if not re.fullmatch(r'[0-9a-fA-F-]{36}', job_id):
                 raise ServiceException(message='派发任务 ID 无效')

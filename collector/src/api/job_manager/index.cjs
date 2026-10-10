@@ -273,6 +273,10 @@ class CollectorJobManager {
     if (payload.sourceNamespace != null && payload.sourceNamespace !== 'zujuan:junior:math') {
       throw new Error('该来源学段学科的采集适配尚未验证');
     }
+    const listConcurrency = payload.listConcurrency == null ? null : payload.listConcurrency;
+    if (listConcurrency !== null && (runType !== 'content' || !Number.isInteger(listConcurrency) || listConcurrency < 1 || listConcurrency > MAX_LIST_CONCURRENCY)) {
+      throw new Error('listConcurrency 仅接受题目任务的 1 到 16 整数');
+    }
     const limitTo1000Pages = requestBoolean(payload.limitTo1000Pages, 'limitTo1000Pages', false);
     const hasIndependentScopes = runType === 'content'
       && Object.prototype.hasOwnProperty.call(payload, 'textbookScopes');
@@ -313,6 +317,7 @@ class CollectorJobManager {
     const requestDigest = createHash('sha256').update(JSON.stringify({
       runType, workflowVersion, maxPages, limitTo1000Pages, metadataRunId,
       textbookExternalIds, independentScopes, sourceNamespace: 'zujuan:junior:math',
+      ...(listConcurrency == null ? {} : { listConcurrency }),
     })).digest('hex');
     const replay = () => {
       if (!requestedId) return null;
@@ -345,6 +350,7 @@ class CollectorJobManager {
     const job = {
       id: requestedId || randomUUID(),
       requestDigest: requestedId ? requestDigest : null,
+      listConcurrency: runType === 'content' ? listConcurrency ?? this.crawlTuning.listConcurrency : null,
       runType,
       workflowVersion,
       sourceNamespace: 'zujuan:junior:math',

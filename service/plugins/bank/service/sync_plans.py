@@ -88,6 +88,7 @@ def plan_dump(row):
         'planId': row.plan_id,
         'subjectId': row.subject_id,
         'planName': row.plan_name,
+        'listConcurrency': row.list_concurrency,
         'cycleName': row.cycle_name,
         'enabled': bool(row.enabled),
         'refreshDays': row.refresh_days,
@@ -146,6 +147,7 @@ async def save_plan(db, payload):
     name = payload.plan_name.strip() if payload.plan_name is not None else row.plan_name or f'{subject.subject_name}同步'
     if not name:
         raise ServiceException(message='计划名称不能为空')
+    row.list_concurrency = payload.list_concurrency
     row.plan_name = name
     row.enabled = int(payload.enabled)
     row.refresh_days, row.refill_hours, row.discovery_days = (

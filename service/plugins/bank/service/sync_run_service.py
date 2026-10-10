@@ -149,6 +149,7 @@ class _WorkerHandle:
     resumed: bool = False
     # A per-task question collection policy. Rehydrate this from options_json
     # so retries/resumes keep the same page-limit mode.
+    list_concurrency: int | None = None
     limit_to_1000_pages: bool = False
     workflow_version: int = 1
     dispatch_job_id: str | None = None
@@ -2153,6 +2154,8 @@ async def _execute_remote(  # noqa: PLR0912, PLR0915
             start_kwargs['textbook_scopes'] = list(handle.textbook_scopes)
         if handle.task_module == 'question' and handle.limit_to_1000_pages:
             start_kwargs['limit_to_1000_pages'] = True
+        if handle.task_module == 'question' and handle.list_concurrency is not None:
+            start_kwargs['list_concurrency'] = handle.list_concurrency
         if handle.workflow_version >= 2:
             start_kwargs['workflow_version'] = 2
         dispatch_id = handle.dispatch_job_id
@@ -2562,6 +2565,7 @@ async def _execute(run_id: int, handle: _WorkerHandle) -> None:  # noqa: PLR0912
                     except (TypeError, json.JSONDecodeError):
                         options = {}
                 options = options if isinstance(options, Mapping) else {}
+                handle.list_concurrency = options.get('listConcurrency')
                 handle.workflow_version = int(options.get('workflowVersion', 1))
                 handle.resumed = handle.resumed or bool(options.get('resumeTask') or options.get('resume_task'))
                 handle.limit_to_1000_pages = _status_flag(

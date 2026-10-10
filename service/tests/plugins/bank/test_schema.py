@@ -73,6 +73,7 @@ def test_bank_manifest_is_mysql_only_and_references_real_resources() -> None:
         'migrations/mysql/020_sync_dispatch.py',
         'migrations/mysql/021_sync_plans_and_issues.py',
         'migrations/mysql/022_sync_plan_names.py',
+        'migrations/mysql/023_plan_concurrency.py',
     ]
     assert plugin.manifest.backend.seeds == ['seeds/mysql/001_dict.sql']
     assert plugin.manifest.compatibility.databases == ['mysql']

@@ -382,6 +382,7 @@ async def test_create_question_carries_page_policy_into_task_options(
 
     from plugins.bank.service.subject_service import SubjectService
     from unittest.mock import AsyncMock
+    monkeypatch.setattr(task_service.task_concurrency, 'resolve', AsyncMock(return_value={'listConcurrency':1,'concurrencySource':'server','inheritedConcurrency':1}))
     monkeypatch.setattr(SubjectService, 'require', AsyncMock(return_value=SimpleNamespace(source_profile='zujuan_czsx')))
     monkeypatch.setattr(task_service.BankDao, 'get_version', get_version)
     monkeypatch.setattr(task_service.BankDao, 'get_textbook', get_textbook)

@@ -38,6 +38,7 @@ from plugins.bank.entity.vo.bank_vo import (
     SyncTaskPageQueryModel,
     TaskComparisonQueryModel,
 )
+from plugins.bank.service import task_concurrency
 from plugins.bank.service.collector_client import CollectorClient
 from plugins.bank.service.question_apply_service import _normalise_answer_status
 from plugins.bank.service.sync_dispatch import queue_fields
@@ -440,6 +441,9 @@ def task_payload(row: object, scopes: list[object] | None = None) -> dict[str, A
         'metadataRunId': metadata_run_id,
         'sourceTaskId': _pick(row, 'source_task_id', 'sourceTaskId'),
         'retryOfRunId': _pick(row, 'retry_of_run_id', 'retryOfRunId'),
+        **task_concurrency.snapshot(options),
+        'concurrencyToken': task_concurrency.token(options),
+        'concurrencyEditable': str(_pick(row, 'status')) == 'queued' and bool(_pick(row, 'dispatch_job_id')) and not _pick(row, 'active_slot') and not _pick(row, 'collector_job_id'),
         'autoPlanId': options.get('autoPlanId'),
         'autoPlanName': options.get('autoPlanName'),
         'autoCycleNo': options.get('autoCycleNo'),
@@ -1398,14 +1402,16 @@ class SyncTaskService:
         )
 
     @classmethod
-    async def retry_question(cls, db: AsyncSession, task_id: int, operator: str | None = None) -> dict[str, Any]:
+    async def retry_question(cls, db: AsyncSession, task_id: int, operator: str | None = None, *, settings=None) -> dict[str, Any]:
         row = await SyncTaskDao.get(db, task_id, 'question')
         if row is None:
             raise ServiceException(message='同步题库任务不存在')
-        if str(_pick(row, 'status', default='')) not in {'failed', 'blocked', 'cancelled', 'interrupted'}:
-            raise ServiceException(message='只有失败、阻断、已停止或已中断的任务可以重试')
+        if str(_pick(row, 'status', default='')) not in {'completed', 'failed', 'blocked', 'cancelled', 'interrupted'}:
+            raise ServiceException(message='只有已结束的任务可以重新创建采集任务')
         scopes = await SyncTaskDao.scopes(db, task_id)
         options = _task_options(row)
+        concurrency = (await task_concurrency.resolve(db, int(_pick(row, 'subject_id', default=1) or 1), settings.list_concurrency)
+                       if settings is not None else task_concurrency.snapshot(options))
         version_id = options.get('versionId') or options.get('version_id')
         textbook_ids = options.get('textbookIds') or options.get('textbook_ids')
         if not isinstance(textbook_ids, list):
@@ -1476,6 +1482,7 @@ class SyncTaskService:
             scope_rows=retry_scopes,
             defer_dispatch=int(options.get('workflowVersion', 1)) >= 2,
             extra_options={
+                **concurrency,
                 'workflowVersion': int(options.get('workflowVersion', 1)),
                 'subjectId': int(_pick(row, 'subject_id', 'subjectId', default=1) or 1),
                 'versionId': int(version_id),
@@ -1637,6 +1644,7 @@ class SyncTaskService:
             payload if isinstance(payload, QuestionTaskCreateModel) else QuestionTaskCreateModel.model_validate(payload)
         )
         version, books = await cls._resolve_question_scope(db, request)
+        concurrency = await task_concurrency.resolve(db, int(_pick(version, 'subject_id', 'subjectId', default=1) or 1), request.list_concurrency)
         scope_rows: list[dict[str, Any]] = []
         external_ids: list[str] = []
         for book in books:
@@ -1697,6 +1705,7 @@ class SyncTaskService:
             scope_rows=scope_rows,
             extra_options={
                 **(automatic_options or {}),
+                **concurrency,
                 'workflowVersion': 2,
                 'subjectId': int(_pick(version, 'subject_id', 'subjectId', default=1) or 1),
                 'sourceProfile': 'zujuan_czsx',

@@ -420,7 +420,7 @@ class ExecutionMethods {
       // checkpoint switch passed to the child.
       if (job.maxPages < SITE_PAGE_LIMIT) childArgs.push('--max-pages', String(job.maxPages));
       if (job.limitTo1000Pages === true) childArgs.push('--limit-to-1000-pages');
-      childArgs.push(...crawlTuningArgs(this.crawlTuning));
+      childArgs.push(...crawlTuningArgs({ ...this.crawlTuning, listConcurrency: job.listConcurrency ?? this.crawlTuning.listConcurrency }));
       if (scope?.resumeFromCollectorRunId != null) {
         childArgs.push('--resume-run-id', String(scope.resumeFromCollectorRunId));
       } else {

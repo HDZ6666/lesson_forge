@@ -36,6 +36,7 @@
     </header>
     <SyncCenterNav active="tasks"/>
 
+    <div v-if="task" class="sync-panel"><TaskConcurrency :task="task" @updated="refreshTask"/></div>
     <el-alert v-if="requestError" class="state-alert" type="error" :closable="false" show-icon>{{ requestError }}</el-alert>
     <el-alert v-if="task?.progressStale" class="state-alert" type="warning" :closable="false" show-icon>
       实时进度暂不可用，当前显示已保存的数据；不会影响任务的最终验收结果。
@@ -241,6 +242,7 @@
 </template>
 
 <script setup>
+import TaskConcurrency from '../../components/TaskConcurrency.vue'
 import SyncCenterNav from '../../components/SyncCenterNav.vue'
 import '../../styles/sync-center.scss'
 import { computed, defineComponent, h, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'

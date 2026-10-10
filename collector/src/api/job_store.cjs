@@ -25,7 +25,7 @@ const MAX_PAYLOAD_CHARS = 512 * 1024;
 const LIVE_OWNER_TOKENS = new Set();
 
 const PERSISTED_FIELDS = [
-  'requestDigest',
+  'requestDigest', 'listConcurrency',
   'workflowVersion', 'sourceNamespace',
   'id', 'runType', 'status', 'phase', 'metadataRunId', 'collectorRunId',
   'textbookExternalIds', 'scopeItems', 'maxPages', 'limitTo1000Pages', 'totalVersions',

@@ -690,7 +690,15 @@ class SyncTaskCreateModel(BankModel):
     )
 
 
-class QuestionTaskCreateModel(BankModel):
+class TaskConcurrencyInput(BankModel):
+    list_concurrency: int | None = Field(default=None, strict=True, ge=1, le=8)
+
+
+class TaskConcurrencyUpdate(TaskConcurrencyInput):
+    expected_token: str = Field(min_length=64, max_length=64)
+
+
+class QuestionTaskCreateModel(TaskConcurrencyInput):
     """Create a question task from one formal version and its textbooks.
 
     No collector identifiers, URLs, commands, or acknowledgement switches

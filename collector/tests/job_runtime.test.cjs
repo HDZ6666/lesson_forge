@@ -706,3 +706,26 @@ test('部署浏览器模式统一传递给教材发现和内容子进程', async
     }
   }
 });
+
+test('单任务分页并发覆盖部署值，持久保存且派发重放不能换参数', async () => {
+  const { directory, dbPath } = temporaryDb('task-concurrency-');
+  seedMetadata(dbPath);
+  let args;
+  const manager = new CollectorJobManager({ dbPath, listConcurrency: 1, spawnImpl(_node, argv) {
+    args = argv;
+    const child = fakeChild();
+    setTimeout(() => child.emit('close',1,null),10);
+    return child;
+  } });
+  const payload={...contentPayload(),jobId:'ac4102a1-8237-4ef8-a56a-6611df50c9c8',listConcurrency:4};
+  try {
+    const result=manager.start(payload);
+    await waitFor(()=>args!=null);
+    assert.equal(args[args.indexOf('--concurrency')+1],'4');
+    assert.equal(manager.store.load(result.id).listConcurrency,4);
+    assert.equal(manager.start(payload).listConcurrency,4);
+    assert.throws(()=>manager.start({...payload,listConcurrency:2}),/不同采集范围/);
+    for(const value of [0,17,1.2,true,'4']) assert.throws(()=>manager.start({...payload,listConcurrency:value}),/listConcurrency/);
+    await waitFor(()=>manager.get(result.id).status==='failed');
+  } finally {await manager.shutdown();fs.rmSync(directory,{recursive:true,force:true});}
+});

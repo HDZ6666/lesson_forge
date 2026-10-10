@@ -54,6 +54,8 @@ from plugins.bank.entity.vo.bank_vo import (
     SyncTextbookOverviewModel,
     TaskComparisonQueryModel,
     TaskComparisonResponseModel,
+    TaskConcurrencyInput,
+    TaskConcurrencyUpdate,
     TaskOptionsModel,
     TextbookApplyRequestModel,
     TextbookApplyResponseModel,
@@ -454,6 +456,18 @@ async def list_question_sync_tasks(
     return ResponseUtil.success(model_content=await SyncTaskService.list_question(db, query))
 
 
+@bank_controller.get('/sync/question/concurrency-default', dependencies=[UserInterfaceAuthDependency(_QUESTION_TASK_READ_PERMISSIONS)])
+async def question_concurrency_default(db: Annotated[AsyncSession, DBSessionDependency()], subject_id: Annotated[int, Query(alias='subjectId', gt=0)] = 1) -> Response:
+    from plugins.bank.service.task_concurrency import resolve
+    return ResponseUtil.success(data=await resolve(db, subject_id))
+
+
+@bank_controller.put('/sync/question/tasks/{task_id}/concurrency', dependencies=[UserInterfaceAuthDependency(_QUESTION_TASK_CREATE_PERMISSIONS)])
+async def update_question_concurrency(task_id: int, payload: TaskConcurrencyUpdate, db: Annotated[AsyncSession, DBSessionDependency()]) -> Response:
+    from plugins.bank.service.task_concurrency import update_waiting
+    return ResponseUtil.success(data=await update_waiting(db, task_id, payload))
+
+
 @bank_controller.get(
     '/sync/question/tasks/{task_id}',
     response_model=DataResponseModel[SyncTaskModel],
@@ -690,9 +704,10 @@ async def retry_question_sync_task(
     task_id: Annotated[int, Path(gt=0)],
     db: Annotated[AsyncSession, DBSessionDependency()],
     current_user: Annotated[CurrentUserModel, CurrentUserDependency()],
+    payload: TaskConcurrencyInput | None = None,
 ) -> Response:
     operator = current_user.user.user_name if current_user and current_user.user else None
-    return ResponseUtil.success(data=await SyncTaskService.retry_question(db, task_id, operator))
+    return ResponseUtil.success(data=await SyncTaskService.retry_question(db, task_id, operator, settings=payload))
 
 
 @bank_controller.get(

@@ -67,6 +67,7 @@
           <template #default="scope"><el-link type="primary" :underline="false" @click="openDetail(scope.row)">{{ scope.row.taskNo || scope.row.taskId }}</el-link></template>
         </el-table-column>
         <el-table-column label="状态" width="112" align="center"><template #default="scope"><el-tag size="small" :type="questionTaskStatusMeta(scope.row).type">{{ questionTaskStatusMeta(scope.row).label }}</el-tag></template></el-table-column>
+        <el-table-column label="分页并发" min-width="210"><template #default="{row}"><TaskConcurrency :task="row" @updated="loadTasks(true)"/></template></el-table-column>
         <el-table-column label="教材" min-width="200"><template #default="{row}"><span class="cell-main">{{ textbookSummary(row) }}</span><span class="cell-sub">{{ row.versionName || '—' }}</span><span v-if="row.queueReason || row.queueState==='waiting'" class="cell-sub">{{ row.queueReason || '等待后台派发' }}</span></template></el-table-column>
         <el-table-column label="本次采集" min-width="140"><template #default="{row}"><span class="cell-main">{{ Number(row.questionCount || 0).toLocaleString() }} 道题</span><span class="cell-sub">{{ row.catalogCount || 0 }} 个目录</span></template></el-table-column>
         <el-table-column label="题目变化" min-width="135"><template #default="{row}"><span>新增 {{ row.newQuestionCount || 0 }}</span><span class="cell-sub">变化 {{ row.changedQuestionCount || 0 }}</span></template></el-table-column>
@@ -124,6 +125,7 @@
             <p v-else>一次任务可选择同一版本下的一本教材，其他教材另建任务。</p>
           </div>
         </el-form-item>
+        <el-form-item label="分页并发"><div><el-select v-model="createForm.listConcurrency"><el-option :value="0" :label="`继承${concurrencyDefault.concurrencySource === 'plan' ? '计划' : '服务器'}：${concurrencyDefault.listConcurrency || '—'} 页`"/><el-option v-for="n in [1,2,4,8]" :key="n" :value="n" :label="`本任务自定义：${n} 页`"/></el-select><p>仅控制一本教材内同时请求的页数，每页通常 10 道题。</p></div></el-form-item>
         <el-form-item label="分页限制">
           <div class="page-limit-option">
             <el-switch v-model="createForm.limitTo1000Pages" active-text="最多 1000 页" inactive-text="按当前模式继续" />
@@ -143,6 +145,8 @@
 </template>
 
 <script setup>
+import TaskConcurrency from '../../components/TaskConcurrency.vue'
+import request from '@/utils/request'
 import SyncCenterNav from '../../components/SyncCenterNav.vue'
 import '../../styles/sync-center.scss'
 import SyncIssues from "../../components/SyncIssues.vue"
@@ -193,7 +197,8 @@ const optionsLoading = ref(false)
 const optionError = ref('')
 const optionVersions = ref([])
 const acknowledged = ref(false)
-const createForm = reactive({ subjectId: 1, versionId: '', textbookId: undefined, limitTo1000Pages: false })
+const concurrencyDefault=ref({})
+const createForm = reactive({ listConcurrency:0, subjectId: 1, versionId: '', textbookId: undefined, limitTo1000Pages: false })
 const filters = reactive({ subjectId: Number(route.query.subjectId) || undefined, planId: Number(route.query.planId) || undefined, cycleNo: Number(route.query.cycleNo) || undefined, cycleName: '', taskNo: '', status: undefined, versionName: '', createTimeRange: [], pageNum: 1, pageSize: 10 })
 watch(() => [route.query.tab, route.query.subjectId, route.query.planId, route.query.cycleNo], () => { activeTab.value = route.query.tab === 'issues' ? 'issues' : 'tasks'; filters.subjectId = Number(route.query.subjectId) || undefined; filters.planId=Number(route.query.planId)||undefined;filters.cycleNo=Number(route.query.cycleNo)||undefined; searchTasks() })
 let taskListRevision = 0
@@ -288,6 +293,7 @@ function searchTasks() { filters.pageNum = 1; loadTasks() }
 function resetFilters() { filters.planId=undefined;filters.cycleNo=undefined;filters.cycleName=''; Object.assign(filters, { subjectId: undefined, taskNo: '', status: undefined, versionName: '', createTimeRange: [], pageNum: 1 }); loadTasks() }
 
 async function loadOptions() {
+  try { const r=await request({url:'/bank/sync/question/concurrency-default',params:{subjectId:createForm.subjectId}});concurrencyDefault.value=r.data || r } catch { concurrencyDefault.value={} }
   optionsLoading.value = true
   optionError.value = ''
   try {
@@ -307,6 +313,7 @@ async function openCreate() {
 }
 
 function resetCreate() {
+  createForm.listConcurrency=0
   createForm.versionId = ''
   createForm.textbookId = undefined
   createForm.limitTo1000Pages = false
@@ -314,7 +321,7 @@ function resetCreate() {
   optionError.value = ''
 }
 
-function resetBookSelection() { createForm.versionId = ''; createForm.textbookId = undefined }
+function resetBookSelection() { createForm.versionId = ''; createForm.textbookId = undefined; createForm.listConcurrency=0; loadOptions() }
 
 function handleVersionChange() {
   createForm.textbookId = undefined
@@ -325,6 +332,7 @@ async function createTask() {
   creating.value = true
   try {
     const requestData = {
+      listConcurrency:createForm.listConcurrency || null,
       versionId: createForm.versionId,
       textbookId: createForm.textbookId,
     }
