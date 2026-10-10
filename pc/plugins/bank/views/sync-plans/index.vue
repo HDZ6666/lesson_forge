@@ -2,7 +2,8 @@
   <div class="app-container sync-center-page">
     <header class="page-heading"><div><h2>{{ plan.planName || '学科同步计划' }}</h2><p>一份教材清单，按保存的顺序逐本采集；每轮结束后再安排下一轮。</p></div><div class="heading-actions"><SubjectSelect v-model="subjectId" :clearable="false" @change="load"/><el-button :loading="loading" @click="load">刷新</el-button></div></header>
     <SyncCenterNav active="plans" :subject-id="subjectId"/>
-    <SyncWorkflow v-if="!plan.planId && !loading"/>
+    <SyncWorkflow v-if="showCreate"/>
+    <section v-if="loading && !plan.planId" class="sync-panel" role="status" aria-busy="true"><p>正在加载学科计划…</p><el-skeleton :rows="5" animated/></section>
     <el-alert v-if="error" :title="error" type="error" :closable="false" show-icon/>
     <el-alert v-if="control.automaticReason" :title="control.automaticReason" type="info" :closable="false" show-icon/>
     <el-alert v-if="control.source?.manualRequired" :title="control.source.reason || '来源需要人工处理'" type="warning" :closable="false" show-icon><el-button v-hasPermi="['bank:sync:control']" :loading="saving" @click="resumeSource">已完成来源验证，恢复调度</el-button></el-alert>
@@ -28,7 +29,7 @@
       <div class="sync-stat"><span>正在处理</span><strong>{{ progress.collecting + progress.checking + progress.importing }}</strong><small>采集、核验及入库</small></div>
       <div class="sync-stat"><span>需要关注</span><strong>{{ progress.failed }}</strong><small>{{ progress.cancelled }} 本停止 · {{ progress.excluded }} 本排除</small></div>
     </div>
-    <section v-if="!plan.planId" class="sync-panel"><h3>创建本学科的计划</h3><PlanSettingsFields v-model="form"/><el-button v-hasPermi="['bank:sync:plans:edit']" type="primary" :loading="saving" :disabled="loading || !!error" @click="save">创建并开始同步</el-button></section>
+    <section v-if="showCreate" class="sync-panel"><h3>创建本学科的计划</h3><PlanSettingsFields v-model="form"/><el-button v-hasPermi="['bank:sync:plans:edit']" type="primary" :loading="saving" :disabled="loading || !!error" @click="save">创建并开始同步</el-button></section>
     <section v-if="plan.planId" class="sync-panel">
       <div class="section-heading"><div><h3>教材清单与执行顺序</h3><p>排序影响本轮未开始的任务和以后各轮；“提前执行”只调整这一次。</p></div><el-button v-hasPermi="['bank:sync:plans:edit']" :disabled="loading || saving" @click="openOrder">调整顺序</el-button></div>
       <div class="book-filters"><el-input v-model="bookSearch" clearable placeholder="搜索版本或教材" aria-label="搜索版本或教材"/><el-select v-model="bookStatus" clearable placeholder="全部教材" aria-label="教材调度状态"><el-option label="正在处理" value="active"/><el-option label="需要处理" value="issues"/><el-option label="本轮待执行" value="waiting"/><el-option label="暂停或人工单列" value="paused"/></el-select></div>
@@ -62,7 +63,7 @@ import SyncWorkflow from '../../components/SyncWorkflow.vue'
 import PlanSettingsFields from '../../components/PlanSettingsFields.vue'
 import {planBookStage,planProgress,planPhase} from '../../utils/sync-plan.js'
 import '../../styles/sync-center.scss'
-const route=useRoute(),router=useRouter(),subjectId=ref(Number(route.query.subjectId)||1),books=ref([]),plan=ref({}),control=ref({}),loading=ref(false),saving=ref(false),error=ref('')
+const route=useRoute(),router=useRouter(),subjectId=ref(Number(route.query.subjectId)||1),books=ref([]),plan=ref({}),control=ref({}),loading=ref(true),saving=ref(false),error=ref('')
 const form=ref({planName:'',enabled:true,autoUpdate:true,refreshDays:7,listConcurrency:8}),settingsVisible=ref(false),endVisible=ref(false),keepUpdates=ref(true)
 const orderVisible=ref(false),orderBooks=ref([]),orderRevision=ref(),singleVisible=ref(false),singleBook=ref(),singleConcurrency=ref(0),allowPaused=ref(false)
 const bookForm=ref({}),bookDialog=ref(false),bookSearch=ref(''),bookStatus=ref(''),historyVisible=ref(false),historyRows=ref([]),historyCursor=ref()
@@ -70,8 +71,34 @@ const progress=computed(()=>planProgress(books.value)),phase=computed(()=>planPh
 const controlLabel=computed(()=>({active:plan.value.enabled?'运行中':'已暂停',paused:'已暂停',pausing:'正在暂停',ending:'正在结束本轮'})[plan.value.controlState]||'准备中')
 const filteredBooks=computed(()=>books.value.filter(b=>(!bookSearch.value||`${b.versionName} ${b.textbookName}`.includes(bookSearch.value.trim()))&&(!bookStatus.value||(bookStatus.value==='active'?['collecting','checking','importing'].includes(planBookStage(b).key):bookStatus.value==='issues'?['failed','partial'].includes(planBookStage(b).key):bookStatus.value==='waiting'?planBookStage(b).key==='queued':planBookStage(b).key==='paused'||!b.enabled||b.exceptionKind))))
 const data=r=>r.data||r
+const loadedSubjectId=ref(null)
+const showCreate=computed(()=>loadedSubjectId.value===subjectId.value&&!loading.value&&!error.value&&!plan.value.planId)
 let epoch=0,timer,polling=false
-async function load(silent=false){silent=silent===true;if(silent&&(polling||saving.value||loading.value))return;if(silent)polling=true;const id=++epoch;if(!silent)loading.value=true;error.value='';try{const [p,c]=await Promise.all([request({url:'/bank/sync/plans',params:{subjectId:subjectId.value}}),request({url:'/bank/sync/control'})]);const current=data(p)[0]||{},b=current.planId?data(await request({url:`/bank/sync/plans/${current.planId}/books`})) : [];if(id!==epoch)return;plan.value=current;books.value=b;control.value=data(c);if(!silent&&!settingsVisible.value)form.value={planName:current.planName||'',enabled:current.planId?current.enabled:true,autoUpdate:current.autoUpdate ?? true,refreshDays:current.refreshDays||7,listConcurrency:current.listConcurrency||8}}catch(e){if(id===epoch)error.value=e.message}finally{if(id===epoch)loading.value=false;if(silent)polling=false}}
+async function load(silent=false) {
+  silent=silent===true
+  if(silent&&(polling||saving.value||loading.value))return
+  if(silent)polling=true
+  const id=++epoch, requestedSubject=subjectId.value
+  if(!silent)loading.value=true
+  if(loadedSubjectId.value!==requestedSubject){plan.value={};books.value=[];control.value={}}
+  error.value=''
+  try {
+    const [p,c]=await Promise.all([
+      request({url:'/bank/sync/plans',params:{subjectId:requestedSubject}}),
+      request({url:'/bank/sync/control'}),
+    ])
+    const current=data(p)[0]||{}
+    const b=current.planId?data(await request({url:`/bank/sync/plans/${current.planId}/books`})) : []
+    if(id!==epoch)return
+    plan.value=current;books.value=b;control.value=data(c);loadedSubjectId.value=requestedSubject
+    if(!silent&&!settingsVisible.value)form.value={planName:current.planName||'',enabled:current.planId?current.enabled:true,autoUpdate:current.autoUpdate ?? true,refreshDays:current.refreshDays||7,listConcurrency:current.listConcurrency||8}
+  } catch(e) {
+    if(id===epoch)error.value=e.message || '计划加载失败，请点击刷新重试'
+  } finally {
+    if(id===epoch)loading.value=false
+    if(silent)polling=false
+  }
+}
 async function save(){saving.value=true;try{await request({url:'/bank/sync/plans',method:'put',data:{...form.value,planName:form.value.planName.trim()||undefined,subjectId:subjectId.value,expectedRevision:plan.value.revision||null}});settingsVisible.value=false;ElMessage.success('计划设置已保存');await load()}catch(e){error.value=e.message}finally{saving.value=false}}
 async function act(action,keep=true){saving.value=true;try{await request({url:`/bank/sync/plans/${plan.value.planId}/action`,method:'post',data:{action,keepUpdates:keep,expectedRevision:plan.value.revision}});endVisible.value=false;await load()}catch(e){error.value=e.message}finally{saving.value=false}}
 async function pause(){try{await ElMessageBox.confirm('暂停本计划的采集、核验、入库和重试。已取得成果保留，之后可以继续。','暂停整个计划',{confirmButtonText:'暂停计划',cancelButtonText:'取消'});await act('pause')}catch{}}
