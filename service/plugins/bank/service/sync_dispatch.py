@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import secrets
 from datetime import datetime, timedelta, timezone
 
@@ -18,8 +19,10 @@ from plugins.bank.entity.do.bank_do import (
     QbQuestionImport,
     QbQuestionImportIntake,
     QbSubject,
+    QbSyncBookState,
     QbSyncJob,
     QbSyncJobScope,
+    QbSyncPlan,
     QbTextbook,
     QbTextbookVersion,
 )
@@ -53,6 +56,46 @@ def queue_fields(row) -> dict:
         'queueNotBefore': utc_datetime(row.dispatch_not_before),
         'queueReason': row.dispatch_error,
     }
+
+
+def is_automatic_task(row) -> bool:
+    options = row.options_json or {}
+    return bool(options.get('autoPlanId') and not options.get('manualDispatchRequested'))
+
+
+def dispatchable_plan_condition(*, manual_only=False):
+    """Paused plans retain their queue entries without occupying the FIFO head."""
+    plan_id = QbSyncJob.options_json['autoPlanId'].as_integer()
+    manual = or_(plan_id.is_(None), plan_id == 0,
+                 QbSyncJob.options_json['manualDispatchRequested'].as_boolean().is_(True))
+    if manual_only or os.getenv('BANK_AUTOMATIC_SYNC_ENABLED') != '1':
+        return manual
+    enabled_plan = exists().where(QbSyncPlan.plan_id == plan_id, QbSyncPlan.enabled == 1)
+    excluded_book = exists().where(
+        QbSyncJobScope.run_id == QbSyncJob.run_id,
+        QbSyncBookState.plan_id == plan_id,
+        QbSyncBookState.textbook_id == QbSyncJobScope.local_textbook_id,
+        or_(QbSyncBookState.enabled == 0, QbSyncBookState.exception_kind.is_not(None)),
+    )
+    return or_(manual, enabled_plan & ~excluded_book)
+
+
+async def request_manual_dispatch(db, row, operator):
+    if not is_automatic_task(row) or row.status != 'queued' or row.active_slot:
+        return
+    await db.refresh(row, with_for_update=True)
+    if not is_automatic_task(row) or row.status != 'queued' or row.active_slot:
+        return
+    from plugins.bank.service.sync_plans import automatic_task_reason
+    previous_reason = await automatic_task_reason(db, row)
+    row.options_json = {**(row.options_json or {}), 'manualDispatchRequested': True,
+                        'manualDispatchRequestedBy': operator}
+    # Only remove a plan-pause delay. Source cooldowns and host/import delays
+    # remain effective, as do all normal dispatch checks.
+    if previous_reason and row.dispatch_error == previous_reason:
+        row.dispatch_error = None
+        row.dispatch_not_before = None
+    await db.commit()
 
 
 async def existing_book_task(db, key: str, *, limit_to_1000_pages: bool):
@@ -185,7 +228,7 @@ async def _validate_waiting_scope(db, row, *, lock=True):
     return scopes
 
 
-async def claim_next(db) -> dict | None:
+async def claim_next(db, *, task_id=None) -> dict | None:
     """Only a successful slot INSERT/UPDATE grants execution across processes."""
     now = datetime.now()
     due_now = await _clock(db)
@@ -194,6 +237,8 @@ async def claim_next(db) -> dict | None:
     row = (await db.execute(select(QbSyncJob).where(
         QbSyncJob.dispatch_book_key.is_not(None), QbSyncJob.dispatch_job_id.is_not(None),
         QbSyncJob.status == 'queued', QbSyncJob.active_slot.is_(None),
+        dispatchable_plan_condition(),
+        QbSyncJob.run_id == task_id if task_id is not None else True,
         or_(QbSyncJob.dispatch_not_before.is_(None), QbSyncJob.dispatch_not_before <= due_now),
     ).order_by(QbSyncJob.run_id).limit(1).with_for_update(skip_locked=True)
         .execution_options(populate_existing=True))).scalars().first()
@@ -276,7 +321,7 @@ async def dispatch_once(*, session_factory=None, client=None) -> int:
             return 0
         due = await db.scalar(select(QbSyncJob.run_id).where(
             QbSyncJob.dispatch_book_key.is_not(None), QbSyncJob.status == 'queued',
-            QbSyncJob.active_slot.is_(None),
+            QbSyncJob.active_slot.is_(None), dispatchable_plan_condition(),
             or_(QbSyncJob.dispatch_not_before.is_(None), QbSyncJob.dispatch_not_before <= await _clock(db)),
         ).order_by(QbSyncJob.run_id).limit(1))
         backlog_reason = None
@@ -321,7 +366,7 @@ async def dispatch_once(*, session_factory=None, client=None) -> int:
         return 0
     async with session_factory() as db:
         due_row = await db.get(QbSyncJob, due)
-        automatic = bool(due_row and (due_row.options_json or {}).get('autoPlanId'))
+        automatic = bool(due_row and is_automatic_task(due_row))
     if automatic:
         from plugins.bank.service.sync_plans import unattended_reason
         reason = unattended_reason(health)
@@ -332,7 +377,14 @@ async def dispatch_once(*, session_factory=None, client=None) -> int:
                     row.dispatch_error = reason
                     row.dispatch_not_before = await _clock(db) + timedelta(seconds=30)
                     await db.commit()
-            return 0
+                # Automatic-only prerequisites must not block a manual book.
+                due = await db.scalar(select(QbSyncJob.run_id).where(
+                    QbSyncJob.dispatch_book_key.is_not(None), QbSyncJob.status == 'queued',
+                    QbSyncJob.active_slot.is_(None), dispatchable_plan_condition(manual_only=True),
+                    or_(QbSyncJob.dispatch_not_before.is_(None), QbSyncJob.dispatch_not_before <= await _clock(db)),
+                ).order_by(QbSyncJob.run_id).limit(1))
+            if due is None:
+                return 0
     control = health.get('sourceControl') if isinstance(health, dict) else None
     if isinstance(control, dict) and control.get('paused') is True:
         deadline = None
@@ -353,7 +405,7 @@ async def dispatch_once(*, session_factory=None, client=None) -> int:
                 await db.commit()
         return 0
     async with session_factory() as db:
-        ticket = await claim_next(db)
+        ticket = await claim_next(db, task_id=due)
     if ticket is None:
         return 0
     from plugins.bank.service.sync_run_service import _WORKERS, _execute, _WorkerHandle

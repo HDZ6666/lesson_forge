@@ -149,7 +149,7 @@ async def list_books(db, plan_id):
         raise ServiceException(message='计划不存在')
     books = (
         await db.execute(
-            select(QbTextbook, QbTextbookVersion.is_new)
+            select(QbTextbook, QbTextbookVersion.is_new, QbTextbookVersion.version_name)
             .join(QbTextbookVersion, QbTextbookVersion.version_id == QbTextbook.version_id)
             .where(QbTextbook.subject_id == plan.subject_id, QbTextbook.status == '0', QbTextbookVersion.status == '0')
             .order_by(QbTextbook.textbook_id)
@@ -161,13 +161,14 @@ async def list_books(db, plan_id):
     }
     counts = {}
     for offset in range(0, len(books), 500):
-        counts.update(await book_stem_counts(db, [book.textbook_id for book, _ in books[offset : offset + 500]]))
+        counts.update(await book_stem_counts(db, [book.textbook_id for book, _, _ in books[offset : offset + 500]]))
     targets = set(plan.cycle_targets or [])
     return [
         {
             'textbookId': book.textbook_id,
             'textbookName': book.textbook_name,
             'versionId': book.version_id,
+            'versionName': version_name,
             'isNew': is_new == 'Y',
             'inCurrentCycle': book.textbook_id in targets,
             'enabled': bool(states[book.textbook_id].enabled) if book.textbook_id in states else True,
@@ -179,7 +180,7 @@ async def list_books(db, plan_id):
             'revision': states[book.textbook_id].revision if book.textbook_id in states else 0,
             **counts.get(book.textbook_id, {'usableQuestionCount': 0}),
         }
-        for book, is_new in books
+        for book, is_new, version_name in books
     ]
 
 
@@ -207,7 +208,7 @@ async def save_book_override(db, plan_id, textbook_id, payload):
 
 async def automatic_task_reason(db, job):
     plan_id = (job.options_json or {}).get('autoPlanId')
-    if not plan_id:
+    if not plan_id or (job.options_json or {}).get('manualDispatchRequested'):
         return None
     plan = await db.get(QbSyncPlan, plan_id)
     if plan is None or not plan.enabled:

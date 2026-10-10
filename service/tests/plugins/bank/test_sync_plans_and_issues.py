@@ -22,6 +22,7 @@ async def test_plan_defaults_paused_and_book_exclusion_survives_next_cycle(bank_
     books = await plans.list_books(bank_db, result['planId'])
     book = next(b for b in books if b['textbookId'] == 2)
     assert book['exceptionKind'] == 'inaccessible' and book['enabled'] is False
+    assert book['versionName'] == '版本'
     with pytest.raises(ServiceException, match='已变化'):
         await plans.save_book_override(bank_db, result['planId'], 2, override)
 

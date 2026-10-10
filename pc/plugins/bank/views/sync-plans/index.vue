@@ -23,10 +23,10 @@
       <div class="sync-stat"><span>人工单列</span><strong>{{ exceptions }} <small>本</small></strong><small>保留记录，不再自动安排</small></div>
     </div>
     <section class="sync-panel">
-      <div class="section-heading"><div><h3>教材调度</h3><p>可单独暂停一本教材，也可手动同步一次。</p></div><div class="book-filters"><el-input v-model="bookSearch" clearable placeholder="搜索教材名称" aria-label="搜索教材名称"/><el-select v-model="bookStatus" clearable placeholder="全部教材" aria-label="教材调度状态"><el-option label="本轮待同步" value="waiting"/><el-option label="尚无可用题" value="empty"/><el-option label="暂停或人工单列" value="paused"/></el-select></div></div>
+      <div class="section-heading"><div><h3>教材调度</h3><p>可单独暂停一本教材，也可手动同步一次。</p></div><div class="book-filters"><el-input v-model="bookSearch" clearable placeholder="搜索版本或教材" aria-label="搜索版本或教材"/><el-select v-model="bookStatus" clearable placeholder="全部教材" aria-label="教材调度状态"><el-option label="本轮待同步" value="waiting"/><el-option label="尚无可用题" value="empty"/><el-option label="暂停或人工单列" value="paused"/></el-select></div></div>
       <el-alert v-if="plan.discoveryError" :title="`教材发现：${plan.discoveryError}`" type="warning" :closable="false"/>
       <el-table v-loading="loading" :data="filteredBooks" row-key="textbookId">
-        <el-table-column label="教材" min-width="190"><template #default="{row}"><span class="cell-main">{{ row.textbookName }}</span><span class="cell-sub">{{ row.isNew ? '新版教材' : '旧版教材' }}</span></template></el-table-column>
+        <el-table-column label="教材" min-width="190"><template #default="{row}"><span class="cell-main">{{ row.textbookName }}</span><span class="cell-sub">{{ row.versionName || '—' }} · {{ row.isNew ? '新版教材' : '旧版教材' }}</span></template></el-table-column>
         <el-table-column label="本轮进度" width="105"><template #default="{row}"><el-tag :type="!row.inCurrentCycle ? 'info' : row.lastCycleNo >= plan.cycleNo ? 'success' : 'warning'" effect="plain">{{ !row.inCurrentCycle ? '下轮纳入' : row.lastCycleNo >= plan.cycleNo ? '已尝试' : '待同步' }}</el-tag></template></el-table-column>
         <el-table-column prop="usableQuestionCount" label="可用题数" width="100" align="right"/>
         <el-table-column label="调度安排" min-width="185"><template #default="{row}"><span>{{ row.exceptionKind ? exceptionLabels[row.exceptionKind] : row.enabled ? '自动同步' : '暂停自动' }}</span><span class="cell-sub">{{ row.enabled && !row.exceptionKind ? formatTime(row.nextDueAt) : row.operatorNote || '可手动同步复核' }}</span></template></el-table-column>
@@ -35,7 +35,7 @@
       </el-table>
       <footer class="table-footer">显示 {{ filteredBooks.length }} / {{ books.length }} 本教材</footer>
     </section>
-    <el-dialog v-model="bookDialog" class="sync-center-dialog" :title="`调度设置 · ${bookForm.textbookName || ''}`" width="500px">
+    <el-dialog v-model="bookDialog" class="sync-center-dialog" :title="`调度设置 · ${[bookForm.versionName, bookForm.textbookName].filter(Boolean).join(' · ')}`" width="500px">
       <el-form label-width="90px"><el-form-item label="自动同步"><el-switch v-model="bookForm.enabled"/></el-form-item><el-form-item label="人工单列"><el-select v-model="bookForm.exceptionKind" clearable placeholder="正常参与调度"><el-option label="来源无题" value="no_questions"/><el-option label="长期不可访问" value="inaccessible"/></el-select></el-form-item><el-form-item label="判断说明"><el-input v-model="bookForm.operatorNote" type="textarea" :rows="3" maxlength="500" show-word-limit/></el-form-item></el-form>
       <p class="field-hint">人工单列后保留覆盖记录，后续发现不会重新开启。仍可手动同步复核。</p>
       <template #footer><el-button @click="bookDialog=false">取消</el-button><el-button type="primary" :loading="saving" @click="saveBook">保存</el-button></template>
@@ -57,7 +57,7 @@ const completed = computed(()=>books.value.filter(b=>b.inCurrentCycle && b.lastC
 const usable = computed(()=>books.value.filter(b=>b.usableQuestionCount > 0).length)
 const exceptions = computed(()=>books.value.filter(b=>b.exceptionKind).length)
 const bookSearch = ref(''), bookStatus = ref(''), syncingId = ref(null)
-const filteredBooks = computed(() => books.value.filter(b => (!bookSearch.value || b.textbookName?.includes(bookSearch.value.trim())) && (!bookStatus.value || (bookStatus.value === 'waiting' ? b.inCurrentCycle && b.lastCycleNo < plan.value.cycleNo : bookStatus.value === 'empty' ? !b.usableQuestionCount : b.exceptionKind || !b.enabled))))
+const filteredBooks = computed(() => books.value.filter(b => (!bookSearch.value || [b.versionName, b.textbookName].filter(Boolean).join(' ').includes(bookSearch.value.trim())) && (!bookStatus.value || (bookStatus.value === 'waiting' ? b.inCurrentCycle && b.lastCycleNo < plan.value.cycleNo : bookStatus.value === 'empty' ? !b.usableQuestionCount : b.exceptionKind || !b.enabled))))
 let epoch=0
 const data = r=>r.data || r
 async function load() {

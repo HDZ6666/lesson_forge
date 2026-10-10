@@ -3105,13 +3105,20 @@ class SyncRunService:
         if defer_dispatch:
             if task_module != 'question' or options.get('workflowVersion') != 2 or len(selected_scope_rows) != 1:
                 raise ServiceException(message='持久待办只接受新版单本题库任务')
-            from plugins.bank.service.sync_dispatch import book_key, existing_book_task, legacy_unsettled_book_task
+            from plugins.bank.service.sync_dispatch import (
+                book_key,
+                existing_book_task,
+                legacy_unsettled_book_task,
+                request_manual_dispatch,
+            )
             local_book_id = _scope_field(selected_scope_rows[0], 'local_textbook_id', 'localTextbookId')
             if not local_book_id or await db.get(QbTextbook, int(local_book_id), with_for_update=True) is None:
                 raise ServiceException(message='待办任务必须绑定正式教材')
             dispatch_key = book_key(int(options['subjectId']), PROVIDER, selected[0])
             existing = await existing_book_task(db, dispatch_key, limit_to_1000_pages=options['limitTo1000Pages'])
             if existing is not None:
+                if not options.get('autoPlanId'):
+                    await request_manual_dispatch(db, existing, operator)
                 return _status_from_row(existing, await SyncTaskDao.scopes(db, existing.run_id)) or {}
             legacy = await legacy_unsettled_book_task(db, int(options['subjectId']), PROVIDER, selected[0])
             if legacy is not None:
@@ -3169,6 +3176,8 @@ class SyncRunService:
             if defer_dispatch:
                 existing = await existing_book_task(db, dispatch_key, limit_to_1000_pages=options['limitTo1000Pages'])
                 if existing is not None:
+                    if not options.get('autoPlanId'):
+                        await request_manual_dispatch(db, existing, operator)
                     return _status_from_row(existing, await SyncTaskDao.scopes(db, existing.run_id)) or {}
             raise ServiceException(message='已有同步任务正在运行，请等待当前任务完成') from exc
 

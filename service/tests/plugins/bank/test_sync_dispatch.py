@@ -557,3 +557,112 @@ async def test_empty_sealed_refill_uses_fresh_scan_instead_of_invalid_clone(bank
     new_scope = await bank_db.scalar(select(QbSyncJobScope).where(QbSyncJobScope.run_id == new['taskId']))
     assert new['taskId'] != first['taskId'] and new['retryOfTaskId'] == first['taskId']
     assert new_scope.resume_from_collector_run_id is None
+
+
+@pytest.mark.asyncio
+async def test_manual_request_reuses_but_releases_automatic_pause(bank_db, monkeypatch):
+    from plugins.bank.controller.sync_plan_controller import PlanInput
+    from plugins.bank.entity.do.bank_do import QbSyncPlan
+    from plugins.bank.service import sync_plans as plans
+
+    plan = await plans.save_plan(bank_db, PlanInput(subjectId=1, enabled=False))
+    automatic = await SyncTaskService.create_question(
+        bank_db, {'versionId': 1, 'textbookId': 1}, 'automatic',
+        automatic_options={'autoPlanId': plan['planId'], 'autoCycleNo': 1},
+    )
+    row = await bank_db.get(QbSyncJob, automatic['taskId'])
+    row.dispatch_not_before = await dispatch._clock(bank_db) + timedelta(seconds=30)
+    row.dispatch_error = '自动计划已暂停，待办保留'
+    await bank_db.commit()
+    monkeypatch.setenv('BANK_AUTOMATIC_SYNC_ENABLED', '0')
+    manual = await enqueue(bank_db)
+    assert manual['taskId'] == automatic['taskId']
+    row = await bank_db.get(QbSyncJob, manual['taskId'], populate_existing=True)
+    assert await plans.automatic_task_reason(bank_db, row) is None
+    assert (await dispatch.claim_next(bank_db))['taskId'] == manual['taskId']
+    assert (await bank_db.get(QbSyncPlan, plan['planId'])).enabled == 0
+
+
+@pytest.mark.asyncio
+async def test_paused_automatic_queue_does_not_starve_later_manual_book(bank_db, monkeypatch):
+    from plugins.bank.controller.sync_plan_controller import PlanInput
+    from plugins.bank.service import sync_plans as plans
+
+    plan = await plans.save_plan(bank_db, PlanInput(subjectId=1, enabled=False))
+    now = datetime(2026, 10, 10, 0, 0, 0)
+    for book_id in range(3, 15):
+        bank_db.add(QbTextbook(textbook_id=book_id, subject_id=1, version_id=1,
+            source_provider='zujuan', external_textbook_id=f'tb{book_id}',
+            textbook_name=f'教材{book_id}', status='0', create_time=now, update_time=now))
+    await bank_db.commit()
+    for book_id in range(3, 15):
+        await SyncTaskService.create_question(bank_db, {'versionId': 1, 'textbookId': book_id},
+            'automatic', automatic_options={'autoPlanId': plan['planId'], 'autoCycleNo': 1})
+    manual = await enqueue(bank_db)
+    clock = [now]
+    async def current(_db):
+        return clock[0]
+    monkeypatch.setattr(dispatch, '_clock', current)
+    claim = None
+    for _ in range(30):
+        claim = await dispatch.claim_next(bank_db)
+        if claim:
+            break
+        clock[0] += timedelta(seconds=3)
+    assert claim and claim['taskId'] == manual['taskId'], 'paused queue starved manual work for 90 seconds'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('gate', ['disabled', 'book_pause', 'incomplete_config'])
+async def test_dispatch_checks_actual_manual_candidate_after_skipping_auto(bank_db, monkeypatch, gate):
+    from plugins.bank.controller.sync_plan_controller import BookOverride, PlanInput
+    from plugins.bank.service import sync_plans as plans
+
+    monkeypatch.setenv('BANK_AUTOMATIC_SYNC_ENABLED', '0' if gate == 'disabled' else '1')
+    plan = await plans.save_plan(bank_db, PlanInput(subjectId=1, enabled=True))
+    auto = await SyncTaskService.create_question(bank_db, {'versionId': 1, 'textbookId': 1},
+        'automatic', automatic_options={'autoPlanId': plan['planId'], 'autoCycleNo': 1})
+    if gate == 'book_pause':
+        await plans.save_book_override(bank_db, plan['planId'], 1, BookOverride(enabled=False, expectedRevision=0))
+    manual = await enqueue(bank_db, 2)
+    executed = []
+    class Healthy:
+        def health(self):
+            return {'ok': True}
+    async def execute(task_id, handle):
+        executed.append(task_id)
+    monkeypatch.setattr(runs, '_execute', execute)
+    factory = async_sessionmaker(bank_db.bind, expire_on_commit=False)
+    await bank_db.rollback()
+    try:
+        assert await dispatch.dispatch_once(session_factory=factory, client=Healthy()) == 1
+        await asyncio.sleep(0)
+        assert executed == [manual['taskId']]
+        row = await bank_db.get(QbSyncJob, auto['taskId'], populate_existing=True)
+        assert row.status == 'queued' and row.active_slot is None
+    finally:
+        runs._WORKERS.pop(manual['taskId'], None)
+
+
+@pytest.mark.asyncio
+async def test_manual_promotion_keeps_source_delay_and_emergency_pause(bank_db, monkeypatch):
+    from plugins.bank.controller.sync_plan_controller import PlanInput
+    from plugins.bank.entity.do.bank_do import QbSyncControl
+    from plugins.bank.service import sync_plans as plans
+
+    plan = await plans.save_plan(bank_db, PlanInput(subjectId=1, enabled=False))
+    auto = await SyncTaskService.create_question(bank_db, {'versionId': 1, 'textbookId': 1},
+        'automatic', automatic_options={'autoPlanId': plan['planId'], 'autoCycleNo': 1})
+    row = await bank_db.get(QbSyncJob, auto['taskId'])
+    delay = await dispatch._clock(bank_db) + timedelta(minutes=5)
+    row.dispatch_not_before, row.dispatch_error = delay, '来源冷却'
+    await bank_db.commit()
+    await enqueue(bank_db)
+    assert row.dispatch_not_before == delay and row.dispatch_error == '来源冷却'
+    assert await dispatch.claim_next(bank_db) is None
+    row.dispatch_not_before = None
+    bank_db.add(QbSyncControl(control_id=1, paused=1, reason='人工紧急暂停',
+        revision=1, update_time=await dispatch._clock(bank_db)))
+    await bank_db.commit()
+    assert await dispatch.claim_next(bank_db) is None
+    assert row.active_slot is None
