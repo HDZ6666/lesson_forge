@@ -4,12 +4,13 @@
       <div><h2>同步中心</h2><p>逐本建立题库，查看采集进度，集中处理需要你关注的问题。</p></div>
       <div class="heading-actions"><SubjectSelect v-model="subjectId" @change="load" /><el-button :icon="Refresh" :loading="loading" @click="load">刷新</el-button></div>
     </header>
-    <SyncCenterNav active="overview" />
+    <SyncCenterNav active="overview" :subject-id="subjectId" />
+    <SyncWorkflow />
     <el-alert v-if="error" :title="error" type="error" :closable="false" show-icon />
     <section v-if="!loading && !error && !summary.textbooks" class="welcome sync-panel">
       <div class="welcome-icon"><el-icon><Collection /></el-icon></div>
       <div class="welcome-copy"><span class="eyebrow">从这里开始</span><h3>创建一个计划，自动建立题库</h3><p>选择学科创建同步计划，系统自动发现教材、逐本排队采集，并将合格题目分批入库。</p></div>
-      <el-button type="primary" @click="router.push('/sync-center/plans')">创建学科同步计划 <el-icon class="el-icon--right"><ArrowRight /></el-icon></el-button>
+      <el-button type="primary" @click="router.push({path:'/sync-center/plans',query:{subjectId}})">创建学科同步计划 <el-icon class="el-icon--right"><ArrowRight /></el-icon></el-button>
     </section>
     <div class="sync-stat-grid" v-loading="loading">
       <div class="sync-stat"><span>当前教材</span><strong>{{ number(summary.textbooks) }}</strong><small>{{ number(summary.textbooksWithoutQuestions) }} 本尚无可用题</small></div>
@@ -27,10 +28,10 @@
         <div class="panel-actions"><el-button type="primary" plain @click="router.push('/sync-center/tasks')">管理同步任务</el-button><el-button v-hasPermi="['bank:sync:control']" :type="summary.control?.paused ? 'primary' : 'danger'" link :disabled="loading || !!error" :loading="controlling" @click="toggleControl">{{ summary.control?.paused ? '恢复同步' : '紧急暂停' }}</el-button></div>
       </section>
       <section class="sync-panel">
-        <div class="section-heading"><h3>本轮覆盖进度</h3><el-button link type="primary" @click="router.push('/sync-center/plans')">管理自动计划 <el-icon><ArrowRight /></el-icon></el-button></div>
+        <div class="section-heading"><h3>本轮覆盖进度</h3><el-button link type="primary" @click="router.push({path:'/sync-center/plans',query:{subjectId}})">查看学科计划 <el-icon><ArrowRight /></el-icon></el-button></div>
         <div class="cycle-number"><strong>{{ number(summary.cycleAttemptedCount) }}</strong><span>/ {{ number(summary.cycleTargetCount) }} 本已尝试</span></div>
         <el-progress :percentage="cyclePercent" :show-text="false" :stroke-width="8" />
-        <p class="sync-muted">{{ summary.cycleTargetCount ? '每本教材先获得一次采集机会，再按结果安排补齐或刷新。' : '尚未开始自动循环，可先手动同步一本教材。' }}</p>
+        <p class="sync-muted">{{ summary.cycleTargetCount ? '每本教材先获得一次采集机会，再按结果安排补齐或刷新。' : '尚未开始本轮同步，请在学科计划中查看发现进度或创建计划。' }}</p>
         <div class="mini-stats"><div><strong>{{ activeCount }}</strong><span>执行中任务</span></div><div><strong>{{ number(summary.taskCounts?.queued) }}</strong><span>排队中</span></div><div><strong>{{ number(summary.retryIssueCount) }}</strong><span>自动重试问题</span></div></div>
         <p v-if="control.automaticReason" class="plan-note"><el-icon><InfoFilled /></el-icon>{{ control.automaticReason }}</p>
       </section>
@@ -43,7 +44,7 @@
         <el-table-column label="创建时间" min-width="170"><template #default="{row}">{{ formatTaskTime(row.createTime) }}</template></el-table-column>
         <el-table-column label="需关注的信息" min-width="220" show-overflow-tooltip><template #default="{row}">{{ row.error || '—' }}</template></el-table-column>
         <el-table-column label="操作" width="100" fixed="right"><template #default="{row}"><el-button link type="primary" @click="open(row)">查看详情</el-button></template></el-table-column>
-        <template #empty><el-empty :image-size="64" description="还没有同步任务"><el-button type="primary" plain @click="router.push('/sync-center/plans')">创建同步计划</el-button></el-empty></template>
+        <template #empty><el-empty :image-size="64" description="还没有同步任务"><el-button type="primary" plain @click="router.push({path:'/sync-center/plans',query:{subjectId}})">创建同步计划</el-button></el-empty></template>
       </el-table>
     </section>
     <section class="sync-panel resource-panel">
@@ -65,6 +66,7 @@ import { Refresh, Collection, ArrowRight, InfoFilled } from '@element-plus/icons
 import { ElMessage, ElMessageBox } from 'element-plus'
 import request from '@/utils/request'
 import SubjectSelect from '../../components/SubjectSelect.vue'
+import SyncWorkflow from '../../components/SyncWorkflow.vue'
 import SyncCenterNav from '../../components/SyncCenterNav.vue'
 import { formatTaskTime, syncTaskStatusMeta } from '../../utils/sync-task'
 import '../../styles/sync-center.scss'

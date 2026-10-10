@@ -1,7 +1,7 @@
 manifestVersion: 1
 id: bank
 name: 题库管理
-version: 0.10.0
+version: 0.10.1
 description: 网站题库的版本、教材、目录、题目、素材和同步发布批次管理。
 
 metadata:
@@ -195,23 +195,23 @@ frontend:
           type: C
           orderNum: 1
           icon: dashboard
+        - name: 学科计划
+          path: plans
+          component: plugin/bank/sync-plans/index
+          routeName: BankSyncPlans
+          perms: bank:sync:plans:list
+          type: C
+          orderNum: 2
+          icon: time
         - name: 教材发现
           path: discovery
           component: plugin/bank/sync-textbook/index
           routeName: BankSyncDiscovery
           perms: bank:sync:discovery:list
           type: C
-          orderNum: 2
-          icon: education
-        - name: 自动同步计划
-          path: plans
-          component: plugin/bank/sync-plans/index
-          routeName: BankSyncPlans
-          perms: bank:sync:plans:list
-          type: C
           orderNum: 3
-          icon: time
-        - name: 同步任务
+          icon: education
+        - name: 教材任务
           path: tasks
           component: plugin/bank/sync-question/index
           routeName: BankSyncTasks

@@ -3,17 +3,18 @@
     <header class="page-heading">
       <div>
         <h2>教材发现任务</h2>
-        <p>先更新版本与教材清单，再同步具体教材的题目。新增与改名会自动登记，冲突单独提示。</p>
+        <p>学科计划会自动创建发现任务。这里查看教材清单的更新记录、登记结果和异常。</p>
       </div>
       <div class="heading-actions">
         <el-button :icon="Refresh" :loading="loading" @click="loadTasks">刷新</el-button>
-        <el-button v-hasPermi="['bank:sync:textbook:add', 'bank:sync:run']" type="primary" :icon="Plus" @click="openCreate">新增教材发现任务</el-button>
+        <el-button v-hasPermi="['bank:sync:textbook:add', 'bank:sync:run']" plain :icon="Plus" @click="openCreate">手动发现一次</el-button>
       </div>
     </header>
     <SyncCenterNav active="discovery"/>
 
     <el-alert class="state-alert" type="info" :closable="false" show-icon>
-      这里只更新教材清单，不采集题目。发现完成后，可前往“同步任务”选择教材，或在“自动计划”中安排循环同步。
+      计划中的发现任务登记成功后，会自动生成逐本教材任务。手动发现只更新清单；首次使用请先创建学科计划。
+      <el-button link type="primary" @click="router.push('/sync-center/plans')">查看学科计划</el-button>
     </el-alert>
     <el-alert v-if="errorMessage" class="state-alert" type="error" :closable="false" show-icon>{{ errorMessage }}</el-alert>
 

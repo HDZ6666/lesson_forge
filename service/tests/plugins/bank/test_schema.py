@@ -115,7 +115,7 @@ def test_bank_manifest_has_management_and_sync_menus_and_declared_permissions() 
         'plugin/bank/sync-textbook/index',
         'plugin/bank/sync-question/index',
     ]
-    assert [menu.name for menu in plugin.manifest.frontend.menus[1].children] == ['同步总览', '教材发现', '自动同步计划', '同步任务']
+    assert [menu.name for menu in plugin.manifest.frontend.menus[1].children] == ['同步总览', '学科计划', '教材发现', '教材任务']
     assert all(menu.visible == '1' for menu in children[-4:])
     assert children[-3].route_name == 'BankSyncCenter'
     assert children[-3].order_num == SYNC_CENTER_ORDER

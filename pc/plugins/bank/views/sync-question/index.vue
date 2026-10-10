@@ -2,15 +2,15 @@
   <div class="app-container sync-center-page sync-question-list-page">
     <header class="page-heading">
       <div>
-        <h2>同步题库任务</h2>
-        <p>每次同步一本教材。查看后台进度，继续未完成的采集，处理需要人工判断的问题。</p>
+        <h2>教材同步任务</h2>
+        <p>计划发现教材后，逐本任务会全部列在这里。按名称或日期查看同一轮同步，跟进入库结果。</p>
       </div>
       <div class="heading-actions">
         <el-button v-if="activeTab==='tasks'" :icon="Refresh" :loading="loading" @click="loadTasks">刷新</el-button>
-        <el-button v-hasPermi="['bank:sync:question:add', 'bank:sync:run']" type="primary" :icon="Plus" @click="openCreate">新增同步题库任务</el-button>
+        <el-button v-hasPermi="['bank:sync:question:add', 'bank:sync:run']" plain :icon="Plus" @click="openCreate">手动同步一本</el-button>
       </div>
     </header>
-    <SyncCenterNav active="tasks"/>
+    <SyncCenterNav active="tasks" :subject-id="filters.subjectId"/>
 
     <el-alert v-if="activeTab==='tasks'" class="state-alert" type="info" :closable="false" show-icon>
       采集完成表示本次抓取结束；题目是否已可用，请查看任务中的入库结果。
@@ -91,7 +91,7 @@
     <section v-if="activeTab==='issues'" class="sync-panel"><div class="section-heading"><h3>按学科查看问题</h3><SubjectSelect v-model="filters.subjectId"/></div><SyncIssues :subject-id="filters.subjectId"/></section>
     <el-dialog class="sync-center-dialog" v-model="createVisible" title="新增同步题库任务" width="720px" append-to-body @closed="resetCreate">
       <el-alert v-if="optionError" class="dialog-alert" type="error" :closable="false" show-icon>{{ optionError }}</el-alert>
-      <el-alert v-if="!optionsLoading && !visibleOptionVersions.length && !optionError" type="info" :closable="false">该学科还没有可选版本。<el-button link type="primary" @click="createVisible=false;router.push('/sync-center/discovery')">先去发现教材</el-button></el-alert>
+      <el-alert v-if="!optionsLoading && !visibleOptionVersions.length && !optionError" type="info" :closable="false">该学科还没有可选版本。<el-button link type="primary" @click="createVisible=false;router.push('/sync-center/plans')">创建学科计划</el-button></el-alert>
       <el-form label-width="96px" v-loading="optionsLoading">
         <el-form-item label="学科"><SubjectSelect v-model="createForm.subjectId" :clearable="false" sync-only @change="resetBookSelection" /></el-form-item>
         <el-form-item label="选择版本" required>

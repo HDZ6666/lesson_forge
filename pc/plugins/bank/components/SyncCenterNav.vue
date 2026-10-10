@@ -1,18 +1,18 @@
 <template>
   <nav class="sync-center-nav" aria-label="同步中心导航">
-    <router-link v-for="item in entries" :key="item.key" :to="item.path" :class="{ active: active === item.key }" :aria-current="active === item.key ? 'page' : undefined">
+    <router-link v-for="item in entries" :key="item.key" :to="{ path: item.path, query: subjectId ? { subjectId } : {} }" :class="{ active: active === item.key }" :aria-current="active === item.key ? 'page' : undefined">
       <el-icon><component :is="item.icon" /></el-icon><span>{{ item.label }}</span>
     </router-link>
   </nav>
 </template>
 <script setup>
 import { DataBoard, Search, Calendar, List } from '@element-plus/icons-vue'
-defineProps({ active: String })
+defineProps({ active: String, subjectId: [Number, String] })
 const entries = [
   { key: 'overview', label: '同步总览', path: '/sync-center/overview', icon: DataBoard },
-  { key: 'discovery', label: '教材发现', path: '/sync-center/discovery', icon: Search },
   { key: 'plans', label: '学科计划', path: '/sync-center/plans', icon: Calendar },
-  { key: 'tasks', label: '同步任务', path: '/sync-center/tasks', icon: List },
+  { key: 'discovery', label: '教材发现', path: '/sync-center/discovery', icon: Search },
+  { key: 'tasks', label: '教材任务', path: '/sync-center/tasks', icon: List },
 ]
 </script>
 <style scoped>
