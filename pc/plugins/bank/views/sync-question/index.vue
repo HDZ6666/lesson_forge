@@ -22,8 +22,10 @@
 
     <el-tabs v-model="activeTab"><el-tab-pane label="全部任务" name="tasks"/><el-tab-pane label="待处理问题" name="issues"/></el-tabs>
     <section v-show="activeTab==='tasks'" class="panel">
+      <el-alert v-if="filters.planId" :title="`正在查看计划 #${filters.planId} 的第 ${filters.cycleNo} 轮任务，点击重置可查看全部批次。`" type="info" :closable="false"/>
       <el-form :inline="true" :model="filters" class="filter-form" @submit.prevent="searchTasks">
         <el-form-item label="学科"><SubjectSelect v-model="filters.subjectId" @change="searchTasks" /></el-form-item>
+        <el-form-item label="同步批次"><el-input v-model="filters.cycleName" clearable placeholder="计划名称或日期，如 2026-10-10" @keyup.enter="searchTasks"/></el-form-item>
         <el-form-item label="任务编号"><el-input v-model="filters.taskNo" clearable placeholder="请输入任务编号" @keyup.enter="searchTasks" /></el-form-item>
         <el-form-item label="状态">
           <el-select v-model="filters.status" clearable placeholder="全部状态" class="status-select">
@@ -60,10 +62,11 @@
         @selection-change="handleSelectionChange"
       >
         <el-table-column type="selection" width="48" align="center" :selectable="isSelectableTask" />
+        <el-table-column label="所属学科同步批次" min-width="230"><template #default="{row}">{{ row.autoCycleName || (row.autoPlanId ? `计划 #${row.autoPlanId} · 第 ${row.autoCycleNo} 轮` : '手动单本同步') }}</template></el-table-column>
         <el-table-column label="任务编号" min-width="150" show-overflow-tooltip>
           <template #default="scope"><el-link type="primary" :underline="false" @click="openDetail(scope.row)">{{ scope.row.taskNo || scope.row.taskId }}</el-link></template>
         </el-table-column>
-        <el-table-column label="状态" width="112" align="center"><template #default="scope"><el-tag size="small" :type="syncTaskStatusMeta(scope.row.status).type">{{ syncTaskStatusMeta(scope.row.status).label }}</el-tag></template></el-table-column>
+        <el-table-column label="状态" width="112" align="center"><template #default="scope"><el-tag size="small" :type="questionTaskStatusMeta(scope.row).type">{{ questionTaskStatusMeta(scope.row).label }}</el-tag></template></el-table-column>
         <el-table-column label="教材" min-width="200"><template #default="{row}"><span class="cell-main">{{ textbookSummary(row) }}</span><span class="cell-sub">{{ row.versionName || '—' }}</span><span v-if="row.queueReason || row.queueState==='waiting'" class="cell-sub">{{ row.queueReason || '等待后台派发' }}</span></template></el-table-column>
         <el-table-column label="本次采集" min-width="140"><template #default="{row}"><span class="cell-main">{{ Number(row.questionCount || 0).toLocaleString() }} 道题</span><span class="cell-sub">{{ row.catalogCount || 0 }} 个目录</span></template></el-table-column>
         <el-table-column label="题目变化" min-width="135"><template #default="{row}"><span>新增 {{ row.newQuestionCount || 0 }}</span><span class="cell-sub">变化 {{ row.changedQuestionCount || 0 }}</span></template></el-table-column>
@@ -166,7 +169,7 @@ import {
   isActiveSyncTask,
   normalizeQuestionSyncOptions,
   syncTaskErrorMessage,
-  syncTaskStatusMeta,
+  questionTaskStatusMeta,
   syncTaskStatusOptions,
   unwrapSyncTask,
   unwrapSyncTaskPage,
@@ -191,8 +194,8 @@ const optionError = ref('')
 const optionVersions = ref([])
 const acknowledged = ref(false)
 const createForm = reactive({ subjectId: 1, versionId: '', textbookId: undefined, limitTo1000Pages: false })
-const filters = reactive({ subjectId: Number(route.query.subjectId) || undefined, taskNo: '', status: undefined, versionName: '', createTimeRange: [], pageNum: 1, pageSize: 10 })
-watch(() => [route.query.tab, route.query.subjectId], () => { activeTab.value = route.query.tab === 'issues' ? 'issues' : 'tasks'; filters.subjectId = Number(route.query.subjectId) || undefined; searchTasks() })
+const filters = reactive({ subjectId: Number(route.query.subjectId) || undefined, planId: Number(route.query.planId) || undefined, cycleNo: Number(route.query.cycleNo) || undefined, cycleName: '', taskNo: '', status: undefined, versionName: '', createTimeRange: [], pageNum: 1, pageSize: 10 })
+watch(() => [route.query.tab, route.query.subjectId, route.query.planId, route.query.cycleNo], () => { activeTab.value = route.query.tab === 'issues' ? 'issues' : 'tasks'; filters.subjectId = Number(route.query.subjectId) || undefined; filters.planId=Number(route.query.planId)||undefined;filters.cycleNo=Number(route.query.cycleNo)||undefined; searchTasks() })
 let taskListRevision = 0
 let refreshTimer = null
 let mounted = false
@@ -215,6 +218,7 @@ function requestQuery() {
   const [createTimeStart, createTimeEnd] = Array.isArray(filters.createTimeRange) ? filters.createTimeRange : []
   return {
     subjectId: filters.subjectId,
+    planId: filters.planId, cycleNo: filters.cycleNo, cycleName: filters.cycleName || undefined,
     taskNo: filters.taskNo || undefined,
     status: filters.status || undefined,
     versionName: filters.versionName || undefined,
@@ -232,7 +236,7 @@ function clearRefreshTimer() {
 
 function scheduleRefresh() {
   clearRefreshTimer()
-  if (!mounted || !tasks.value.some((task) => isActiveSyncTask(task.status))) return
+  if (!mounted || !tasks.value.some((task) => isActiveSyncTask(task.status) || ['queued','preparing','running'].includes(task.incrementalImport?.status) || ['pending','probing','retry'].includes(task.importIntake?.status) || task.awaitingImportIntake)) return
   refreshTimer = window.setTimeout(async () => {
     refreshTimer = null
     if (selectedRows.value.length || batchDeleting.value) {
@@ -281,7 +285,7 @@ async function loadTasks(silent = false) {
 }
 
 function searchTasks() { filters.pageNum = 1; loadTasks() }
-function resetFilters() { Object.assign(filters, { subjectId: undefined, taskNo: '', status: undefined, versionName: '', createTimeRange: [], pageNum: 1 }); loadTasks() }
+function resetFilters() { filters.planId=undefined;filters.cycleNo=undefined;filters.cycleName=''; Object.assign(filters, { subjectId: undefined, taskNo: '', status: undefined, versionName: '', createTimeRange: [], pageNum: 1 }); loadTasks() }
 
 async function loadOptions() {
   optionsLoading.value = true

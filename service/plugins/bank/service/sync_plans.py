@@ -1,9 +1,8 @@
 """One-book cycles reuse existing jobs and dispatch; no second collection pipeline."""
 
-import asyncio
 import os
 import secrets
-from datetime import timedelta
+from datetime import timedelta, timezone
 
 from sqlalchemy import or_, select, update
 
@@ -88,6 +87,8 @@ def plan_dump(row):
     return {
         'planId': row.plan_id,
         'subjectId': row.subject_id,
+        'planName': row.plan_name,
+        'cycleName': row.cycle_name,
         'enabled': bool(row.enabled),
         'refreshDays': row.refresh_days,
         'refillHours': row.refill_hours,
@@ -97,6 +98,7 @@ def plan_dump(row):
         'cycleStartedAt': utc_datetime(row.cycle_started_at),
         'nextCheckAt': utc_datetime(row.next_check_at),
         'discoveryTaskId': row.discovery_task_id,
+        'lastDiscoveryTaskId': row.discovery_task_id or row.discovery_processed_task_id or None,
         'discoveryNextAt': utc_datetime(row.discovery_next_at),
         'discoveryError': row.discovery_error,
         'revision': row.revision,
@@ -108,7 +110,18 @@ async def list_plans(db, subject_id=None):
     if subject_id is not None:
         query = query.where(QbSyncPlan.subject_id == subject_id)
     rows = (await db.scalars(query)).all()
-    return [plan_dump(row) for row in rows]
+    result = []
+    for row in rows:
+        value = plan_dump(row)
+        task_id = row.discovery_task_id or row.discovery_processed_task_id
+        task = await db.get(QbSyncJob, task_id) if task_id else None
+        if task:
+            options = task.options_json or {}
+            value.update(discoveryStatus=task.status, discoveryRegistered=bool(options.get('discoveryResult')),
+                         discoveryQueueReason=task.dispatch_error,
+                         discoveryError=value['discoveryError'] or options.get('discoveryError'))
+        result.append(value)
+    return result
 
 
 async def save_plan(db, payload):
@@ -130,6 +143,10 @@ async def save_plan(db, payload):
         if row.revision != payload.expected_revision:
             raise ServiceException(message='计划已被修改，请刷新后重试')
         row.revision += 1
+    name = payload.plan_name.strip() if payload.plan_name is not None else row.plan_name or f'{subject.subject_name}同步'
+    if not name:
+        raise ServiceException(message='计划名称不能为空')
+    row.plan_name = name
     row.enabled = int(payload.enabled)
     row.refresh_days, row.refill_hours, row.discovery_days = (
         payload.refresh_days,
@@ -163,6 +180,7 @@ async def list_books(db, plan_id):
     for offset in range(0, len(books), 500):
         counts.update(await book_stem_counts(db, [book.textbook_id for book, _, _ in books[offset : offset + 500]]))
     targets = set(plan.cycle_targets or [])
+    task_progress = await _book_task_progress(db, states.values(), plan.cycle_no)
     return [
         {
             'textbookId': book.textbook_id,
@@ -179,9 +197,75 @@ async def list_books(db, plan_id):
             'nextDueAt': utc_datetime(states[book.textbook_id].next_due_at) if book.textbook_id in states else None,
             'revision': states[book.textbook_id].revision if book.textbook_id in states else 0,
             **counts.get(book.textbook_id, {'usableQuestionCount': 0}),
+            **task_progress.get(book.textbook_id, {}),
         }
         for book, is_new, version_name in books
     ]
+
+
+async def _book_task_progress(db, states, cycle_no):
+    ids = [state.last_task_id for state in states if state.last_task_id]
+    if not ids:
+        return {}
+    rows = (await db.execute(select(QbSyncJob, QbSyncJobScope, QbQuestionImport, QbQuestionImportIntake)
+        .join(QbSyncJobScope, QbSyncJobScope.run_id == QbSyncJob.run_id)
+        .outerjoin(QbQuestionImport, (QbQuestionImport.scope_id == QbSyncJobScope.scope_id)
+                   & (QbQuestionImport.collector_run_id == QbSyncJobScope.collector_run_id))
+        .outerjoin(QbQuestionImportIntake, (QbQuestionImportIntake.scope_id == QbSyncJobScope.scope_id)
+                   & (QbQuestionImportIntake.collector_run_id == QbSyncJobScope.collector_run_id))
+        .where(QbSyncJob.run_id.in_(ids)))).all()
+    result = {}
+    for job, scope, imported, intake in rows:
+        stage = job.status
+        reason = job.dispatch_error or job.error_message
+        if imported:
+            stage = {'queued': 'checking', 'preparing': 'checking', 'running': 'importing'}.get(imported.status, imported.status)
+            reason = imported.error_message or reason
+        elif intake:
+            stage = 'failed' if intake.status in ('blocked', 'discarded') else 'checking'
+            reason = intake.error_message or reason
+        elif job.status in TERMINAL and scope.collector_run_id and job.dispatch_book_key:
+            stage = 'checking'
+        elif job.status == 'completed':
+            stage = 'failed'  # A collected task without import evidence is not finished.
+            reason = reason or '采集结束，尚无入库结果'
+        if stage in ('starting', 'running', 'cancelling'):
+            stage = 'collecting'
+        if stage in ('blocked', 'interrupted'):
+            stage = 'failed'
+        if stage == 'completed' and imported and not imported.accepted_count:
+            stage = 'partial'
+        result[scope.local_textbook_id] = {
+            'taskStage': stage, 'taskReason': reason,
+            'taskInCurrentCycle': (job.options_json or {}).get('autoCycleNo') == cycle_no,
+            'acceptedCount': imported.accepted_count if imported else 0,
+            'quarantinedCount': imported.quarantined_count if imported else 0,
+        }
+    return result
+
+
+async def retry_plan_discovery(db, plan_id, revision):
+    plan = await db.get(QbSyncPlan, plan_id, with_for_update=True, populate_existing=True)
+    if plan is None or plan.revision != revision:
+        raise ServiceException(message='计划已变化，请刷新')
+    task_id = plan.discovery_task_id or plan.discovery_processed_task_id
+    task = await db.get(QbSyncJob, task_id) if task_id else None
+    if task and task.status not in TERMINAL:
+        return plan_dump(plan)
+    if task and task.status == 'completed' and not (task.options_json or {}).get('discoveryResult'):
+        options = dict(task.options_json or {})
+        options.update(discoveryAttempts=0, discoveryError=None, discoveryRetryAt=None)
+        task.options_json = options
+        plan.discovery_task_id = task.run_id
+    elif task:
+        plan.discovery_processed_task_id = task.run_id
+        plan.discovery_task_id = None
+    plan.discovery_error = None
+    plan.discovery_next_at = None
+    plan.next_check_at = None
+    plan.revision += 1
+    await db.commit()
+    return plan_dump(plan)
 
 
 async def save_book_override(db, plan_id, textbook_id, payload):
@@ -251,6 +335,9 @@ async def tick_plan(db, plan_id, *, client):
     plan = await db.get(QbSyncPlan, plan_id, populate_existing=True)
     try:
         await SubjectService.require(db, plan.subject_id, sync=True)
+        if not plan.cycle_no and await _discovery(db, plan_id, client) is False:
+            return
+        plan = await db.get(QbSyncPlan, plan_id, populate_existing=True)
         now = await _clock(db)
         books = await list_books(db, plan_id)
         # Adopt any task committed before a crash in plan bookkeeping. Its
@@ -336,6 +423,9 @@ async def tick_plan(db, plan_id, *, client):
             if book['textbookId'] in targets and states[book['textbookId']].last_cycle_no < plan.cycle_no
         ]
         if not pending:
+            if plan.cycle_no and await _discovery(db, plan_id, client) is False:
+                return
+            plan = await db.get(QbSyncPlan, plan_id, populate_existing=True)
             due = [
                 book
                 for book in eligible
@@ -343,11 +433,16 @@ async def tick_plan(db, plan_id, *, client):
             ]
             if due:
                 plan.cycle_no += 1
+                discovery = await db.get(QbSyncJob, plan.discovery_processed_task_id) if plan.discovery_processed_task_id else None
+                snapshot = (discovery.options_json or {}) if discovery else {}
+                plan.cycle_name = (snapshot.get('autoCycleName') if snapshot.get('autoCycleNo') == plan.cycle_no else None) or _cycle_name(plan, now, plan.cycle_no)
                 plan.cycle_targets = [book['textbookId'] for book in due]
                 plan.cycle_started_at = now
                 pending = due
                 targets = plan.cycle_targets
         cycle_no = plan.cycle_no
+        cycle_name = plan.cycle_name
+        plan_name = plan.plan_name
         refill_hours = plan.refill_hours
         await db.commit()
         # Existing manual/automatic work on one book must not keep the
@@ -361,65 +456,40 @@ async def tick_plan(db, plan_id, *, client):
                 )
             ).all()
         )
-        dispatched = len(targets) - len(pending)
         pending = [book for book in pending if book['textbookId'] not in busy_books]
         if pending:
-            # Every fourth selection reserves a place for old editions.
-            # A finite cycle gives each target one attempt before any refill.
-            old_turn = dispatched % 4 == 3
+            # Persist the full finite queue: new editions first, then old.
             pending.sort(
                 key=lambda book: (
+                    not book['isNew'],
                     book['usableQuestionCount'] > 0,
-                    book['isNew'] if old_turn else not book['isNew'],
                     book['lastCycleNo'],
                     book['textbookId'],
                 )
             )
-            book = None
-            for candidate in pending:
-                held = await retry_saved_book_results(db, candidate['textbookId'], now)
+            from plugins.bank.service.task_service import SyncTaskService
+
+            for book in pending:
+                held = await retry_saved_book_results(db, book['textbookId'], now)
                 if held:
-                    state = await db.scalar(select(QbSyncBookState).where(QbSyncBookState.plan_id == plan_id, QbSyncBookState.textbook_id == candidate['textbookId']))
+                    state = await db.scalar(select(QbSyncBookState).where(
+                        QbSyncBookState.plan_id == plan_id, QbSyncBookState.textbook_id == book['textbookId']))
                     state.last_cycle_no = cycle_no
                     state.next_due_at = now + timedelta(hours=refill_hours)
                     await db.commit()
                     continue
-                book = candidate
-                break
-            if book is None:
-                await _discovery(db, plan_id, client)
-                return
-            from plugins.bank.service.task_service import SyncTaskService
-
-            previous = await db.scalar(
-                select(QbSyncJobScope)
-                .join(QbSyncJob, QbSyncJob.run_id == QbSyncJobScope.run_id)
-                .where(
-                    QbSyncJobScope.local_textbook_id == book['textbookId'],
-                    QbSyncJob.status.in_(TERMINAL),
-                    QbSyncJob.dispatch_book_key.is_(None),
+                # Each new cycle observes current pages. Explicit task resume
+                # remains available, but a new cycle is not an old page cursor.
+                result = await SyncTaskService.create_question(
+                    db, {'versionId': book['versionId'], 'textbookId': book['textbookId']},
+                    operator='automatic',
+                    automatic_options={'autoPlanId': plan_id, 'autoCycleNo': cycle_no,
+                                       'autoCycleName': cycle_name, 'autoPlanName': plan_name},
                 )
-                .order_by(QbSyncJob.run_id.desc())
-                .limit(1)
-            )
-            refill_task = (
-                previous.run_id
-                if previous
-                and previous.collector_run_id
-                and previous.snapshot_locked_at
-                and not previous.snapshot_complete
-                else None
-            )
-            await SyncTaskService.create_question(
-                db,
-                {'versionId': book['versionId'], 'textbookId': book['textbookId']},
-                operator='automatic',
-                automatic_options={'autoPlanId': plan_id, 'autoCycleNo': cycle_no},
-                resume_task_id=refill_task,
-            )
-        # Discovery coalesces missed intervals into one new task; failed or
-        # truncated discovery never changes the existing formal book set.
-        await _discovery(db, plan_id, client)
+                state = await db.scalar(select(QbSyncBookState).where(
+                    QbSyncBookState.plan_id == plan_id, QbSyncBookState.textbook_id == book['textbookId']))
+                state.last_task_id = result.get('taskId') or result['runId']
+                await db.commit()
     finally:
         await db.rollback()
         now = await _clock(db)
@@ -429,6 +499,11 @@ async def tick_plan(db, plan_id, *, client):
             .values(worker_token=None, lease_until=None, next_check_at=now + timedelta(seconds=30), update_time=now)
         )
         await db.commit()
+
+
+def _cycle_name(plan, now, number):
+    local = now.replace(tzinfo=timezone.utc).astimezone(timezone(timedelta(hours=8)))
+    return f"{plan.plan_name or '学科同步'} · {local:%Y-%m-%d %H:%M} · 第 {number} 轮"
 
 
 async def _discovery(db, plan_id, client):
@@ -450,11 +525,11 @@ async def _discovery(db, plan_id, client):
     if plan.discovery_task_id:
         task = await db.get(QbSyncJob, plan.discovery_task_id)
         if task and task.status not in TERMINAL:
-            return
+            return False
         if task and task.status == 'completed' and (task.options_json or {}).get('discoveryMode') == 'merge':
             options = task.options_json or {}
             if not options.get('discoveryResult') and options.get('discoveryAttempts', 0) < 3:
-                return  # The shared discovery worker owns merge and retry timing.
+                return False  # The shared discovery worker owns merge and retry timing.
             plan.discovery_error = None if options.get('discoveryResult') else options.get('discoveryError')
         elif task and task.status == 'completed' and task.snapshot_complete:
             task_id = task.run_id
@@ -476,12 +551,18 @@ async def _discovery(db, plan_id, client):
         plan = await db.get(QbSyncPlan, plan_id)
         plan.discovery_processed_task_id = plan.discovery_task_id
         plan.discovery_task_id = None
-        plan.discovery_next_at = now + timedelta(days=plan.discovery_days)
+        plan.discovery_next_at = now + (timedelta(hours=plan.refill_hours) if plan.discovery_error
+                                        else timedelta(days=plan.discovery_days))
         await db.commit()
     if plan.discovery_next_at and plan.discovery_next_at > now:
-        return
-    if await db.scalar(select(QbSyncJob.run_id).where(QbSyncJob.active_slot.is_not(None)).limit(1)):
-        return
+        return not bool(plan.discovery_error)
+    previous = await db.get(QbSyncJob, plan.discovery_processed_task_id) if plan.discovery_processed_task_id else None
+    previous_options = (previous.options_json or {}) if previous else {}
+    cycle_name = (previous_options.get('autoCycleName')
+                  if previous_options.get('autoCycleNo') == plan.cycle_no + 1 else None)
+    discovery_options = {'autoDiscoveryPlanId': plan_id, 'autoPlanId': plan_id, 'discoveryMode': 'merge',
+                         'autoPlanName': plan.plan_name, 'autoCycleNo': plan.cycle_no + 1,
+                         'autoCycleName': cycle_name or _cycle_name(plan, now, plan.cycle_no + 1)}
     await db.rollback()
     from plugins.bank.service.sync_run_service import SyncRunService
 
@@ -491,12 +572,14 @@ async def _discovery(db, plan_id, client):
         task_module='textbook',
         acknowledge_source_policy=True,
         operator='automatic',
-        extra_options={'autoDiscoveryPlanId': plan_id, 'discoveryMode': 'merge'},
+        extra_options=discovery_options,
     )
     plan = await db.get(QbSyncPlan, plan_id)
     plan.discovery_task_id = result.get('taskId') or result.get('runId')
     plan.discovery_error = None
     await db.commit()
+
+    return False
 
 
 async def schedule_once(*, session_factory, client):
@@ -507,9 +590,6 @@ async def schedule_once(*, session_factory, client):
             return
         ids = list((await db.scalars(select(QbSyncPlan.plan_id).where(QbSyncPlan.enabled == 1))).all())
     if not ids:
-        return
-    health = await asyncio.to_thread(client.health)
-    if unattended_reason(health):
         return
     for plan_id in ids:
         async with session_factory() as db:

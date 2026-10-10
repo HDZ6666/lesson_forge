@@ -110,6 +110,10 @@ class WorkerOwnershipLost(ServiceException):
     """A successor owns this dispatch; the old worker must stop writing."""
 
 
+class DispatchDeferred(ServiceException):
+    """Collector explicitly declined a start; keep the same waiting task."""
+
+
 class DispatchAckPending(ServiceException):
     """Collector may have accepted the UUID; replay it before freeing the slot."""
 
@@ -2158,6 +2162,8 @@ async def _execute_remote(  # noqa: PLR0912, PLR0915
             remote = await asyncio.to_thread(client.start_job, handle.run_type, **start_kwargs)
         except ServiceException as exc:
             cause = exc.__cause__
+            if dispatch_id and isinstance(cause, urllib.error.HTTPError) and cause.code == 423:
+                raise DispatchDeferred(message=exc.message) from exc
             if dispatch_id and not (isinstance(cause, urllib.error.HTTPError) and cause.code in (400, 401, 403, 409)):
                 raise DispatchAckPending(message='等待核对采集器派发结果，将使用相同任务标识恢复') from exc
             raise
@@ -2720,6 +2726,12 @@ async def _execute(run_id: int, handle: _WorkerHandle) -> None:  # noqa: PLR0912
         max_pages = _max_pages()
         await _execute_remote(run_id, handle, max_pages)
         return
+    except DispatchDeferred as exc:
+        await _update_row(run_id, {
+            'status': 'queued', 'active_slot': None, 'started_at': None,
+            'dispatch_error': exc.message,
+            'dispatch_not_before': datetime.utcnow() + timedelta(seconds=30),
+        }, expected_statuses=('starting', 'running'))
     except DispatchAckPending as exc:
         from plugins.bank.service.incremental_import import _clock
         async with DataSourceRegistry.session() as clock_db:
@@ -2969,6 +2981,8 @@ class SyncRunService:
         from plugins.bank.service.sync_plans import control_status
         if (await control_status(db))['paused']:
             raise ServiceException(message='同步已紧急暂停，请在同步总览恢复后再创建任务')
+        if task_module == 'textbook':
+            defer_dispatch = True
         # Fail closed at task creation: every worker, resume, and status path
         # relies on the configured collector HTTP service.
         if not defer_dispatch:
@@ -3103,28 +3117,38 @@ class SyncRunService:
             raise ServiceException(message='新同步任务必须且只能选择一本教材')
         dispatch_key = None
         if defer_dispatch:
-            if task_module != 'question' or options.get('workflowVersion') != 2 or len(selected_scope_rows) != 1:
-                raise ServiceException(message='持久待办只接受新版单本题库任务')
             from plugins.bank.service.sync_dispatch import (
                 book_key,
                 existing_book_task,
                 legacy_unsettled_book_task,
                 request_manual_dispatch,
             )
-            local_book_id = _scope_field(selected_scope_rows[0], 'local_textbook_id', 'localTextbookId')
-            if not local_book_id or await db.get(QbTextbook, int(local_book_id), with_for_update=True) is None:
-                raise ServiceException(message='待办任务必须绑定正式教材')
-            dispatch_key = book_key(int(options['subjectId']), PROVIDER, selected[0])
-            existing = await existing_book_task(db, dispatch_key, limit_to_1000_pages=options['limitTo1000Pages'])
-            if existing is not None:
-                if not options.get('autoPlanId'):
-                    await request_manual_dispatch(db, existing, operator)
-                return _status_from_row(existing, await SyncTaskDao.scopes(db, existing.run_id)) or {}
-            legacy = await legacy_unsettled_book_task(db, int(options['subjectId']), PROVIDER, selected[0])
-            if legacy is not None:
-                if _row_options(legacy).get('workflowVersion', 1) < 2:
-                    raise ServiceException(message='该教材已有旧版活动任务，请先等待或停止原任务')
-                return _status_from_row(legacy, await SyncTaskDao.scopes(db, legacy.run_id)) or {}
+            if task_module == 'textbook':
+                from plugins.bank.service.subject_service import SubjectService
+                await SubjectService.require(db, int(options['subjectId']), sync=True)
+                dispatch_key = book_key(int(options['subjectId']), PROVIDER, '__discovery__')
+                existing = await existing_book_task(db, dispatch_key, limit_to_1000_pages=False)
+                if existing is not None:
+                    if not options.get('autoPlanId'):
+                        await request_manual_dispatch(db, existing, operator)
+                    return _status_from_row(existing) or {}
+            elif task_module == 'question' and options.get('workflowVersion') == 2 and len(selected_scope_rows) == 1:
+                local_book_id = _scope_field(selected_scope_rows[0], 'local_textbook_id', 'localTextbookId')
+                if not local_book_id or await db.get(QbTextbook, int(local_book_id), with_for_update=True) is None:
+                    raise ServiceException(message='待办任务必须绑定正式教材')
+                dispatch_key = book_key(int(options['subjectId']), PROVIDER, selected[0])
+                existing = await existing_book_task(db, dispatch_key, limit_to_1000_pages=options.get('limitTo1000Pages', False))
+                if existing is not None:
+                    if not options.get('autoPlanId'):
+                        await request_manual_dispatch(db, existing, operator)
+                    return _status_from_row(existing, await SyncTaskDao.scopes(db, existing.run_id)) or {}
+                legacy = await legacy_unsettled_book_task(db, int(options['subjectId']), PROVIDER, selected[0])
+                if legacy is not None:
+                    if _row_options(legacy).get('workflowVersion', 1) < 2:
+                        raise ServiceException(message='该教材已有旧版活动任务，请先等待或停止原任务')
+                    return _status_from_row(legacy, await SyncTaskDao.scopes(db, legacy.run_id)) or {}
+            else:
+                raise ServiceException(message='持久待办只接受教材发现或新版单本题库任务')
         row = QbSyncJob(
             run_type=run_type,
             task_module=task_module,
@@ -3174,7 +3198,7 @@ class SyncRunService:
         except IntegrityError as exc:
             await db.rollback()
             if defer_dispatch:
-                existing = await existing_book_task(db, dispatch_key, limit_to_1000_pages=options['limitTo1000Pages'])
+                existing = await existing_book_task(db, dispatch_key, limit_to_1000_pages=options.get('limitTo1000Pages', False))
                 if existing is not None:
                     if not options.get('autoPlanId'):
                         await request_manual_dispatch(db, existing, operator)

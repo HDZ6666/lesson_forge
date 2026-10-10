@@ -27,6 +27,7 @@ READ = UserInterfaceAuthDependency(
 
 
 class PlanInput(BankModel):
+    plan_name: str | None = Field(default=None, min_length=1, max_length=100)
     subject_id: int = Field(gt=0)
     expected_revision: int | None = Field(default=None, gt=0)
     enabled: bool = False
@@ -66,6 +67,11 @@ async def plans(db: DB, subject_id: Annotated[int | None, Query(alias='subjectId
 @sync_plan_controller.put('/plans', dependencies=[UserInterfaceAuthDependency('bank:sync:plans:edit')])
 async def save_plan(payload: PlanInput, db: DB) -> Response:
     return ResponseUtil.success(data=await sync_plans.save_plan(db, payload))
+
+
+@sync_plan_controller.post('/plans/{plan_id}/discovery/retry', dependencies=[UserInterfaceAuthDependency('bank:sync:plans:edit')])
+async def retry_plan_discovery(plan_id: int, payload: RevisionInput, db: DB) -> Response:
+    return ResponseUtil.success(data=await sync_plans.retry_plan_discovery(db, plan_id, payload.expected_revision))
 
 
 @sync_plan_controller.get('/plans/{plan_id}/books', dependencies=[READ])

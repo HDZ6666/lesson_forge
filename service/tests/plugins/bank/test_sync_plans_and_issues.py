@@ -204,7 +204,7 @@ async def test_scope_repair_requires_matching_complete_scan_and_keeps_question_i
 
 
 @pytest.mark.asyncio
-async def test_automatic_plan_refills_latest_sealed_partial_book(bank_db, monkeypatch):
+async def test_new_cycle_rescans_book_instead_of_inheriting_old_page_cursor(bank_db, monkeypatch):
     from plugins.bank.entity.do.bank_do import QbSyncJobScope
     from plugins.bank.service.task_service import SyncTaskService
 
@@ -224,8 +224,8 @@ async def test_automatic_plan_refills_latest_sealed_partial_book(bank_db, monkey
     await plans.tick_plan(bank_db, plan['planId'], client=None)
     latest = await bank_db.scalar(select(QbSyncJob).order_by(QbSyncJob.run_id.desc()))
     next_scope = await bank_db.scalar(select(QbSyncJobScope).where(QbSyncJobScope.run_id == latest.run_id))
-    assert latest.run_id != old['taskId'] and latest.retry_of_run_id == old['taskId']
-    assert next_scope.resume_from_collector_run_id == 55
+    assert latest.run_id != old['taskId'] and latest.retry_of_run_id is None
+    assert next_scope.resume_from_collector_run_id is None
 
 
 @pytest.mark.asyncio

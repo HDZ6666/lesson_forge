@@ -8,8 +8,8 @@
     <el-alert v-if="error" :title="error" type="error" :closable="false" show-icon />
     <section v-if="!loading && !error && !summary.textbooks" class="welcome sync-panel">
       <div class="welcome-icon"><el-icon><Collection /></el-icon></div>
-      <div class="welcome-copy"><span class="eyebrow">从这里开始</span><h3>先发现教材，再同步题目</h3><p>更新来源中的版本和教材清单后，选择一本教材试跑，或设置自动计划逐本采集。</p></div>
-      <el-button type="primary" @click="router.push('/sync-center/discovery')">开始教材发现 <el-icon class="el-icon--right"><ArrowRight /></el-icon></el-button>
+      <div class="welcome-copy"><span class="eyebrow">从这里开始</span><h3>创建一个计划，自动建立题库</h3><p>选择学科创建同步计划，系统自动发现教材、逐本排队采集，并将合格题目分批入库。</p></div>
+      <el-button type="primary" @click="router.push('/sync-center/plans')">创建学科同步计划 <el-icon class="el-icon--right"><ArrowRight /></el-icon></el-button>
     </section>
     <div class="sync-stat-grid" v-loading="loading">
       <div class="sync-stat"><span>当前教材</span><strong>{{ number(summary.textbooks) }}</strong><small>{{ number(summary.textbooksWithoutQuestions) }} 本尚无可用题</small></div>
@@ -43,7 +43,7 @@
         <el-table-column label="创建时间" min-width="170"><template #default="{row}">{{ formatTaskTime(row.createTime) }}</template></el-table-column>
         <el-table-column label="需关注的信息" min-width="220" show-overflow-tooltip><template #default="{row}">{{ row.error || '—' }}</template></el-table-column>
         <el-table-column label="操作" width="100" fixed="right"><template #default="{row}"><el-button link type="primary" @click="open(row)">查看详情</el-button></template></el-table-column>
-        <template #empty><el-empty :image-size="64" description="还没有同步任务"><el-button type="primary" plain @click="router.push('/sync-center/discovery')">先发现教材</el-button></el-empty></template>
+        <template #empty><el-empty :image-size="64" description="还没有同步任务"><el-button type="primary" plain @click="router.push('/sync-center/plans')">创建同步计划</el-button></el-empty></template>
       </el-table>
     </section>
     <section class="sync-panel resource-panel">

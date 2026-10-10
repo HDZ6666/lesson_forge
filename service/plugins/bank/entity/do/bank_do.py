@@ -818,6 +818,8 @@ class QbSyncPlan(Base):
     __table_args__ = (Index('uk_qb_sync_plan_subject', 'subject_id', unique=True),)
     plan_id = Column(BigInteger, primary_key=True, autoincrement=True)
     subject_id = Column(BigInteger, nullable=False)
+    plan_name = Column(String(100), nullable=False, server_default='')
+    cycle_name = Column(String(180), nullable=True)
     enabled = Column(SmallInteger, nullable=False, server_default='0')
     refresh_days = Column(Integer, nullable=False, server_default='7')
     refill_hours = Column(Integer, nullable=False, server_default='24')

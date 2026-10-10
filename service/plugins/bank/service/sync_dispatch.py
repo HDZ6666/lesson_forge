@@ -200,6 +200,10 @@ async def release_finished_books(db) -> int:
 
 
 async def _validate_waiting_scope(db, row, *, lock=True):
+    if row.task_module == 'textbook':
+        from plugins.bank.service.subject_service import SubjectService
+        await SubjectService.require(db, row.subject_id, sync=True)
+        return []
     scopes = await SyncTaskDao.scopes(db, row.run_id)
     if len(scopes) != 1:
         raise ServiceException(message='待办任务的单本教材范围无效')
@@ -265,18 +269,19 @@ async def claim_next(db, *, task_id=None) -> dict | None:
             scope.finished_at = scope.update_time = now
         await db.commit()
         return None
-    scope = scopes[0]
-    busy_import = await db.scalar(select(QbQuestionImport.import_id).where(
-        QbQuestionImport.subject_id == row.subject_id,
-        QbQuestionImport.source_provider == scope.source_provider,
-        QbQuestionImport.external_textbook_id == scope.external_textbook_id,
-        QbQuestionImport.status.in_(('queued', 'preparing', 'running')),
-    ).limit(1))
-    if busy_import is not None:
-        row.dispatch_error = '该教材仍有未结束的分批入库，等待完成后派发'
-        row.dispatch_not_before = due_now + timedelta(seconds=30)
-        await db.commit()
-        return None
+    if scopes:
+        scope = scopes[0]
+        busy_import = await db.scalar(select(QbQuestionImport.import_id).where(
+            QbQuestionImport.subject_id == row.subject_id,
+            QbQuestionImport.source_provider == scope.source_provider,
+            QbQuestionImport.external_textbook_id == scope.external_textbook_id,
+            QbQuestionImport.status.in_(('queued', 'preparing', 'running')),
+        ).limit(1))
+        if busy_import is not None:
+            row.dispatch_error = '该教材仍有未结束的分批入库，等待完成后派发'
+            row.dispatch_not_before = due_now + timedelta(seconds=30)
+            await db.commit()
+            return None
     token = secrets.token_hex(32)
     row.active_slot = '1'
     row.worker_token = token
@@ -288,12 +293,13 @@ async def claim_next(db, *, task_id=None) -> dict | None:
     except IntegrityError:
         await db.rollback()
         return None
-    return {'taskId': row.run_id, 'token': token, 'jobId': row.dispatch_job_id}
+    return {'taskId': row.run_id, 'token': token, 'jobId': row.dispatch_job_id,
+            'taskModule': row.task_module, 'runType': row.run_type}
 
 
 async def cancel_waiting(db, task_id: int) -> bool:
     row = (await db.execute(select(QbSyncJob).where(
-        QbSyncJob.run_id == task_id, QbSyncJob.task_module == 'question',
+        QbSyncJob.run_id == task_id, QbSyncJob.task_module.in_(('question', 'textbook')),
     ).with_for_update().execution_options(populate_existing=True))).scalars().first()
     if row is None or row.status != 'queued' or row.active_slot or not row.dispatch_job_id:
         return False
@@ -347,7 +353,7 @@ async def dispatch_once(*, session_factory=None, client=None) -> int:
         local_reason = exc.message
     if backlog_reason or local_reason:
         async with session_factory() as db:
-            row = await SyncTaskDao.get_for_update(db, due, 'question')
+            row = await db.get(QbSyncJob, due, with_for_update=True, populate_existing=True)
             if row and row.status == 'queued' and row.active_slot is None:
                 row.dispatch_error = str(backlog_reason or local_reason)[:500]
                 row.dispatch_not_before = await _clock(db) + timedelta(seconds=30)
@@ -358,7 +364,7 @@ async def dispatch_once(*, session_factory=None, client=None) -> int:
         health = await asyncio.to_thread((client or CollectorClient()).health)
     except ServiceException as exc:
         async with session_factory() as db:
-            row = await SyncTaskDao.get_for_update(db, due, 'question')
+            row = await db.get(QbSyncJob, due, with_for_update=True, populate_existing=True)
             if row and row.status == 'queued' and row.active_slot is None:
                 row.dispatch_error = str(exc.message or '采集器暂不可用，等待恢复')[:500]
                 row.dispatch_not_before = await _clock(db) + timedelta(seconds=30)
@@ -372,7 +378,7 @@ async def dispatch_once(*, session_factory=None, client=None) -> int:
         reason = unattended_reason(health)
         if reason:
             async with session_factory() as db:
-                row = await SyncTaskDao.get_for_update(db, due, 'question')
+                row = await db.get(QbSyncJob, due, with_for_update=True, populate_existing=True)
                 if row and row.status == 'queued' and row.active_slot is None:
                     row.dispatch_error = reason
                     row.dispatch_not_before = await _clock(db) + timedelta(seconds=30)
@@ -385,6 +391,16 @@ async def dispatch_once(*, session_factory=None, client=None) -> int:
                 ).order_by(QbSyncJob.run_id).limit(1))
             if due is None:
                 return 0
+    for key in ('sourceBudget', 'resources'):
+        state = health.get(key) or {}
+        if state.get('paused'):
+            async with session_factory() as db:
+                row = await db.get(QbSyncJob, due, with_for_update=True, populate_existing=True)
+                if row and row.status == 'queued' and row.active_slot is None:
+                    row.dispatch_error = state.get('reason') or '采集条件暂不可用，等待恢复'
+                    row.dispatch_not_before = await _clock(db) + timedelta(seconds=30)
+                    await db.commit()
+            return 0
     control = health.get('sourceControl') if isinstance(health, dict) else None
     if isinstance(control, dict) and control.get('paused') is True:
         deadline = None
@@ -397,7 +413,7 @@ async def dispatch_once(*, session_factory=None, client=None) -> int:
         except (ValueError, OverflowError):
             pass
         async with session_factory() as db:
-            row = await SyncTaskDao.get_for_update(db, due, 'question')
+            row = await db.get(QbSyncJob, due, with_for_update=True, populate_existing=True)
             if row and row.status == 'queued' and row.active_slot is None:
                 not_before = await _clock(db) + timedelta(seconds=300 if control.get('manualRequired') else 30)
                 row.dispatch_error = str(control.get('reason') or '来源公共暂停，等待恢复')[:500]
@@ -410,7 +426,8 @@ async def dispatch_once(*, session_factory=None, client=None) -> int:
         return 0
     from plugins.bank.service.sync_run_service import _WORKERS, _execute, _WorkerHandle
 
-    handle = _WorkerHandle(token=ticket['token'], task_module='question', run_type='content', workflow_version=2)
+    handle = _WorkerHandle(token=ticket['token'], task_module=ticket['taskModule'],
+                           run_type=ticket['runType'], workflow_version=2)
     _WORKERS[ticket['taskId']] = handle
     handle.task = asyncio.create_task(_execute(ticket['taskId'], handle))
     return 1

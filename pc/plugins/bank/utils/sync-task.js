@@ -123,6 +123,7 @@ export function textbookApplyVerb(task = {}) {
 }
 
 export function textbookTaskMeaning(task = {}) {
+  if (task.status === 'queued' && task.queueReason) return task.queueReason
   if (task.discoveryMode) {
     if (task.discoveryResult?.action === 'superseded') return '已有较新发现，本次保留历史'
     if (task.discoveryResult) return '正常项已自动登记'
@@ -170,6 +171,12 @@ export function incrementalImportMeta(task = {}) {
   if (['blocked', 'discarded'].includes(intake)) return { type: 'danger', label: '核验待处理', message: '本次成果暂未提交入库，请根据下面的原因检查后重试核验。' }
   if (intake === 'pending' || task.awaitingImportIntake) return { type: 'info', label: '等待封存核验', message: '采集已结束，后台将核验本次成果并自动提交入库，页面可以关闭。' }
   return { type: 'info', label: '尚未入库', message: '采集结束后，后台自动核验并将合格成果分批入库。' }
+}
+
+export function questionTaskStatusMeta(task = {}) {
+  if (!isActiveSyncTask(task.status) && task.workflowVersion === 2 &&
+      (task.incrementalImport || task.importIntake || task.awaitingImportIntake)) return incrementalImportMeta(task)
+  return syncTaskStatusMeta(task.status)
 }
 
 export function isActiveIncrementalImport(task = {}) {

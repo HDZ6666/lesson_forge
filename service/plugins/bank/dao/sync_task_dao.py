@@ -110,6 +110,12 @@ class SyncTaskDao:
         """
 
         query = select(QbSyncJob).where(QbSyncJob.task_module == task_module)
+        if query_object.plan_id:
+            query = query.where(QbSyncJob.options_json['autoPlanId'].as_integer() == query_object.plan_id)
+        if query_object.cycle_no:
+            query = query.where(QbSyncJob.options_json['autoCycleNo'].as_integer() == query_object.cycle_no)
+        if query_object.cycle_name:
+            query = query.where(QbSyncJob.options_json['autoCycleName'].as_string().contains(query_object.cycle_name, autoescape=True))
         if query_object.status:
             query = query.where(QbSyncJob.status == query_object.status)
         if query_object.subject_id:

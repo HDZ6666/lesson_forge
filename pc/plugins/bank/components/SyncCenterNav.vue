@@ -11,7 +11,7 @@ defineProps({ active: String })
 const entries = [
   { key: 'overview', label: '同步总览', path: '/sync-center/overview', icon: DataBoard },
   { key: 'discovery', label: '教材发现', path: '/sync-center/discovery', icon: Search },
-  { key: 'plans', label: '自动计划', path: '/sync-center/plans', icon: Calendar },
+  { key: 'plans', label: '学科计划', path: '/sync-center/plans', icon: Calendar },
   { key: 'tasks', label: '同步任务', path: '/sync-center/tasks', icon: List },
 ]
 </script>

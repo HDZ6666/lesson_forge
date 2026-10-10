@@ -440,6 +440,10 @@ def task_payload(row: object, scopes: list[object] | None = None) -> dict[str, A
         'metadataRunId': metadata_run_id,
         'sourceTaskId': _pick(row, 'source_task_id', 'sourceTaskId'),
         'retryOfRunId': _pick(row, 'retry_of_run_id', 'retryOfRunId'),
+        'autoPlanId': options.get('autoPlanId'),
+        'autoPlanName': options.get('autoPlanName'),
+        'autoCycleNo': options.get('autoCycleNo'),
+        'autoCycleName': options.get('autoCycleName'),
         'retryOfTaskId': _pick(row, 'retry_of_run_id', 'retryOfTaskId'),
         'collectorJobId': _pick(row, 'collector_job_id', 'collectorJobId'),
         'limitTo1000Pages': _as_flag(options.get('limitTo1000Pages', options.get('limit_to_1000_pages', False))),
@@ -1134,6 +1138,28 @@ async def _collector_question_detail(run_id: int, external_id: str, textbook_ext
     return dict(item)
 
 
+async def _attach_page_import_progress(db, payloads):
+    """One local query for page progress; never fetch collector snapshots."""
+    from plugins.bank.entity.do.bank_do import QbQuestionImport, QbQuestionImportIntake, QbSyncJobScope
+    from plugins.bank.service.import_intake import intake_status
+    from plugins.bank.service.incremental_import import import_binding_matches_scope, import_status
+    targets = {p['taskId']: p for p in payloads if p.get('workflowVersion') == 2}
+    if not targets:
+        return
+    rows = (await db.execute(select(QbSyncJobScope, QbQuestionImport, QbQuestionImportIntake)
+        .outerjoin(QbQuestionImport, (QbQuestionImport.scope_id == QbSyncJobScope.scope_id)
+                   & (QbQuestionImport.collector_run_id == QbSyncJobScope.collector_run_id))
+        .outerjoin(QbQuestionImportIntake, (QbQuestionImportIntake.scope_id == QbSyncJobScope.scope_id)
+                   & (QbQuestionImportIntake.collector_run_id == QbSyncJobScope.collector_run_id))
+        .where(QbSyncJobScope.run_id.in_(targets)))).all()
+    for scope, imported, intake in rows:
+        payload = targets[scope.run_id]
+        payload['incrementalImport'] = import_status(imported) if imported and import_binding_matches_scope(imported, scope) else None
+        payload['importIntake'] = intake_status(intake) if intake else None
+        payload['awaitingImportIntake'] = bool(scope.collector_run_id and payload['status'] in
+            {'completed', 'failed', 'blocked', 'interrupted', 'cancelled'} and not imported and not intake)
+
+
 class SyncTaskService:
     """Business logic for the independent textbook/question task modules."""
 
@@ -1174,6 +1200,8 @@ class SyncTaskService:
             # cannot filter ``versionName``.
             if _row_matches_filters(projected, query):
                 payloads.append(projected)
+        if module == 'question':
+            await _attach_page_import_progress(db, payloads)
         if len(payloads) == len(rows):
             page.rows = payloads
             return page
@@ -1366,6 +1394,7 @@ class SyncTaskService:
             acknowledge_source_policy=True,
             operator=operator,
             retry_of_run_id=task_id,
+            extra_options={'discoveryMode': 'merge', 'workflowVersion': 2},
         )
 
     @classmethod

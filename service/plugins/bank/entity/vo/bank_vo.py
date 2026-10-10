@@ -725,6 +725,9 @@ class QuestionTaskCreateModel(BankModel):
 
 
 class SyncTaskPageQueryModel(BankPageQueryModel):
+    plan_id: int | None = Field(default=None, gt=0)
+    cycle_no: int | None = Field(default=None, gt=0)
+    cycle_name: str | None = Field(default=None, max_length=180)
     subject_id: int | None = Field(default=None, gt=0)
     """Filters shared by the two independent task list pages."""
 
