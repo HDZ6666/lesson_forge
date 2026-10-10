@@ -55,10 +55,14 @@ async def test_pause_blocks_queue_stops_current_and_resume_prioritizes_same_book
     await bank_db.rollback();await plan_control.reconcile_controls(factory)
     plan=await bank_db.get(QbSyncPlan,plan_id,populate_existing=True)
     assert plan.control_state=='paused' and not plan.enabled
+    await sync_plans.save_plan(bank_db,PlanInput(subjectId=1,expectedRevision=plan.revision,enabled=False,listConcurrency=8))
+    plan=await bank_db.get(QbSyncPlan,plan_id,populate_existing=True)
     await plan_control.action(bank_db,plan_id,PlanAction(action='resume',expectedRevision=plan.revision),'teacher')
     await bank_db.rollback();await plan_control.reconcile_controls(factory)
     new=(await bank_db.scalars(select(QbSyncJob).where(QbSyncJob.retry_of_run_id==old_id))).one()
     assert new.options_json['autoPlanId']==plan_id and new.dispatch_priority>0
+    assert new.options_json['listConcurrency']==8
+    assert (await bank_db.get(QbSyncJob,old_id)).options_json['listConcurrency']==1
     claim=await sync_dispatch.claim_next(bank_db)
     assert claim['taskId']==new.run_id
 

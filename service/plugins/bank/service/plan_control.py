@@ -180,11 +180,16 @@ async def resume_stopped_collections(session_factory):
                         'autoPlanId','autoPlanName','autoCycleNo','autoCycleName','manualPlanId','manualSingle',
                         'manualDispatchRequested','allowWhilePlanPaused','listConcurrency','concurrencySource','inheritedConcurrency')}
                     extra['resumeFirst']=True
+                    if options.get('concurrencySource')!='task':
+                        from plugins.bank.service import task_concurrency
+                        extra.update(task_concurrency.snapshot(await task_concurrency.resolve(db,row.subject_id)))
                     result=await SyncTaskService.create_question(db,{'versionId':scope.local_version_id,'textbookId':scope.local_textbook_id,
                         'limitTo1000Pages':options.get('limitTo1000Pages',False),'allow_paused':bool(options.get('allowWhilePlanPaused'))},
                         operator='plan-resume',resume_task_id=task_id,automatic_options=extra)
                 else:
-                    result=await SyncTaskService.retry_question(db,task_id,'plan-resume')
+                    from plugins.bank.entity.vo.bank_vo import TaskConcurrencyInput
+                    result=await SyncTaskService.retry_question(db,task_id,'plan-resume',settings=TaskConcurrencyInput(
+                        listConcurrency=options.get('listConcurrency') if options.get('concurrencySource')=='task' else None))
                 plan_id=options.get('autoPlanId') or options.get('manualPlanId')
                 if plan_id:
                     state=await db.scalar(select(QbSyncBookState).where(QbSyncBookState.plan_id==plan_id,QbSyncBookState.textbook_id==scope.local_textbook_id))
