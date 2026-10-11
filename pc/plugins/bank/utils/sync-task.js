@@ -157,6 +157,15 @@ export function questionTaskMeaning(task = {}) {
   return '只抓取，未应用'
 }
 
+export function emptySnapshotHint(task = {}) {
+  if (task.incrementalImport || task.importIntake?.status !== 'blocked') return ''
+  const scopes = task.scopeItems || []
+  const scope = scopes.length === 1 ? scopes[0] : null
+  if (!scope?.snapshotLockedAt || [scope.catalogCount, scope.questionCount, scope.relationCount ?? scope.questionCatalogCount].some(value => value == null || Number(value) !== 0)) return ''
+  const cause = scope.errorMessage || task.errorMessage
+  return `本次已封存成果：目录 0 条、题目 0 道、题目与目录关联 0 条。${cause ? '采集停止原因：' + cause + '。' : ''}请查看下方问题说明，处理后点击“重试任务”重新采集；重复核验不能补齐空成果。`
+}
+
 export function incrementalImportMeta(task = {}) {
   const status = task.incrementalImport?.status
   if (status === 'paused') return { type: 'info', label: '入库已暂停', message: '计划已暂停，已提交批次和剩余断点保留，继续计划后恢复。' }
@@ -167,6 +176,7 @@ export function incrementalImportMeta(task = {}) {
   if (status === 'completed') return { type: 'success', label: '本次入库完成', message: '本次合格成果已处理完毕；这不表示已覆盖网站全部题目。' }
   if (status === 'partial') return { type: 'warning', label: '部分成果已保留', message: '本次成果处理完毕，合格部分已保留；仍有采集缺口或暂缓题目。' }
   if (status === 'failed') return { type: 'danger', label: '入库中断', message: '已提交的批次保留，剩余题目尚未入库。' }
+  if (emptySnapshotHint(task)) return { type: 'danger', label: '没有可入库成果', message: '采集在取得题目前停止，需要处理采集问题后重新采集。' }
   const intake = task.importIntake?.status
   if (intake === 'probing') return { type: 'warning', label: '封存核验中', message: '后台正在核对本次运行身份和题目数量，核验通过后自动分批入库。' }
   if (intake === 'retry') return { type: 'warning', label: '核验等待重试', message: '本次核验未通过，后台将在预约时间再次检查。' }

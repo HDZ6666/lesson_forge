@@ -444,3 +444,8 @@ assert.equal(canResumeSyncTask({workflowVersion:2, status:'completed', resumeAva
 assert.equal(canResumeSyncTask({workflowVersion:2, status:'completed', resumeAvailable:false}), false)
 assert.equal(canResumeSyncTask({workflowVersion:2, status:'running', resumeAvailable:true}), false)
 assert.equal(canResumeSyncTask({workflowVersion:2, status:'cancelled', resumeAvailable:true}), true)
+
+const emptySealedTask = {importIntake:{status:'blocked'},scopeItems:[{snapshotLockedAt:'2026-10-10T08:38:16Z',catalogCount:0,questionCount:0,relationCount:0}]}
+assert.equal(incrementalImportMeta(emptySealedTask).label, '没有可入库成果')
+assert.equal(incrementalImportMeta({...emptySealedTask,scopeItems:[{...emptySealedTask.scopeItems[0],snapshotLockedAt:null}]}).label, '核验待处理')
+assert.equal(incrementalImportMeta({...emptySealedTask,scopeItems:[{...emptySealedTask.scopeItems[0],questionCount:10}]}).label, '核验待处理')

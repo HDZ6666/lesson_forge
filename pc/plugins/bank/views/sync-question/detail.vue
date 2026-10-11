@@ -9,7 +9,7 @@
       <div class="heading-actions">
         <el-button :icon="Refresh" :loading="loading" @click="refreshTask">刷新状态</el-button>
         <el-button
-          v-if="isIncremental && ['blocked', 'retry'].includes(task?.importIntake?.status)"
+          v-if="isIncremental && !emptySnapshotMessage && ['blocked', 'retry'].includes(task?.importIntake?.status)"
           v-hasPermi="['bank:sync:question:apply']" type="warning" :icon="RefreshRight"
           :loading="acting" @click="retryIntake"
         >重试封存核验</el-button>
@@ -112,7 +112,7 @@
         核验尝试：{{ task.importIntake.attemptCount }} / {{ task.importIntake.attemptLimit }}
         <template v-if="task.importIntake.nextAttemptAt"> · 下次核验：{{ formatImportTime(task.importIntake.nextAttemptAt) }}</template>
       </p>
-      <el-alert v-if="task.importIntake?.errorMessage && !task.incrementalImport" type="warning" :closable="false">{{ task.importIntake.errorMessage }}</el-alert>
+      <el-alert v-if="task.importIntake?.errorMessage && !task.incrementalImport" type="warning" :closable="false">{{ emptySnapshotMessage || task.importIntake.errorMessage }}</el-alert>
       <p v-if="task.incrementalImport" class="progress-basis">入库编号：{{ task.incrementalImport.importId }}</p>
       <div v-if="task.incrementalImport" class="summary-stat-grid">
         <div class="summary-stat"><span>质量已检查</span><strong>{{ task.incrementalImport.checkedCount }}</strong></div>
@@ -294,6 +294,7 @@ import {
   syncTaskStatusMeta,
   unwrapSyncTask,
   incrementalImportMeta,
+  emptySnapshotHint,
   isActiveIncrementalImport,
   isActiveImportIntake,
 } from '../../utils/sync-task'
@@ -357,6 +358,7 @@ let taskLoadRevision = 0
 let mounted = false
 let loadedScopeKey = ''
 
+const emptySnapshotMessage = computed(() => emptySnapshotHint(task.value || {}))
 const taskId = computed(() => String(route.params.taskId || route.query.taskId || ''))
 const selectedScope = computed(() => task.value?.scopeItems.find((item) => scopeKey(item) === selectedScopeKey.value) || null)
 const liveProjection = computed(() => {
