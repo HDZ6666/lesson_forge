@@ -53,7 +53,9 @@ async def prepare_incremental_verdicts(verdicts: list[dict[str, Any]]) -> list[d
     if len(verdicts) > MAX_MERGE_QUESTIONS:
         raise ServiceException(message='入库素材准备超过单批题数上限')
     result = []
+    from plugins.bank.service.resource_guard import assert_import_resources
     for verdict in verdicts:
+        assert_import_resources()
         item = dict(verdict)
         if item['status'] == 'accepted':
             try:

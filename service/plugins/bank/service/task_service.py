@@ -363,6 +363,7 @@ def task_payload(row: object, scopes: list[object] | None = None) -> dict[str, A
         for item in scope_payloads:
             available = (
                 task_status in _TERMINAL_TASK_STATUSES
+                and not options.get('snapshotCleanupPending') and not options.get('snapshotReclaimed')
                 and not item['snapshotComplete']
                 and bool(item.get('snapshotLockedAt'))
                 and _positive_resume_run_id(item.get('collectorRunId')) is not None
@@ -445,6 +446,8 @@ def task_payload(row: object, scopes: list[object] | None = None) -> dict[str, A
         'planPaused': bool(options.get('planWorkPaused')),
         'planEnded': bool(options.get('planWorkEnded')),
         'collectionResumePending': bool(options.get('planResumePending')),
+        'snapshotReclaimed': bool(options.get('snapshotReclaimed')),
+        'snapshotCleanupPending': bool(options.get('snapshotCleanupPending')),
         'concurrencyToken': task_concurrency.token(options),
         'concurrencyEditable': str(_pick(row, 'status')) == 'queued' and bool(_pick(row, 'dispatch_job_id')) and not _pick(row, 'active_slot') and not _pick(row, 'collector_job_id'),
         'autoPlanId': options.get('autoPlanId'),
@@ -1675,10 +1678,12 @@ class SyncTaskService:
                 }
             )
         if resume_task_id is not None:
-            source = await SyncTaskDao.get(db, resume_task_id, 'question')
+            source = await SyncTaskDao.get_for_update(db, resume_task_id, 'question')
             sources = await SyncTaskDao.scopes(db, resume_task_id)
             if source is None or source.status not in _TERMINAL_TASK_STATUSES or len(sources) != 1:
                 raise ServiceException(message='补采必须使用已结束的单本任务')
+            if (source.options_json or {}).get('snapshotCleanupPending') or (source.options_json or {}).get('snapshotReclaimed'):
+                raise ServiceException(message='旧任务原始成果正在回收或已回收，请选择最新任务补采，或重新同步教材')
             previous = sources[0]
             target = scope_rows[0]
             if (

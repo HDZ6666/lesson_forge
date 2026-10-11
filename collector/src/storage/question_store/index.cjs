@@ -59,6 +59,7 @@ class QuestionSyncStore {
     const rows = this.db.prepare(`
       SELECT * FROM sync_runs WHERE provider = ?
         AND CAST(json_extract(scope_json, '$.textbookId') AS TEXT) = ?
+        AND NOT EXISTS (SELECT 1 FROM sync_result_cleanup WHERE run_id=sync_runs.id)
       ORDER BY id DESC LIMIT 50
     `).all(PROVIDER, String(scope.textbookId ?? ''));
     const identity = this._scopeIdentity(scope);

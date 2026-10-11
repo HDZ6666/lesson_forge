@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import fcntl
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -27,13 +28,14 @@ from plugins.bank.service.incremental_snapshot import SealedSnapshotReader, chec
 from plugins.bank.service.large_snapshot_spool import spool_snapshot
 from plugins.bank.service.plan_work import PlanWorkPaused, assert_task
 from plugins.bank.service.question_apply_service import _asset_root, _normalise_snapshot_summary
-from plugins.bank.service.resource_guard import ResourcePressure, assert_resources
+from plugins.bank.service.resource_guard import ResourcePressure, assert_import_resources
 from plugins.bank.service.source_write_lock import SourceWriteBusy
 from utils.log_util import logger
 
 POLL_SECONDS = 3
 HEARTBEAT_SECONDS = 30
 _WORKER_TASK: asyncio.Task | None = None
+_CLEANUP_TASK: asyncio.Task | None = None
 
 
 class PreparationBusy(ServiceException):
@@ -46,7 +48,8 @@ def _prepare(ticket: dict[str, Any], client: Any, path: Path, stop: threading.Ev
             raise PlanWorkPaused(message='学科计划暂停，已保留入库断点')
         if stop.is_set():
             raise ServiceException(message='入库准备执行权已失效，停止暂存写入')
-        assert_resources(root=path.parent)
+        assert_import_resources(root=path.parent)
+        time.sleep(0.02)  # Yield between persisted QC/page batches.
 
     path.parent.mkdir(parents=True, exist_ok=True)
     # Keep the same durable spool across owners. A DB lease alone cannot
@@ -119,24 +122,25 @@ async def execute_incremental_import(
 
     pulse = asyncio.create_task(heartbeat(), name=f'bank-import-heartbeat-{owner["importId"]}')
     try:
-        assert_resources(root=path.parent)
+        assert_import_resources(root=path.parent)
         async with session_factory() as db:
             await advance_incremental_preparation(db, owner, 'checking')
         report = await asyncio.to_thread(_prepare, owner, client, path, stop, paused)
         async with session_factory() as db:
             owner.update(await attach_incremental_quality(db, owner, report))
         while not owner['done']:
-            assert_resources(root=path.parent)
+            assert_import_resources(root=path.parent)
             async with session_factory() as db:
                 await advance_incremental_preparation(db, owner, 'assets')
             verdicts = await asyncio.to_thread(read_checked_batch, path, owner)
             prepared = await prepare_incremental_verdicts(verdicts)
-            assert_resources(root=path.parent)
+            assert_import_resources(root=path.parent)
             async with session_factory() as db:
                 result = await submit_incremental_import_batch(db, owner, prepared, expected_cursor=owner['cursor'])
             state = result['incrementalImport']
             owner['cursor'] = state['processedCount']
             owner['done'] = state['status'] in {'completed', 'partial'}
+            await asyncio.sleep(0.1)
     except asyncio.CancelledError:
         # Shutdown or heartbeat loss leaves the last committed checkpoint.
         # Expiry recovery will claim a new token; do not turn shutdown into
@@ -201,14 +205,32 @@ async def _run():
         await asyncio.sleep(POLL_SECONDS)
 
 
+async def _cleanup_loop():
+    from plugins.bank.service.result_cleanup import cleanup_once
+    while True:
+        try:
+            await cleanup_once()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(f'成果回收延后：{type(exc).__name__}')
+        await asyncio.sleep(60)
+
+
 def start_incremental_import_worker():
-    global _WORKER_TASK
+    global _WORKER_TASK, _CLEANUP_TASK
+    if _CLEANUP_TASK is None or _CLEANUP_TASK.done():
+        _CLEANUP_TASK = asyncio.create_task(_cleanup_loop(), name='bank-result-cleanup')
     if _WORKER_TASK is None or _WORKER_TASK.done():
         _WORKER_TASK = asyncio.create_task(_run(), name='bank-incremental-import-worker')
 
 
 async def stop_incremental_import_worker():
-    global _WORKER_TASK
+    global _WORKER_TASK, _CLEANUP_TASK
+    if _CLEANUP_TASK is not None:
+        _CLEANUP_TASK.cancel()
+        await asyncio.gather(_CLEANUP_TASK, return_exceptions=True)
+        _CLEANUP_TASK = None
     if _WORKER_TASK is not None:
         _WORKER_TASK.cancel()
         await asyncio.gather(_WORKER_TASK, return_exceptions=True)

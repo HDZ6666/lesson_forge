@@ -11,7 +11,6 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import exists, func, or_, select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import aliased
 
 from config.database import DataSourceRegistry
 from exceptions.exception import ServiceException
@@ -53,10 +52,11 @@ def queue_fields(row) -> dict:
             state = 'dispatched'
         elif row.status == 'queued':
             state = 'waiting'
+    expired = row.dispatch_not_before and utc_datetime(row.dispatch_not_before) <= datetime.now(timezone.utc)
     return {
         'queueState': state,
-        'queueNotBefore': utc_datetime(row.dispatch_not_before),
-        'queueReason': row.dispatch_error,
+        'queueNotBefore': None if expired else utc_datetime(row.dispatch_not_before),
+        'queueReason': None if expired else row.dispatch_error,
     }
 
 
@@ -70,12 +70,8 @@ def dispatchable_plan_condition(*, manual_only=False):
     plan_id = QbSyncJob.options_json['autoPlanId'].as_integer()
     manual = or_(plan_id.is_(None), plan_id == 0,
                  QbSyncJob.options_json['manualDispatchRequested'].as_boolean().is_(True))
-    recovering=aliased(QbSyncJob)
-    same_plan=func.coalesce(recovering.options_json['autoPlanId'].as_integer(),recovering.options_json['manualPlanId'].as_integer()) == func.coalesce(plan_id,QbSyncJob.options_json['manualPlanId'].as_integer())
-    recovery_ready=~exists().where(same_plan,allowed_condition(recovering),
-        recovering.options_json['planResumePending'].as_boolean().is_(True))
     if manual_only or os.getenv('BANK_AUTOMATIC_SYNC_ENABLED') != '1':
-        return manual & allowed_condition() & recovery_ready
+        return manual & allowed_condition()
     enabled_plan = exists().where(QbSyncPlan.plan_id == plan_id, QbSyncPlan.enabled == 1)
     excluded_book = exists().where(
         QbSyncJobScope.run_id == QbSyncJob.run_id,
@@ -83,7 +79,7 @@ def dispatchable_plan_condition(*, manual_only=False):
         QbSyncBookState.textbook_id == QbSyncJobScope.local_textbook_id,
         or_(QbSyncBookState.enabled == 0, QbSyncBookState.exception_kind.is_not(None)),
     )
-    return or_(manual, enabled_plan & ~excluded_book) & allowed_condition() & recovery_ready
+    return or_(manual, enabled_plan & ~excluded_book) & allowed_condition()
 
 
 async def request_manual_dispatch(db, row, operator, *, allow_paused=False):
@@ -364,7 +360,11 @@ async def dispatch_once(*, session_factory=None, client=None) -> int:
     if due is None:
         return 0
     try:
-        local_reason = resource_status().get('reason')
+        local = resource_status()
+        local_reason = local.get('reason')
+        start_memory = configured_limit('BANK_COLLECTION_START_MEMORY_MIB')
+        if not local_reason and start_memory and local.get('availableMemoryMiB') is not None and local['availableMemoryMiB'] < start_memory:
+            local_reason = f"等待采集启动内存：当前可用 {local['availableMemoryMiB']} MiB，需要 {start_memory} MiB；入库继续处理已有成果"
     except ServiceException as exc:
         local_reason = exc.message
     if backlog_reason or local_reason:
@@ -375,6 +375,13 @@ async def dispatch_once(*, session_factory=None, client=None) -> int:
                 row.dispatch_not_before = await _clock(db) + timedelta(seconds=30)
                 await db.commit()
         return 0
+    # Reclaim one eligible old result between books, while the collector is idle.
+    from plugins.bank.service.result_cleanup import cleanup_once
+    try:
+        await cleanup_once(session_factory=session_factory, client=client)
+    except Exception:
+        from utils.log_util import logger
+        logger.warning('旧成果回收延后，继续派发采集')
     # No database session/transaction is held during the Collector call.
     try:
         health = await asyncio.to_thread((client or CollectorClient()).health)

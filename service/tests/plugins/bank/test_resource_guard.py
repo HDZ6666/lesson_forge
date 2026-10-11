@@ -89,3 +89,16 @@ def test_memory_uses_container_remaining_capacity_and_ignores_unlimited(monkeypa
     values['/sys/fs/cgroup/memory.max'] = '100'
     values['/sys/fs/cgroup/memory.current'] = '120'
     assert guard.available_memory() == 0
+
+
+def test_import_yields_memory_before_collection_and_recovers(monkeypatch, tmp_path):
+    monkeypatch.setenv('BANK_MIN_MEMORY_FREE_MIB','512')
+    monkeypatch.setenv('BANK_IMPORT_MIN_MEMORY_MIB','1024')
+    monkeypatch.setattr(guard,'available_disk',lambda _:10000*guard.MIB)
+    monkeypatch.setattr(guard,'available_memory',lambda:800*guard.MIB)
+    guard.assert_resources(root=tmp_path)
+    with pytest.raises(guard.ResourcePressure,match='入库暂缓'):
+        guard.assert_import_resources(root=tmp_path)
+    monkeypatch.setattr(guard,'available_memory',lambda:1200*guard.MIB)
+    guard.resource_status(root=tmp_path,fresh=True)
+    guard.assert_import_resources(root=tmp_path)

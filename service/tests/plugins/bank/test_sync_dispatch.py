@@ -668,3 +668,12 @@ async def test_manual_promotion_keeps_source_delay_and_emergency_pause(bank_db, 
     await bank_db.commit()
     assert await dispatch.claim_next(bank_db) is None
     assert row.active_slot is None
+
+
+def test_expired_queue_reason_is_not_presented_as_current():
+    from types import SimpleNamespace
+    row=SimpleNamespace(dispatch_job_id='job',dispatch_book_key='book',active_slot=None,status='queued',
+        dispatch_not_before=datetime(2000,1,1),dispatch_error='来源当日教材启动预算已用完')
+    assert dispatch.queue_fields(row)['queueReason'] is None
+    row.dispatch_not_before=datetime(2099,1,1)
+    assert dispatch.queue_fields(row)['queueReason']=='来源当日教材启动预算已用完'

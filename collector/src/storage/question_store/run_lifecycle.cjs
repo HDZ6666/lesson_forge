@@ -20,6 +20,7 @@ class RunLifecycleMethods {
     const normalized = this._scopeObject(scope);
     const explicitResumeRunId = resumeRunId == null ? null : Number(resumeRunId);
     if (explicitResumeRunId != null) {
+      if (this.db.prepare('SELECT 1 FROM sync_result_cleanup WHERE run_id=?').get(explicitResumeRunId)) throw new QuestionSyncError('原始成果已回收，请重新同步教材。', 'resume_source_invalid');
       const source = this.getRun(explicitResumeRunId);
       if (!source) throw new QuestionSyncError(`续采来源 run=${explicitResumeRunId} 不存在。`, 'resume_source_invalid');
       if (!source.snapshot_locked_at || Number(source.snapshot_complete || 0) === 1) {

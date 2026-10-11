@@ -24,6 +24,7 @@ const { readJson, safeEqual, sendAssetResponse, sendJson } = require('./http.cjs
 const { CollectorJobManager, intInRange } = require('./job_manager.cjs');
 const { publicJob } = require('./progress.cjs');
 const { collectorReadiness } = require('../policies/collector_readiness.cjs');
+const { reclaimRun } = require('../storage/result_cleanup.cjs');
 const { readFailurePage } = require('../storage/failure_pages.cjs');
 
 function queryBoolean(url, key) {
@@ -95,6 +96,13 @@ function createCollectorServer(options = {}) {
       const failurePageMatch = url.pathname.match(/^\/v1\/metadata\/runs\/(\d+)\/failure-page$/);
       if (request.method === 'GET' && failurePageMatch) {
         sendJson(response, 200, readFailurePage(manager.dataDir, Number(failurePageMatch[1])));
+        return;
+      }
+      const cleanupMatch = url.pathname.match(/^\/v1\/runs\/(\d+)\/reclaim$/);
+      if (request.method === 'POST' && cleanupMatch) {
+        const body = await readJson(request);
+        if (manager.activeJobId) { sendJson(response, 409, {error:{code:'cleanup_busy',message:'采集进行中，稍后自动回收'}}); return; }
+        sendJson(response, 200, reclaimRun(manager.dbPath, manager.dataDir, cleanupMatch[1], body));
         return;
       }
       const runCatalogMatch = url.pathname.match(/^\/v1\/runs\/([^/]+)\/catalogs\/?$/i);

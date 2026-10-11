@@ -86,16 +86,13 @@ async def test_pause_discovery_discards_partial_run_and_resume_starts_new_discov
 
 
 @pytest.mark.asyncio
-async def test_resume_waits_for_stopped_book_recovery_before_other_plan_books(bank_db,monkeypatch):
+async def test_resume_pending_book_does_not_block_other_plan_books(bank_db,monkeypatch):
     monkeypatch.setenv('BANK_AUTOMATIC_SYNC_ENABLED','1')
     await registered_plan(bank_db)
     first=await sync_dispatch.claim_next(bank_db)
     row=await bank_db.get(QbSyncJob,first['taskId'])
     row.status='cancelled';row.active_slot=None
     row.options_json={**row.options_json,'planResumePending':True,'planWorkPaused':False}
-    await bank_db.commit()
-    assert await sync_dispatch.claim_next(bank_db) is None
-    row.options_json={**row.options_json,'planResumePending':False}
     await bank_db.commit()
     next_task=await sync_dispatch.claim_next(bank_db)
     assert next_task and next_task['taskId']!=first['taskId']

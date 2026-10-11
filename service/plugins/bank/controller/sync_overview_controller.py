@@ -1,7 +1,7 @@
 from typing import Annotated
 
 from fastapi import Query, Response
-from sqlalchemy import func, select, text
+from sqlalchemy import case, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from common.aspect.db_session import DBSessionDependency
@@ -9,7 +9,6 @@ from common.aspect.interface_auth import UserInterfaceAuthDependency
 from common.aspect.pre_auth import PreAuthDependency
 from common.router import APIRouterPro
 from plugins.bank.entity.do.bank_do import QbSubject, QbSyncJob, QbSyncPlan, QbTextbook, QbTextbookVersion
-from plugins.bank.service.import_dates import utc_datetime
 from utils.response_util import ResponseUtil
 
 sync_overview_controller = APIRouterPro(
@@ -70,7 +69,7 @@ async def overview(
             except ServiceException as exc:
                 reason = exc.message
         if not reason and pending.dispatch_not_before and pending.dispatch_not_before > now:
-            reason = '等待最早派发时间'
+            reason = pending.dispatch_error or '等待最早派发时间'
         if not reason:
             next_task = pending
             break
@@ -94,14 +93,27 @@ async def overview(
         .join(QbTextbook, QbTextbook.textbook_id == QbSyncJobScope.local_textbook_id)
         .where(QbSyncJobScope.run_id.in_(visible_task_ids)))).all()) if visible_task_ids else {}
 
+    from plugins.bank.service.incremental_import import import_status
+    from plugins.bank.service.sync_dispatch import queue_fields
+    importing_query = select(QbQuestionImport).where(QbQuestionImport.status.in_(('queued','preparing','running','paused')))
+    if subject_id is not None:
+        importing_query = importing_query.where(QbQuestionImport.subject_id == subject_id)
+    import_rows = list((await db.scalars(importing_query.order_by(case((QbQuestionImport.status.in_(('preparing','running')),0),else_=1),QbQuestionImport.import_id))).all())
+    current_import = import_status(import_rows[0]) if import_rows else None
+    if current_import:
+        book = await db.get(QbTextbook, import_rows[0].local_textbook_id)
+        current_import['textbookName'] = book.textbook_name if book else None
+    reclaimed_spools = await db.scalar(select(func.count()).select_from(QbQuestionImport).where(QbQuestionImport.stats_json['spoolReclaimed'].as_boolean().is_(True)))
+    reclaimed_runs = await db.scalar(select(func.count()).select_from(QbSyncJob).where(QbSyncJob.options_json['snapshotReclaimed'].as_boolean().is_(True)))
+
     def brief(row):
         return (
             {
                 'taskId': row.run_id,
                 'taskModule': row.task_module,
                 'textbookName': book_labels.get(row.run_id),
-                'reason': row.dispatch_error,
-                'notBefore': utc_datetime(row.dispatch_not_before),
+                'reason': queue_fields(row).get('queueReason'),
+                'notBefore': queue_fields(row).get('queueNotBefore'),
             }
             if row
             else None
@@ -117,6 +129,8 @@ async def overview(
             'plans': plans,
             'control': control,
             'currentTask': brief(current),
+            'currentImport': current_import, 'pendingImportCount': len(import_rows),
+            'cleanup': {'spools': reclaimed_spools, 'runs': reclaimed_runs},
             'nextTask': brief(next_task),
             'deferredTask': dict(brief(deferred[0]), reason=deferred[1]) if deferred else None,
             'cycleTargetCount': len(cycle_targets), 'cycleAttemptedCount': cycle_attempted,

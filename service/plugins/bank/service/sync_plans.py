@@ -75,10 +75,9 @@ def unattended_reason(health):
         for name in (
             'BANK_MIN_DISK_FREE_MIB',
             'BANK_MIN_MEMORY_FREE_MIB',
-            'BANK_SYNC_MAX_PENDING_IMPORTS',
         )
     ):
-        return '请先配置入库主机资源水位及积压上限'
+        return '请先配置入库主机资源水位'
     local = resource_status().get('reason')
     control = health.get('sourceControl') or {}
     return local or (control.get('reason') or '来源公共暂停' if control.get('paused') else None)
@@ -123,9 +122,10 @@ async def list_plans(db, subject_id=None):
         task_id = row.discovery_task_id or row.discovery_processed_task_id
         task = await db.get(QbSyncJob, task_id) if task_id else None
         if task:
+            from plugins.bank.service.sync_dispatch import queue_fields
             options = task.options_json or {}
             value.update(discoveryStatus=task.status, discoveryRegistered=bool(options.get('discoveryResult')),
-                         discoveryQueueReason=task.dispatch_error,
+                         discoveryQueueReason=queue_fields(task).get('queueReason'),
                          discoveryError=value['discoveryError'] or options.get('discoveryError'))
         result.append(value)
     return result
@@ -240,7 +240,8 @@ async def _book_task_progress(db, states, cycle_no):
     result = {}
     for job, scope, imported, intake in rows:
         stage = job.status
-        reason = job.dispatch_error or job.error_message
+        from plugins.bank.service.sync_dispatch import queue_fields
+        reason = queue_fields(job).get('queueReason') or job.error_message
         if imported:
             stage = {'queued': 'checking', 'preparing': 'checking', 'running': 'importing'}.get(imported.status, imported.status)
             reason = imported.error_message or reason

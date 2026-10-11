@@ -330,6 +330,10 @@ function copyLegacyRunCountColumns(db) {
 
 function migrateRunSnapshotSchema(db) {
   db.exec(`
+    CREATE TABLE IF NOT EXISTS sync_result_cleanup (
+      run_id INTEGER PRIMARY KEY, reclaimed_at TEXT NOT NULL, files_json TEXT NOT NULL,
+      deleted_bytes INTEGER NOT NULL DEFAULT 0, finished INTEGER NOT NULL DEFAULT 0
+    );
     CREATE TABLE IF NOT EXISTS sync_runs (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       provider TEXT NOT NULL,

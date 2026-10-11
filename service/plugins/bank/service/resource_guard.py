@@ -106,3 +106,13 @@ def assert_resources(*, root: Path | None = None) -> None:
         raise ResourcePressure(message=exc.message) from exc
     if state['paused']:
         raise ResourcePressure(message=state['reason'])
+
+
+def assert_import_resources(*, root: Path | None = None) -> None:
+    """Imports yield earlier than collection; saved batches remain resumable."""
+    assert_resources(root=root)
+    minimum = configured_limit('BANK_IMPORT_MIN_MEMORY_MIB')
+    state = resource_status(root=root)
+    memory = state.get('availableMemoryMiB')
+    if minimum and memory is not None and memory < minimum:
+        raise ResourcePressure(message=f'入库暂缓，为网站和采集保留内存：当前可用 {memory} MiB，入库需 {minimum} MiB；资源恢复后自动继续')

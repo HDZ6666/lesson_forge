@@ -217,6 +217,11 @@ class CollectorClient:
     def health(self) -> dict[str, Any]:
         return self._request('GET', '/v1/health')
 
+    def reclaim_run(self, *, runId, textbookExternalId, snapshotLockedAt):
+        return self._request('POST', f'/v1/runs/{int(runId)}/reclaim', payload={
+            'textbookExternalId': textbookExternalId, 'snapshotLockedAt': snapshotLockedAt,
+        })
+
     def source_budget(self):
         return self._request('GET', '/v1/source-budget')
 

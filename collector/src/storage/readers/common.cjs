@@ -308,6 +308,9 @@ function resolveContentRun(db, runId) {
   if (!tableNames(db).has('sync_runs')) {
     throw httpError('collector SQLite 缺少 sync_runs 表', 503, 'snapshot_unavailable');
   }
+  if (tableNames(db).has('sync_result_cleanup') && db.prepare('SELECT 1 FROM sync_result_cleanup WHERE run_id=?').get(id)) {
+    throw httpError(`内容运行 ${id} 已入库并回收原始成果，请查看正式题库或最新任务`, 410, 'snapshot_reclaimed');
+  }
   const columns = tableColumns(db, 'sync_runs');
   if (!columns.has('id') || !columns.has('provider') || !columns.has('status')) {
     throw httpError('collector SQLite 的 sync_runs 字段不完整', 503, 'snapshot_unavailable');

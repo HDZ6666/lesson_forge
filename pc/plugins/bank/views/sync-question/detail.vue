@@ -105,6 +105,7 @@
       <template v-if="task.queueNotBefore">下次检查：{{ formatTaskTime(task.queueNotBefore) }}</template>
     </el-alert>
 
+    <el-alert v-if="task?.snapshotReclaimed" type="info" :closable="false">本次题目已入库，旧采集成果已自动回收。任务统计和入库记录保留；补采请选择最新任务。</el-alert>
     <section v-if="task && isIncremental" class="import-summary panel" aria-label="本次入库结果">
       <div class="section-heading"><h3>本次入库结果</h3><el-tag :type="importMeta.type">{{ importMeta.label }}</el-tag></div>
       <p>{{ importMeta.message }}</p>
