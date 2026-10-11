@@ -1010,10 +1010,10 @@ class MySQLPublisher:
                         row['textbook_id']
                     )
             for row in self._fetchall(
-                f'SELECT source_provider,external_node_id,catalog_id FROM {_qi(names["qb_catalog_node"])} WHERE subject_id=1'
+                f'SELECT source_provider,textbook_id,external_node_id,catalog_id FROM {_qi(names["qb_catalog_node"])} WHERE subject_id=1'
             ):
                 if row['external_node_id'] is not None:
-                    maps['catalog'][f'{row["source_provider"]}\0{row["external_node_id"]}'] = int(row['catalog_id'])
+                    maps['catalog'][f'{row["source_provider"]}\0{row["textbook_id"]}\0{row["external_node_id"]}'] = int(row['catalog_id'])
             for row in self._fetchall(
                 f'SELECT source_provider,external_question_id,question_id FROM {_qi(names["qb_question"])} WHERE subject_id=1'
             ):
@@ -1085,7 +1085,7 @@ class MySQLPublisher:
                         else None
                     )
                     parent = (
-                        maps['catalog'].get(f'{row["provider"]}\0{row["parent_external_id"]}')
+                        maps['catalog'].get(f'{row["provider"]}\0{textbook_id}\0{row["parent_external_id"]}')
                         if row['parent_external_id']
                         else None
                     )
@@ -1094,7 +1094,7 @@ class MySQLPublisher:
                     if row['parent_external_id'] and not parent:
                         remaining.append(row)
                         continue
-                    key = f'{row["provider"]}\0{row["external_id"]}'
+                    key = f'{row["provider"]}\0{textbook_id}\0{row["external_id"]}'
                     local = maps['catalog'].get(key)
                     status = '0' if row['active'] in (1, True, '1') else '1'
                     values = (
@@ -1234,9 +1234,10 @@ class MySQLPublisher:
         bid: int,
         now: str,
     ) -> None:
-        for row in db.execute('SELECT * FROM qb_question_catalog'):
+        for row in db.execute('SELECT r.*, c.textbook_external_id FROM qb_question_catalog r JOIN qb_catalog_node c ON c.provider=r.provider AND c.external_id=r.catalog_external_id'):
             qid = maps['question'].get(f'{row["provider"]}\0{row["question_external_id"]}')
-            cid = maps['catalog'].get(f'{row["provider"]}\0{row["catalog_external_id"]}')
+            book_id = maps['textbook'].get(f'{row["provider"]}\0{row["textbook_external_id"]}')
+            cid = maps['catalog'].get(f'{row["provider"]}\0{book_id}\0{row["catalog_external_id"]}')
             if not qid or not cid:
                 raise PackageError('目录关系引用未知题目或目录')
             columns = 'question_id,catalog_id,relation_type,evidence_type,sort_order,last_sync_batch_id,last_seen_at,create_time,update_time'
@@ -1404,7 +1405,7 @@ class MySQLPublisher:
                 'duplicate:textbook',
             ),
             (
-                f'SELECT 1 FROM {_qi(names["qb_catalog_node"])} WHERE {_qi("external_node_id")} IS NOT NULL GROUP BY subject_id,{_qi("source_provider")},{_qi("external_node_id")} HAVING COUNT(*)>1 LIMIT 1',
+                f'SELECT 1 FROM {_qi(names["qb_catalog_node"])} WHERE {_qi("external_node_id")} IS NOT NULL GROUP BY subject_id,textbook_id,{_qi("source_provider")},{_qi("external_node_id")} HAVING COUNT(*)>1 LIMIT 1',
                 'duplicate:catalog',
             ),
             (

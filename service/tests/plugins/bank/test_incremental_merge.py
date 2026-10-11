@@ -337,12 +337,49 @@ async def test_batch_failure_keeps_previous_commit_and_retry_does_not_duplicate(
 
 
 @pytest.mark.asyncio
-async def test_cross_book_catalog_move_rolls_back_the_whole_batch(bank_db):
+async def test_shared_point_creates_book_membership_without_moving_existing_catalog(bank_db):
     db = bank_db
-    with pytest.raises(ServiceException, match='其他教材'):
-        await merge_prepared_incremental_batch(db, [snapshot('q3', 'c2')], local_textbook_id=1, task_id=28)
-    assert not (await db.execute(select(QbQuestion).where(QbQuestion.external_question_id == 'q3'))).scalars().all()
-    assert (await db.get(QbCatalogNode, 2)).node_name == '原目录'
+    value = snapshot('q1', 'c2')
+    value['questions'][0]['subquestion_count'] = 2
+    value['questions'][0]['content_html'] = '<p>同一大题：(1)计算；(2)证明。</p>'
+    await merge_prepared_incremental_batch(db, [value], local_textbook_id=1, task_id=28)
+    original = await db.get(QbCatalogNode, 2)
+    assert original.textbook_id == 2 and original.node_name == '原目录'
+    catalogs = (await db.scalars(select(QbCatalogNode).where(QbCatalogNode.external_node_id == 'c2'))).all()
+    assert {c.textbook_id for c in catalogs} == {1, 2}
+    questions = (await db.scalars(select(QbQuestion).where(QbQuestion.source_provider == 'zujuan', QbQuestion.external_question_id == 'q1'))).all()
+    assert len(questions) == 1 and questions[0].subquestion_count == 2
+    links = (await db.scalars(select(QbQuestionCatalog.catalog_id).where(QbQuestionCatalog.question_id == questions[0].question_id))).all()
+    assert set(links) == {c.catalog_id for c in catalogs}
+    before = questions[0].update_time
+    await db.commit()
+    value['questions'][0]['last_seen_at'] = datetime(2099, 1, 1)
+    value['questions'][0]['raw_data_json'] = {'observation': 'different textbook request'}
+    repeated = await merge_prepared_incremental_batch(db, [value], local_textbook_id=1, task_id=29)
+    assert repeated['stats']['questions']['unchanged'] == 1
+    assert repeated['stats']['questions']['inserted'] == repeated['stats']['questions']['updated'] == 0
+    assert repeated['stats']['questionCatalogs']['inserted'] == 0
+    question = await db.get(QbQuestion, questions[0].question_id, populate_existing=True)
+    assert question.update_time == before and question.subquestion_count == 2
+
+
+@pytest.mark.asyncio
+async def test_catalog_identity_migration_repeats_without_rewriting_existing_rows(bank_db):
+    import importlib
+
+    from sqlalchemy import text
+    if bank_db.bind.dialect.name != 'mysql':
+        pytest.skip('requires isolated MySQL')
+    await bank_db.execute(text('ALTER TABLE qb_catalog_node DROP INDEX uk_qb_catalog_provider_external, ADD UNIQUE KEY uk_qb_catalog_provider_external(source_provider,subject_id,external_node_id)'))
+    migration = importlib.import_module('plugins.bank.migrations.mysql.025_catalog_book_identity')
+    await migration.run(bank_db)
+    await migration.run(bank_db)
+    await bank_db.commit()
+    assert (await bank_db.get(QbCatalogNode, 2)).textbook_id == 2
+    await bank_db.rollback()
+    await merge_prepared_incremental_batch(bank_db, [snapshot('q3', 'c2')], local_textbook_id=1, task_id=28)
+    rows = (await bank_db.scalars(select(QbCatalogNode).where(QbCatalogNode.external_node_id == 'c2'))).all()
+    assert {row.textbook_id for row in rows} == {1, 2}
 
 
 @pytest.mark.asyncio

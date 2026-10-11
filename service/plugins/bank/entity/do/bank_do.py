@@ -95,7 +95,7 @@ class QbTextbook(Base):
 class QbCatalogNode(Base):
     __tablename__ = 'qb_catalog_node'
     __table_args__ = (
-        Index('uk_qb_catalog_provider_external', 'source_provider', 'subject_id', 'external_node_id', unique=True),
+        Index('uk_qb_catalog_provider_external', 'source_provider', 'subject_id', 'textbook_id', 'external_node_id', unique=True),
         Index('idx_qb_catalog_subject', 'subject_id', 'status'),
         Index('idx_qb_catalog_parent', 'textbook_id', 'parent_id'),
         Index('idx_qb_catalog_status', 'status'),

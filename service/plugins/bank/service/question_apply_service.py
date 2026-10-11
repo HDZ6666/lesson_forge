@@ -2275,7 +2275,7 @@ class QuestionApplyService:
         stats = _empty_stats()
 
         catalog_rows = list((await db.execute(select(QbCatalogNode).where(QbCatalogNode.subject_id == 1, QbCatalogNode.source_provider == PROVIDER))).scalars().all())
-        catalogs_by_external = {str(row.external_node_id): row for row in catalog_rows if row.external_node_id}
+        catalogs_by_external = {str(row.external_node_id): row for row in catalog_rows if row.external_node_id and int(row.textbook_id) == local_textbook_id}
         old_scope_catalogs = [row for row in catalog_rows if int(row.textbook_id) == local_textbook_id]
         target_catalogs = snapshot['catalogs']
         target_external_ids = {str(item['external_id']) for item in target_catalogs}
@@ -2284,8 +2284,6 @@ class QuestionApplyService:
         for item in target_catalogs:
             external_id = str(item['external_id'])
             row = catalogs_by_external.get(external_id)
-            if row is not None and int(row.textbook_id) != local_textbook_id:
-                raise ServiceException(message=f'目录 {external_id} 已属于其他正式教材，拒绝跨 scope 覆盖')
             values = {
                 'textbook_id': local_textbook_id,
                 'parent_id': None,

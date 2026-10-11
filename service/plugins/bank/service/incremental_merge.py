@@ -199,6 +199,7 @@ async def merge_prepared_incremental_batch(
                     select(QbCatalogNode)
                     .where(
                         QbCatalogNode.subject_id == 1,
+                        QbCatalogNode.textbook_id == local_textbook_id,
                         QbCatalogNode.source_provider == 'zujuan',
                         QbCatalogNode.external_node_id.in_(source_catalogs),
                     )
@@ -209,8 +210,6 @@ async def merge_prepared_incremental_batch(
         catalog_outcomes = {}
         for key, item in source_catalogs.items():
             row = catalog_map.get(key)
-            if row is not None and row.textbook_id != local_textbook_id:
-                raise ServiceException(message=f'目录 {key} 已属于其他教材，需人工判断')
             values = _observed_values(
                 {field: item[field] for field in ('node_name', 'node_type', 'source_url', 'sort_order', 'last_seen_at')}
             )
@@ -279,7 +278,13 @@ async def merge_prepared_incremental_batch(
                     for field in ('answer_html', 'analysis_html'):
                         if not str(values[field] or '').strip():
                             values.pop(field)
-                if _update(row, values, now):
+                last_seen = values.pop('last_seen_at', None)
+                raw_data = values.pop('raw_data_json', None)
+                changed = _update(row, values, now)
+                if last_seen and (row.last_seen_at is None or last_seen > row.last_seen_at):
+                    row.last_seen_at = last_seen
+                if changed:
+                    row.raw_data_json = raw_data
                     stats['questions']['updated'] += 1
                     changed_questions.append(row.question_id)
                 else:
