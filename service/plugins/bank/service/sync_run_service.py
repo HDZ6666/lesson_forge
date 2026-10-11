@@ -3175,6 +3175,11 @@ class SyncRunService:
                     return _status_from_row(legacy, await SyncTaskDao.scopes(db, legacy.run_id)) or {}
             else:
                 raise ServiceException(message='持久待办只接受教材发现或新版单本题库任务')
+        logical_task_id = None
+        if task_module == 'question' and retry_of_run_id:
+            previous = await db.get(QbSyncJob, retry_of_run_id)
+            if previous is not None:
+                logical_task_id = previous.logical_task_id or previous.run_id
         row = QbSyncJob(
             run_type=run_type,
             task_module=task_module,
@@ -3184,6 +3189,7 @@ class SyncRunService:
             metadata_run_id=None if task_module == 'question' else metadata_run_id,
             source_task_id=None if task_module == 'question' else source_task_id,
             retry_of_run_id=retry_of_run_id,
+            logical_task_id=logical_task_id,
             options_json=options,
             total_textbooks=len(selected) if run_type == 'content' else 0,
             subject_id=int(options['subjectId']),
@@ -3208,6 +3214,8 @@ class SyncRunService:
                 )
             await SyncJobDao.add(db, row)
             run_id = int(row.run_id)
+            if task_module == 'question' and row.logical_task_id is None:
+                row.logical_task_id = run_id
             if selected_scope_rows:
                 scope_entities = [
                     _scope_entity_from_payload(run_id, item, None if task_module == 'question' else metadata_run_id, task_module)

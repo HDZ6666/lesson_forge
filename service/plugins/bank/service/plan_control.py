@@ -246,11 +246,25 @@ async def sync_book_once(db, plan_id, textbook_id, payload, operator):
             existing.options_json={**existing.options_json,'planWorkPaused':False,'allowWhilePlanPaused':True,'manualDispatchRequested':True}
             await db.commit()
         return {'taskId':existing.run_id,'existing':True}
+    # Re-run the book under its current cycle task. A later scheduled cycle
+    # creates its own root, while a manual execution between cycles stays here.
+    from plugins.bank.entity.do.bank_do import QbSyncJobScope
+    previous = await db.scalar(select(QbSyncJob).join(QbSyncJobScope, QbSyncJobScope.run_id == QbSyncJob.run_id).where(
+        QbSyncJob.task_module == 'question', QbSyncJobScope.local_textbook_id == textbook_id,
+        QbSyncJob.options_json['autoPlanId'].as_integer() == plan_id,
+        QbSyncJob.options_json['autoCycleNo'].as_integer() == plan.cycle_no,
+    ).order_by(QbSyncJob.run_id.desc()).limit(1))
+    previous_id = previous.run_id if previous else None
+    options = {'manualPlanId': plan_id, 'manualSingle': True, 'manualDispatchRequested': True,
+               'allowWhilePlanPaused': bool(payload.allow_paused), 'autoPlanId': plan_id,
+               'autoPlanName': plan.plan_name, 'autoCycleNo': plan.cycle_no, 'autoCycleName': plan.cycle_name}
     await db.commit()
-    result=await SyncTaskService.create_question(db,{'versionId':book.version_id,'textbookId':textbook_id,
-        'listConcurrency':payload.list_concurrency,'allowPaused':payload.allow_paused},operator,
-        automatic_options={'manualPlanId':plan_id,'manualSingle':True,'manualDispatchRequested':True,
-                           'allowWhilePlanPaused':bool(payload.allow_paused)})
+    if previous_id:
+        result = await SyncTaskService.retry_question(db, previous_id, operator, settings=payload, execution_options=options)
+    else:
+        result = await SyncTaskService.create_question(db, {'versionId': book.version_id, 'textbookId': textbook_id,
+            'listConcurrency': payload.list_concurrency, 'allowPaused': payload.allow_paused}, operator,
+            automatic_options=options)
     task_id=result.get('taskId') or result['runId']
     row=await db.get(QbSyncJob,task_id,with_for_update=True)
     row.dispatch_priority=(await db.scalar(select(func.max(QbSyncJob.dispatch_priority))) or 0)+1
@@ -259,5 +273,6 @@ async def sync_book_once(db, plan_id, textbook_id, payload, operator):
         state=QbSyncBookState(plan_id=plan_id,textbook_id=textbook_id,enabled=1,last_cycle_no=0,revision=1)
         db.add(state)
     state.last_manual_task_id=task_id
+    state.last_task_id=task_id
     await db.commit()
     return {'taskId':task_id,'existing':False}

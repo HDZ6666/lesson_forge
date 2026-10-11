@@ -56,7 +56,7 @@ const detailScript = parseSfc(readFileSync(new URL('../../../plugins/bank/views/
 const taskLoader = parse(detailScript, { sourceType: 'module' }).program.body.find(node => node.type === 'FunctionDeclaration' && node.id.name === 'loadTask')
 for (const staleFails of [false, true]) {
   const pending = []
-  const state = { taskLoadRevision: 0, taskId: { value: 1 }, task: { value: null }, loading: { value: false }, requestError: { value: '' },
+  const state = { executionSummary: {value:{}}, request: async () => ({data:{executionCount:1}}), taskLoadRevision: 0, taskId: { value: 1 }, task: { value: null }, loading: { value: false }, requestError: { value: '' },
     unwrapSyncTask: x => x, selectDefaultScope() {}, ensureComparisonLoaded() {}, schedulePoll() {}, syncTaskErrorMessage: e => e.message,
     getQuestionSyncTask: () => new Promise((resolve,reject) => pending.push({ resolve,reject })) }
   runInNewContext(detailScript.slice(taskLoader.start, taskLoader.end), state)

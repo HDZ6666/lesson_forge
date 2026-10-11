@@ -480,6 +480,12 @@ async def get_question_sync_task(
     return ResponseUtil.success(data=await SyncTaskService.question_detail(db, task_id))
 
 
+@bank_controller.get('/sync/question/tasks/{task_id}/executions', dependencies=[UserInterfaceAuthDependency(_QUESTION_TASK_QUERY_PERMISSIONS)])
+async def question_execution_history(task_id: Annotated[int, Path(gt=0)], db: Annotated[AsyncSession, DBSessionDependency()]) -> Response:
+    from plugins.bank.service.task_executions import history
+    return ResponseUtil.success(data=await history(db, task_id))
+
+
 @bank_controller.post(
     '/sync/question/tasks/{task_id}/apply',
     response_model=DataResponseModel[QuestionApplyResponseModel],

@@ -476,6 +476,7 @@ class QbSyncJob(Base):
         Index('idx_qb_sync_job_module', 'task_module', 'run_id'),
         Index('idx_qb_sync_job_source_task', 'source_task_id'),
         Index('idx_qb_sync_job_retry_of', 'retry_of_run_id'),
+        Index('idx_qb_sync_job_logical_task', 'logical_task_id', 'run_id'),
         Index('idx_qb_sync_job_collector_job', 'collector_job_id'),
         Index('uk_qb_sync_job_dispatch_book', 'dispatch_book_key', unique=True),
         Index('idx_qb_sync_job_dispatch_due', 'status', 'active_slot', 'dispatch_not_before', 'run_id'),
@@ -504,6 +505,7 @@ class QbSyncJob(Base):
     acknowledge_source_policy = Column(CHAR(1), nullable=False, server_default='N')
     metadata_run_id = Column(BigInteger, nullable=True)
     source_task_id = Column(BigInteger, nullable=True)
+    logical_task_id = Column(BigInteger, nullable=True)
     retry_of_run_id = Column(BigInteger, nullable=True)
     collector_job_id = Column(String(64), nullable=True)
     dispatch_priority = Column(BigInteger, nullable=False, server_default='0')

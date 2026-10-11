@@ -429,7 +429,8 @@ def task_payload(row: object, scopes: list[object] | None = None) -> dict[str, A
     return {
         'taskId': run_id,
         'subjectId': int(_pick(row, 'subject_id', 'subjectId', default=1) or 1),
-        'taskNo': str(run_id),
+        'taskNo': str(_pick(row, 'logical_task_id', 'logicalTaskId') or run_id),
+        'logicalTaskId': _pick(row, 'logical_task_id', 'logicalTaskId') or run_id,
         'runId': run_id,
         'taskModule': module,
         'runType': run_type,
@@ -1211,6 +1212,8 @@ class SyncTaskService:
             if _row_matches_filters(projected, query):
                 payloads.append(projected)
         if module == 'question':
+            from plugins.bank.service.task_executions import attach_summary
+            await attach_summary(db, payloads)
             await _attach_page_import_progress(db, payloads)
         if len(payloads) == len(rows):
             page.rows = payloads
@@ -1285,12 +1288,12 @@ class SyncTaskService:
         return await cls._detail(db, task_id, 'question')
 
     @staticmethod
-    async def _delete(db: AsyncSession, task_id: int, module: str, label: str) -> None:
+    async def _delete(db: AsyncSession, task_id: int, module: str, label: str, *, commit=True, locked_row=None) -> None:
         # Question apply locks the task before its per-textbook state rows.
         # Delete must use the same order so it cannot remove a task between
         # snapshot validation and the formal-state commit. Textbook apply has
         # one provider state row and retains its established state->task order.
-        row = (
+        row = locked_row if locked_row is not None else (
             await SyncTaskDao.get_for_update(db, task_id, module)
             if module == 'question'
             else await SyncTaskDao.get(db, task_id, module)
@@ -1335,7 +1338,10 @@ class SyncTaskService:
                 raise ServiceException(message='同步任务不存在或状态已变化，请刷新后重试')
             return deleted
 
-        await _commit_or_rollback(db, operation())
+        if commit:
+            await _commit_or_rollback(db, operation())
+        else:
+            await operation()
 
     @classmethod
     async def delete_textbook(cls, db: AsyncSession, task_id: int) -> None:
@@ -1343,7 +1349,22 @@ class SyncTaskService:
 
     @classmethod
     async def delete_question(cls, db: AsyncSession, task_id: int) -> None:
-        await cls._delete(db, task_id, 'question', '题库')
+        from plugins.bank.service.task_executions import root_id, rows_for
+        row = await SyncTaskDao.get_for_update(db, task_id, 'question')
+        if row is None:
+            raise ServiceException(message='同步题库任务不存在')
+        # Old clients may address any execution. Delete the logical task in one
+        # transaction, so an active historical import prevents the whole delete.
+        if not getattr(row, 'logical_task_id', None):
+            return await cls._delete(db, task_id, 'question', '题库', locked_row=row)
+        rows = await rows_for(db, [root_id(row)])
+        try:
+            for execution in reversed(rows):
+                await cls._delete(db, execution.run_id, 'question', '题库', commit=False)
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
 
     @staticmethod
     async def _cancel(db: AsyncSession, task_id: int, module: str) -> dict[str, Any]:
@@ -1408,12 +1429,16 @@ class SyncTaskService:
         )
 
     @classmethod
-    async def retry_question(cls, db: AsyncSession, task_id: int, operator: str | None = None, *, settings=None) -> dict[str, Any]:
+    async def retry_question(cls, db: AsyncSession, task_id: int, operator: str | None = None, *, settings=None, execution_options=None) -> dict[str, Any]:
         row = await SyncTaskDao.get(db, task_id, 'question')
         if row is None:
             raise ServiceException(message='同步题库任务不存在')
+        if getattr(row, 'logical_task_id', None):
+            from plugins.bank.service.task_executions import root_id, rows_for
+            row = (await rows_for(db, [root_id(row)]))[-1]
+            task_id = row.run_id
         if str(_pick(row, 'status', default='')) not in {'completed', 'failed', 'blocked', 'cancelled', 'interrupted'}:
-            raise ServiceException(message='只有已结束的任务可以重新创建采集任务')
+            return task_payload(row, await SyncTaskDao.scopes(db, task_id))
         scopes = await SyncTaskDao.scopes(db, task_id)
         options = _task_options(row)
         concurrency = (await task_concurrency.resolve(db, int(_pick(row, 'subject_id', default=1) or 1), settings.list_concurrency)
@@ -1489,6 +1514,7 @@ class SyncTaskService:
             defer_dispatch=int(options.get('workflowVersion', 1)) >= 2,
             extra_options={
                 **{k:v for k,v in options.items() if k in ('autoPlanId','autoPlanName','autoCycleNo','autoCycleName','manualPlanId','manualSingle','manualDispatchRequested','allowWhilePlanPaused','resumeFirst')},
+                **(execution_options or {}),
                 **task_concurrency.snapshot(concurrency),
                 'workflowVersion': int(options.get('workflowVersion', 1)),
                 'subjectId': int(_pick(row, 'subject_id', 'subjectId', default=1) or 1),

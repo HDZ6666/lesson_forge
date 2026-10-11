@@ -31,10 +31,11 @@
         >{{ questionApplyActionLabel(task) }}</el-button>
         <el-button v-if="task && canResumeSyncTask(task)" v-hasPermi="['bank:sync:question:resume', 'bank:sync:run']" type="primary" plain :icon="RefreshRight" :loading="acting" :disabled="acting || isActiveIncrementalImport(task) || isActiveImportIntake(task)" @click="resumeTask">{{ task.workflowVersion === 2 ? '补采' : '断点续采' }}</el-button>
         <el-button v-if="task && canCancelSyncTask(task.status)" v-hasPermi="['bank:sync:question:cancel', 'bank:sync:run']" type="danger" plain :icon="VideoPause" :loading="acting" @click="stopTask">停止任务</el-button>
-        <el-button v-if="task && canRetrySyncTask(task.status)" v-hasPermi="['bank:sync:question:retry', 'bank:sync:question:add', 'bank:sync:run']" type="warning" plain :icon="RefreshRight" :loading="acting" @click="retryTask">重试任务</el-button>
+        <el-button v-if="task && canRetrySyncTask(task.status)" v-hasPermi="['bank:sync:question:retry', 'bank:sync:question:add', 'bank:sync:run']" type="warning" plain :icon="RefreshRight" :loading="acting" @click="retryTask">再同步一次</el-button>
       </div>
     </header>
     <SyncCenterNav active="tasks"/>
+    <div v-if="task" class="sync-panel execution-heading"><strong>任务 #{{ task.logicalTaskId || task.taskNo }}</strong><span>当前查看执行记录 #{{ task.taskId }}</span><TaskExecutionHistory :task="task"/><el-button v-if="executionSummary.latestExecutionId && executionSummary.latestExecutionId !== task.taskId" link type="primary" @click="router.push(`/bank/sync-question/${executionSummary.latestExecutionId}`)">查看最新执行</el-button><span>已执行 {{ executionSummary.executionCount ?? '—' }} 次</span></div>
 
     <div v-if="task" class="sync-panel"><TaskConcurrency :task="task" @updated="refreshTask"/></div>
     <el-alert v-if="requestError" class="state-alert" type="error" :closable="false" show-icon>{{ requestError }}</el-alert>
@@ -59,7 +60,7 @@
     </el-alert>
     <el-alert v-if="task?.status === 'interrupted'" class="state-alert" type="warning" :closable="false" show-icon>
       <template v-if="task.autoResumePending">已保留完整页断点，系统将于 {{ formatTaskTime(task.autoResumeNextAt) }} 自动续采（{{ task.autoResumeAttempt }}/{{ task.autoResumeMaxAttempts }}）。</template>
-      <template v-else>已有成果和日志保留，可创建补采任务；也可从头重跑。</template>
+      <template v-else>已有成果和日志保留，可新增补采执行；也可从头重跑。</template>
     </el-alert>
     <el-alert v-if="task?.status === 'blocked' && task?.resumeAvailable" class="state-alert" type="warning" :closable="false" show-icon>
       已有成果保留。请先处理来源验证，再补采；来源暂停状态会统一限制新任务。
@@ -243,6 +244,8 @@
 </template>
 
 <script setup>
+import request from '@/utils/request'
+import TaskExecutionHistory from '../../components/TaskExecutionHistory.vue'
 import TaskConcurrency from '../../components/TaskConcurrency.vue'
 import SyncCenterNav from '../../components/SyncCenterNav.vue'
 import '../../styles/sync-center.scss'
@@ -360,6 +363,7 @@ let mounted = false
 let loadedScopeKey = ''
 
 const emptySnapshotMessage = computed(() => emptySnapshotHint(task.value || {}))
+const executionSummary = ref({})
 const taskId = computed(() => String(route.params.taskId || route.query.taskId || ''))
 const selectedScope = computed(() => task.value?.scopeItems.find((item) => scopeKey(item) === selectedScopeKey.value) || null)
 const liveProjection = computed(() => {
@@ -637,7 +641,15 @@ async function loadTask(silent = false) {
     const result = unwrapSyncTask(await getQuestionSyncTask(requestedTaskId), 'question')
     if (requestRevision !== taskLoadRevision || requestedTaskId !== taskId.value) return
     if (!result) throw new Error('未找到同步题库任务')
+    const executionChanged = task.value?.status !== result.status
     task.value = result
+    if (!silent || executionChanged) {
+      try {
+        const history = await request({url:`/bank/sync/question/tasks/${requestedTaskId}/executions`})
+        if (requestRevision === taskLoadRevision) executionSummary.value = history.data || history
+      } catch { if (requestRevision === taskLoadRevision) executionSummary.value = {} }
+      if (requestRevision !== taskLoadRevision || requestedTaskId !== taskId.value) return
+    }
     selectDefaultScope()
     // The task and its saved logs can render before the larger comparison
     // requests finish; each comparison section has its own loading/error UI.
@@ -826,7 +838,7 @@ async function resumeTask() {
   if (!task.value || acting.value || !canResumeSyncTask(task.value)) return
   try {
     await ElMessageBox.confirm(
-      task.value.workflowVersion === 2 ? `将为任务“${task.value.taskNo || task.value.taskId}”创建关联的补采任务，保留已有成果，核对当前页面后补齐；合格题目自动分批入库。` : `将继续同一个任务“${task.value.taskNo || task.value.taskId}”。Collector 新 run 会继承旧快照并从断点继续，不会直接应用正式库。${task.value.status === 'blocked' ? '请先确认风控已解除。' : ''}确定断点续采吗？`,
+      task.value.workflowVersion === 2 ? `将为任务“${task.value.taskNo || task.value.taskId}”新增一次关联的补采执行，保留已有成果，核对当前页面后补齐；合格题目自动分批入库。` : `将继续同一个任务“${task.value.taskNo || task.value.taskId}”。Collector 新 run 会继承旧快照并从断点继续，不会直接应用正式库。${task.value.status === 'blocked' ? '请先确认风控已解除。' : ''}确定断点续采吗？`,
       '断点续采',
       { type: 'warning', confirmButtonText: '确认续采', cancelButtonText: '取消' },
     )
@@ -858,11 +870,11 @@ async function stopTask() {
 async function retryTask() {
   if (!task.value) return
   try {
-    await ElMessageBox.confirm('重试将按原版本和教材范围创建新任务，原任务保持不变。', '重试任务', { type: 'info', confirmButtonText: '创建新任务', cancelButtonText: '取消' })
+    await ElMessageBox.confirm('将为同一任务排队执行一次新的采集，保留之前每次的结果和日志。', '再同步一次', { type: 'info', confirmButtonText: '加入队列', cancelButtonText: '取消' })
     acting.value = true
     const retried = unwrapSyncTask(await retryQuestionSyncTask(task.value.taskId), 'question')
     if (!retried?.taskId) throw new Error('服务端未返回新任务编号')
-    ElMessage.success('新任务已创建')
+    ElMessage.success('本任务已加入执行队列；已有执行记录保留')
     await router.push(`/bank/sync-question/${encodeURIComponent(retried.taskId)}`)
   } catch (error) {
     if (error !== 'cancel' && error !== 'close') ElMessage.error(syncTaskErrorMessage(error, '任务重试失败'))
@@ -953,6 +965,7 @@ onBeforeUnmount(() => { mounted = false; taskLoadRevision++; clearPoll() })
 </script>
 
 <style scoped>
+.execution-heading {display:flex;flex-wrap:wrap;align-items:center;gap:14px}
 .question-task-detail { min-height: calc(100vh - 84px); color: var(--el-text-color-primary); }
 .page-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 14px; }
 .heading-copy h2 { margin: 6px 0 0; font-size: 20px; font-weight: 600; }

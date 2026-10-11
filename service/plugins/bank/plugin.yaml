@@ -1,7 +1,7 @@
 manifestVersion: 1
 id: bank
 name: 题库管理
-version: 0.12.1
+version: 0.13.0
 description: 网站题库的版本、教材、目录、题目、素材和同步发布批次管理。
 
 metadata:
@@ -46,6 +46,7 @@ backend:
     - migrations/mysql/023_plan_concurrency.py
     - migrations/mysql/024_plan_workflow.py
     - migrations/mysql/025_catalog_book_identity.py
+    - migrations/mysql/026_task_executions.py
   seeds:
     - seeds/mysql/001_dict.sql
   hooks:

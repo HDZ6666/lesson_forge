@@ -13,7 +13,7 @@ import re
 from datetime import date, datetime, time, timedelta
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import String, cast, delete, desc, exists, or_, select, update
+from sqlalchemy import String, cast, delete, desc, exists, func, or_, select, update
 
 from plugins.bank.entity.do.bank_do import QbSyncJob, QbSyncJobScope
 from utils.page_util import PageUtil
@@ -110,6 +110,10 @@ class SyncTaskDao:
         """
 
         query = select(QbSyncJob).where(QbSyncJob.task_module == task_module)
+        if task_module == 'question':
+            latest = select(func.max(QbSyncJob.run_id)).where(QbSyncJob.task_module == 'question').group_by(
+                func.coalesce(QbSyncJob.logical_task_id, QbSyncJob.run_id))
+            query = query.where(QbSyncJob.run_id.in_(latest))
         if query_object.plan_id:
             query = query.where(QbSyncJob.options_json['autoPlanId'].as_integer() == query_object.plan_id)
         if query_object.cycle_no:
@@ -133,7 +137,7 @@ class SyncTaskDao:
             else:
                 query = query.where(QbSyncJob.create_time <= end_boundary)
         if query_object.task_no:
-            query = query.where(cast(QbSyncJob.run_id, String).ilike(f'%{query_object.task_no}%'))
+            query = query.where(cast(func.coalesce(QbSyncJob.logical_task_id, QbSyncJob.run_id), String).ilike(f'%{query_object.task_no}%'))
         if query_object.version_name:
             # Options are a server-owned JSON snapshot.  JSON_EXTRACT is
             # supported by MySQL and SQLite's JSON1 extension, while keeping

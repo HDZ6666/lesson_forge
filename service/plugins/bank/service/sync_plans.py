@@ -230,6 +230,12 @@ async def _book_task_progress(db, states, cycle_no):
     ids = [state.last_task_id for state in states if state.last_task_id]
     if not ids:
         return {}
+    from plugins.bank.service.task_executions import attach_summary, root_id
+    known = list((await db.scalars(select(QbSyncJob).where(QbSyncJob.run_id.in_(ids)))).all())
+    summaries = [{'taskId': j.run_id, 'logicalTaskId': root_id(j)} for j in known]
+    await attach_summary(db, summaries)
+    summary_by_latest = {p['latestExecutionId']: p for p in summaries}
+    ids = list(summary_by_latest)
     rows = (await db.execute(select(QbSyncJob, QbSyncJobScope, QbQuestionImport, QbQuestionImportIntake)
         .join(QbSyncJobScope, QbSyncJobScope.run_id == QbSyncJob.run_id)
         .outerjoin(QbQuestionImport, (QbQuestionImport.scope_id == QbSyncJobScope.scope_id)
@@ -263,6 +269,8 @@ async def _book_task_progress(db, states, cycle_no):
         if stage == 'completed' and imported and not imported.accepted_count:
             stage = 'partial'
         result[scope.local_textbook_id] = {
+            **summary_by_latest.get(job.run_id, {}),
+            'lastTaskId': job.run_id,
             'taskStage': stage, 'taskReason': reason,
             'taskInCurrentCycle': (job.options_json or {}).get('autoCycleNo') == cycle_no,
             'acceptedCount': imported.accepted_count if imported else 0,

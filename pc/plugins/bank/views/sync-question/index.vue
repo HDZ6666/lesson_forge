@@ -16,7 +16,7 @@
       采集完成表示本次抓取结束；题目是否已可用，请查看任务中的入库结果。
     </el-alert>
     <el-alert v-if="activeTab==='tasks' && hasInterruptedTasks" class="state-alert" type="warning" :closable="false" show-icon>
-      采集中断任务的已有快照和断点保留，可断点续采；也可重试从头创建新任务。
+      采集中断任务的已有快照和断点保留，可断点续采；也可再同步一次从头采集。
     </el-alert>
     <el-alert v-if="errorMessage" class="state-alert" type="error" :closable="false" show-icon>{{ errorMessage }}</el-alert>
 
@@ -71,13 +71,14 @@
         <el-table-column label="教材" min-width="200"><template #default="{row}"><span class="cell-main">{{ textbookSummary(row) }}</span><span class="cell-sub">{{ row.versionName || '—' }}</span><span v-if="row.queueReason || row.queueState==='waiting'" class="cell-sub">{{ row.queueReason || '等待后台派发' }}</span></template></el-table-column>
         <el-table-column label="本次采集" min-width="140"><template #default="{row}"><span class="cell-main">{{ Number(row.questionCount || 0).toLocaleString() }} 道题</span><span class="cell-sub">{{ row.catalogCount || 0 }} 个目录</span></template></el-table-column>
         <el-table-column label="题目变化" min-width="135"><template #default="{row}"><span>新增 {{ row.newQuestionCount || 0 }}</span><span class="cell-sub">变化 {{ row.changedQuestionCount || 0 }}</span></template></el-table-column>
+        <el-table-column label="执行记录" min-width="220"><template #default="{row}"><span class="cell-main">{{ executionSummary(row) }}</span><span class="cell-sub">最近启动：{{ formatTaskTime(row.lastExecutionAt) }}</span><TaskExecutionHistory :task="row"/></template></el-table-column>
         <el-table-column label="创建时间" min-width="166" show-overflow-tooltip><template #default="scope">{{ formatTaskTime(scope.row.createTime) }}</template></el-table-column>
         <el-table-column label="操作" width="260" fixed="right" align="center">
           <template #default="scope">
             <el-button v-hasPermi="['bank:sync:question:query', 'bank:sync:question:list', 'bank:sync:center:list']" link type="primary" :icon="View" @click="openDetail(scope.row)">查看详情</el-button>
             <el-button v-if="canCancelSyncTask(scope.row.status)" v-hasPermi="['bank:sync:question:cancel', 'bank:sync:run']" link type="danger" :icon="VideoPause" :loading="actionId === scope.row.taskId" @click="stopTask(scope.row)">停止</el-button>
             <el-button v-if="canResumeSyncTask(scope.row)" v-hasPermi="['bank:sync:question:resume', 'bank:sync:run']" link type="primary" :icon="RefreshRight" :loading="actionId === scope.row.taskId" :disabled="Boolean(actionId)" @click="resumeTask(scope.row)">{{ scope.row.workflowVersion === 2 ? '补采' : '断点续采' }}</el-button>
-            <el-button v-if="canRetrySyncTask(scope.row.status)" v-hasPermi="['bank:sync:question:retry', 'bank:sync:question:add', 'bank:sync:run']" link type="warning" :icon="RefreshRight" :loading="actionId === scope.row.taskId" @click="retryTask(scope.row)">重试</el-button>
+            <el-button v-if="canRetrySyncTask(scope.row.status)" v-hasPermi="['bank:sync:question:retry', 'bank:sync:question:add', 'bank:sync:run']" link type="warning" :icon="RefreshRight" :loading="actionId === scope.row.taskId" @click="retryTask(scope.row)">再同步一次</el-button>
             <el-button v-if="canDeleteSyncTask(scope.row.status)" v-hasPermi="['bank:sync:question:remove', 'bank:sync:run']" link type="danger" :icon="Delete" :loading="actionId === scope.row.taskId" @click="deleteTask(scope.row)">删除</el-button>
           </template>
         </el-table-column>
@@ -146,6 +147,8 @@
 </template>
 
 <script setup>
+import {executionSummary} from '../../utils/task-executions'
+import TaskExecutionHistory from '../../components/TaskExecutionHistory.vue'
 import TaskConcurrency from '../../components/TaskConcurrency.vue'
 import request from '@/utils/request'
 import SyncCenterNav from '../../components/SyncCenterNav.vue'
@@ -358,7 +361,7 @@ async function resumeTask(task) {
   if (actionId.value || !canResumeSyncTask(task)) return
   try {
     await ElMessageBox.confirm(
-      task.workflowVersion === 2 ? `将为任务“${task.taskNo || task.taskId}”创建关联的补采任务，保留已有成果，核对当前页面后补齐；合格题目自动分批入库。` : `将继续同一个任务“${task.taskNo || task.taskId}”。Collector 新 run 会继承旧快照并从断点继续，不会直接应用正式库。${task.status === 'blocked' ? '请先确认风控已解除。' : ''}确定断点续采吗？`,
+      task.workflowVersion === 2 ? `将为任务“${task.taskNo || task.taskId}”新增一次关联的补采执行，保留已有成果，核对当前页面后补齐；合格题目自动分批入库。` : `将继续同一个任务“${task.taskNo || task.taskId}”。Collector 新 run 会继承旧快照并从断点继续，不会直接应用正式库。${task.status === 'blocked' ? '请先确认风控已解除。' : ''}确定断点续采吗？`,
       '断点续采',
       { type: 'warning', confirmButtonText: '确认续采', cancelButtonText: '取消' },
     )
@@ -389,11 +392,11 @@ async function stopTask(task) {
 
 async function retryTask(task) {
   try {
-    await ElMessageBox.confirm('重试会使用原任务范围创建新任务，旧任务保持不变。', '重试任务', { type: 'info', confirmButtonText: '创建新任务', cancelButtonText: '取消' })
+    await ElMessageBox.confirm('将为同一任务排队执行一次新的采集，保留之前每次的结果和日志。', '再同步一次', { type: 'info', confirmButtonText: '加入队列', cancelButtonText: '取消' })
     actionId.value = task.taskId
     const retried = unwrapSyncTask(await retryQuestionSyncTask(task.taskId), 'question')
     if (!retried?.taskId) throw new Error('服务端未返回新任务编号')
-    ElMessage.success('新任务已创建')
+    ElMessage.success('本任务已加入执行队列；已有执行记录保留')
     await router.push(`/bank/sync-question/${encodeURIComponent(retried.taskId)}`)
   } catch (error) {
     if (error !== 'cancel' && error !== 'close') ElMessage.error(syncTaskErrorMessage(error, '任务重试失败'))
@@ -403,7 +406,7 @@ async function retryTask(task) {
 async function deleteTask(task) {
   try {
     await ElMessageBox.confirm(
-      `确定删除终态任务“${task.taskNo || task.taskId}”吗？删除后仅移除服务端任务记录及范围，不会删除采集快照或正式题库数据。`,
+      `确定删除终态任务“${task.taskNo || task.taskId}”吗？将删除此任务的全部执行历史及范围，不会删除采集快照或正式题库数据。`,
       '删除任务',
       { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' },
     )
@@ -427,7 +430,7 @@ async function batchDeleteTasks() {
   }
   try {
     await ElMessageBox.confirm(
-      `确定批量删除选中的 ${targets.length} 个终态任务吗？本操作仅删除服务端任务记录及范围，不会删除 Collector 不可变快照、断点或正式题库数据；但任务删除后将无法再从页面继续该任务。`,
+      `确定批量删除选中的 ${targets.length} 个终态任务吗？本操作删除所选任务的全部执行历史及范围，不会删除 Collector 不可变快照、断点或正式题库数据；但任务删除后将无法再从页面继续该任务。`,
       '批量删除任务',
       { type: 'warning', confirmButtonText: '确认删除', cancelButtonText: '取消' },
     )
