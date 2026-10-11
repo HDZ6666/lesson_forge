@@ -468,3 +468,34 @@ async def test_multi_book_directory_query_does_not_follow_foreign_book_parent(ba
         assert counts[2]['descendantQuestionCount'] == 2
     finally:
         event.remove(bank_db.bind.sync_engine, 'before_cursor_execute', record)
+
+
+@pytest.mark.asyncio
+async def test_book_counts_deduplicate_evidence_and_keep_stale_invalid_separate(bank_db, tmp_path):
+    from plugins.bank.service.coverage_queries import book_stem_counts
+    node = await bank_db.get(QbCatalogNode, 1)
+    node.status = '0'
+    for number in (1, 2, 3):
+        row = await bank_db.get(QbQuestion, number)
+        row.status = '0'
+        row.content_html = '<script>bad</script>' if number == 2 else '<p>有效题干</p>'
+        await bank_db.commit()
+        await cache(bank_db, row, [], tmp_path)
+    stale = await bank_db.get(QbQuestion, 3)
+    stale.plain_text = '编辑后尚未核验'
+    now = datetime.now()
+    for question_id, catalog_id, evidence in ((1, 1, 'query_membership'), (1, 1, 'provider_asserted'),
+                                             (2, 1, 'query_membership'),
+                                             (3, 1, 'query_membership')):
+        bank_db.add(QbQuestionCatalog(question_id=question_id, catalog_id=catalog_id,
+                                     relation_type='query_catalog', evidence_type=evidence,
+                                     create_time=now, update_time=now))
+    await bank_db.commit()
+    counts = await book_stem_counts(bank_db, [1, 2])
+    assert counts[1] == {'usableQuestionCount': 1, 'uncheckedQuestionCount': 1, 'unusableQuestionCount': 1}
+    assert counts[2]['usableQuestionCount'] == 1
+    node.status = '1'
+    await bank_db.commit()
+    assert (await book_stem_counts(bank_db, [1]))[1] == {
+        'usableQuestionCount': 0, 'uncheckedQuestionCount': 0, 'unusableQuestionCount': 0,
+    }

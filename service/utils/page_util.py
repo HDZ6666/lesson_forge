@@ -52,7 +52,7 @@ class PageUtil:
         :return: 分页数据对象
         """
         if is_page:
-            total = (await db.execute(select(func.count('*')).select_from(query.subquery()))).scalar()
+            total = (await db.execute(select(func.count('*')).select_from(query.order_by(None).subquery()))).scalar()
             query_result = await db.execute(query.offset((page_num - 1) * page_size).limit(page_size))
             paginated_data: list[Row] = []
             for row in query_result:

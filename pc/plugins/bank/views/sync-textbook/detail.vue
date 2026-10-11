@@ -140,12 +140,13 @@
 </template>
 
 <script setup>
+import { usePollingLifecycle } from '../../composables/usePollingLifecycle'
 import SyncCenterNav from '../../components/SyncCenterNav.vue'
 import '../../styles/sync-center.scss'
 import request from '@/utils/request'
 const discoveryLabels={newVersions:'新增版本',renamedVersions:'版本改名',missingVersions:'本次未发现版本',newTextbooks:'新增教材',renamedTextbooks:'教材改名',missingTextbooks:'本次未发现教材',conflicts:'归属冲突'}
 
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 const failureVisible = ref(false)
 const failureLoading = ref(false)
 const failurePage = ref(null)
@@ -356,15 +357,7 @@ watch(taskId, () => {
   loadTask()
 })
 
-onMounted(() => {
-  mounted = true
-  loadTask()
-})
-
-onBeforeUnmount(() => {
-  mounted = false
-  clearPoll()
-})
+usePollingLifecycle(() => { mounted = true; loadTask() }, () => { mounted = false; clearPoll() })
 </script>
 
 <style scoped>

@@ -153,32 +153,35 @@ class BankDao:
         catalog_on = (QbCatalogNode.textbook_id == QbTextbook.textbook_id) & (
             QbCatalogNode.subject_id == QbTextbook.subject_id
         )
-        question_catalog_on = (QbQuestionCatalog.catalog_id == QbCatalogNode.catalog_id) & (
-            QbQuestionCatalog.relation_type == 'query_catalog'
-        )
-        question_on = (QbQuestion.question_id == QbQuestionCatalog.question_id) & (
-            QbQuestion.subject_id == QbTextbook.subject_id
-        )
         if not include_disabled:
             catalog_on = catalog_on & (QbCatalogNode.status == '0')
-            question_on = question_on & (QbQuestion.status == '0')
-        result = await db.execute(
-            select(
-                QbTextbook.textbook_id,
-                func.count(func.distinct(QbCatalogNode.catalog_id)),
-                func.count(func.distinct(QbQuestion.question_id)),
-            )
-            .select_from(QbTextbook)
-            .outerjoin(QbCatalogNode, catalog_on)
-            .outerjoin(QbQuestionCatalog, question_catalog_on)
-            .outerjoin(QbQuestion, question_on)
-            .where(QbTextbook.textbook_id.in_(textbook_ids))
-            .group_by(QbTextbook.textbook_id)
+        catalogs = select(
+            QbTextbook.textbook_id.label('book'), QbTextbook.subject_id.label('subject'),
+            QbCatalogNode.catalog_id.label('catalog'),
+        ).select_from(QbTextbook).join(QbCatalogNode, catalog_on).where(
+            QbTextbook.textbook_id.in_(textbook_ids),
+        ).distinct().subquery()
+        catalog_counts = dict((await db.execute(select(
+            catalogs.c.book, func.count(),
+        ).group_by(catalogs.c.book))).all())
+        # Deduplicate membership before touching the much wider question table.
+        memberships = select(
+            catalogs.c.book, catalogs.c.subject, QbQuestionCatalog.question_id.label('question'),
+        ).select_from(catalogs).join(QbQuestionCatalog, (
+            QbQuestionCatalog.catalog_id == catalogs.c.catalog
+        ) & (QbQuestionCatalog.relation_type == 'query_catalog')).distinct().subquery()
+        query = select(memberships.c.book, func.count()).select_from(memberships).join(
+            QbQuestion, (QbQuestion.question_id == memberships.c.question)
+            & (QbQuestion.subject_id == memberships.c.subject),
         )
-        return {
-            int(textbook_id): (int(catalog_count), int(question_count))
-            for textbook_id, catalog_count, question_count in result.all()
-        }
+        if not include_disabled:
+            query = query.where(QbQuestion.status == '0')
+        query = query.group_by(memberships.c.book).with_hint(
+            QbQuestion, 'FORCE INDEX (idx_qb_question_coverage)', dialect_name='mysql',
+        )
+        question_counts = dict((await db.execute(query)).all())
+        return {int(book): (int(catalog_counts.get(book, 0)), int(question_counts.get(book, 0)))
+                for book in textbook_ids}
 
     @classmethod
     async def get_catalog_nodes(
@@ -478,7 +481,11 @@ class BankDao:
         query = cls._apply_status_filter(select(QbQuestion), QbQuestion.status, query_object)
         if query_object.usable_only:
             from plugins.bank.service.coverage_queries import usable_scope_predicate
-            query = query.where(usable_scope_predicate())
+            if query_object.textbook_id or query_object.catalog_id:
+                from plugins.bank.service.question_readiness import usable_predicate
+                query = query.where(usable_predicate())
+            else:
+                query = query.where(usable_scope_predicate())
         if getattr(query_object, 'subject_id', None):
             query = query.where(QbQuestion.subject_id == query_object.subject_id)
         if query_object.source_provider:
@@ -548,7 +555,7 @@ class BankDao:
                     scope_query = scope_query.where(QbTextbook.textbook_id == requested.textbook_id,
                                                    requested.status == '0')
             query = query.where(exists(scope_query))
-        if query_object.textbook_id:
+        if query_object.textbook_id and not query_object.usable_only:
             query = query.where(
                 exists(
                     select(1)

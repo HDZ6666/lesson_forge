@@ -145,9 +145,10 @@
 </template>
 
 <script setup>
+import { usePollingLifecycle } from '../../composables/usePollingLifecycle'
 import SyncCenterNav from '../../components/SyncCenterNav.vue'
 import '../../styles/sync-center.scss'
-import { onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { reactive, ref } from 'vue'
 import { Delete, Plus, Refresh, RefreshLeft, RefreshRight, Search, VideoPause, View } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useRouter } from 'vue-router'
@@ -390,15 +391,7 @@ async function batchDeleteTasks() {
   }
 }
 
-onMounted(() => {
-  mounted = true
-  loadTasks()
-})
-
-onBeforeUnmount(() => {
-  mounted = false
-  clearRefreshTimer()
-})
+usePollingLifecycle(() => { mounted = true; loadTasks() }, () => { mounted = false; clearRefreshTimer() })
 </script>
 
 <style scoped>

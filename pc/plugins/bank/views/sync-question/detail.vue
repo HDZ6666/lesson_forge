@@ -244,12 +244,13 @@
 </template>
 
 <script setup>
+import { usePollingLifecycle } from '../../composables/usePollingLifecycle'
 import request from '@/utils/request'
 import TaskExecutionHistory from '../../components/TaskExecutionHistory.vue'
 import TaskConcurrency from '../../components/TaskConcurrency.vue'
 import SyncCenterNav from '../../components/SyncCenterNav.vue'
 import '../../styles/sync-center.scss'
-import { computed, defineComponent, h, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, defineComponent, h, nextTick, reactive, ref, watch } from 'vue'
 import { ArrowLeft, Refresh, RefreshLeft, RefreshRight, Search, Upload, VideoPause, View } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useRoute, useRouter } from 'vue-router'
@@ -960,8 +961,7 @@ watch(taskId, () => {
   clearPoll(); loadedScopeKey = ''; task.value = null; resetComparisonState(); loadTask()
 })
 
-onMounted(() => { mounted = true; loadTask() })
-onBeforeUnmount(() => { mounted = false; taskLoadRevision++; clearPoll() })
+usePollingLifecycle(() => { mounted = true; loadTask() }, () => { mounted = false; taskLoadRevision++; clearPoll() })
 </script>
 
 <style scoped>

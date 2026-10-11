@@ -147,6 +147,7 @@
 </template>
 
 <script setup>
+import { usePollingLifecycle } from '../../composables/usePollingLifecycle'
 import {executionSummary} from '../../utils/task-executions'
 import TaskExecutionHistory from '../../components/TaskExecutionHistory.vue'
 import TaskConcurrency from '../../components/TaskConcurrency.vue'
@@ -155,7 +156,7 @@ import SyncCenterNav from '../../components/SyncCenterNav.vue'
 import '../../styles/sync-center.scss'
 import SyncIssues from "../../components/SyncIssues.vue"
 import SubjectSelect from "../../components/SubjectSelect.vue"
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, reactive, ref, watch } from 'vue'
 import { Delete, Plus, Refresh, RefreshLeft, RefreshRight, Search, VideoPause, View } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useRoute, useRouter } from 'vue-router'
@@ -462,8 +463,7 @@ async function batchDeleteTasks() {
   }
 }
 
-onMounted(() => { mounted = true; loadTasks() })
-onBeforeUnmount(() => { mounted = false; clearRefreshTimer() })
+usePollingLifecycle(() => { mounted = true; loadTasks() }, () => { mounted = false; clearRefreshTimer() })
 </script>
 
 <style scoped>

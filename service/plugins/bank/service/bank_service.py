@@ -184,6 +184,7 @@ class BankService:
         coverage = await book_coverage(
             db, [row['textbookId'] for row in page.rows],
             formal_counts={row['textbookId']: row['questionCount'] for row in page.rows} if query.include_disabled else None,
+            active_counts={row['textbookId']: row['questionCount'] for row in page.rows} if not query.include_disabled else None,
         )
         for row in page.rows:
             row.update(coverage.get(row['textbookId'], {}))

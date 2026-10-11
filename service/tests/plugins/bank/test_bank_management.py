@@ -261,7 +261,9 @@ async def test_include_disabled_is_explicit_and_textbook_stats_count_active_ques
     db.execute = AsyncMock(return_value=result)
     await BankDao.textbook_stats(db, [3])
     sql = str(db.execute.await_args.args[0].compile(dialect=mysql.dialect())).upper()
-    assert 'COUNT(DISTINCT(QB_QUESTION.QUESTION_ID))' in sql
+    assert 'SELECT DISTINCT' in sql and 'QB_QUESTION_CATALOG.QUESTION_ID AS QUESTION' in sql
+    assert 'QB_QUESTION.SUBJECT_ID = ANON_1.SUBJECT' in sql
+    assert 'QB_QUESTION.STATUS =' in sql
     assert 'COUNT(DISTINCT(QB_QUESTION_CATALOG.QUESTION_ID))' not in sql
 
 

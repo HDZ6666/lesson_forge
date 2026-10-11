@@ -53,7 +53,8 @@
   </div>
 </template>
 <script setup>
-import {computed,onBeforeUnmount,onMounted,ref} from 'vue'
+import {computed,ref} from 'vue'
+import {usePollingLifecycle} from '../../composables/usePollingLifecycle'
 import {useRoute,useRouter} from 'vue-router'
 import {ElMessage,ElMessageBox} from 'element-plus'
 import draggable from 'vuedraggable'
@@ -76,10 +77,10 @@ const filteredBooks=computed(()=>books.value.filter(b=>(!bookSearch.value||`${b.
 const data=r=>r.data||r
 const loadedSubjectId=ref(null)
 const showCreate=computed(()=>loadedSubjectId.value===subjectId.value&&!loading.value&&!error.value&&!plan.value.planId)
-let epoch=0,timer,polling=false
+let epoch=0,timer,polling=false,pageActive=false
 async function load(silent=false) {
   silent=silent===true
-  if(silent&&(polling||saving.value||loading.value))return
+  if(silent&&(!pageActive||polling||saving.value||loading.value))return
   if(silent)polling=true
   const id=++epoch, requestedSubject=subjectId.value
   if(!silent)loading.value=true
@@ -91,6 +92,8 @@ async function load(silent=false) {
       request({url:'/bank/sync/control'}),
     ])
     const current=data(p)[0]||{}
+    if(id!==epoch)return
+    plan.value=current;control.value=data(c);loadedSubjectId.value=requestedSubject
     const b=current.planId?data(await request({url:`/bank/sync/plans/${current.planId}/books`})) : []
     if(id!==epoch)return
     plan.value=current;books.value=b;control.value=data(c);loadedSubjectId.value=requestedSubject
@@ -118,8 +121,7 @@ async function saveBook(){saving.value=true;try{const b=bookForm.value;await req
 async function showHistory(more=false){more=more===true;historyVisible.value=true;try{const result=data(await request({url:`/bank/sync/plans/${plan.value.planId}/history`,params:{before:more?historyCursor.value:undefined}}));historyRows.value=more?[...historyRows.value,...result.rows]:result.rows;historyCursor.value=result.nextCursor}catch(e){error.value=e.message}}
 function openCycle(no){router.push({path:'/sync-center/tasks',query:{planId:plan.value.planId,cycleNo:no,subjectId:subjectId.value}})}
 function formatTime(v){return v?new Date(v).toLocaleString():'—'}
-onMounted(()=>{load();timer=setInterval(()=>load(true),5000)})
-onBeforeUnmount(()=>{++epoch;clearInterval(timer)})
+usePollingLifecycle(()=>{pageActive=true;load();timer=setInterval(()=>load(true),5000)},()=>{pageActive=false;++epoch;clearInterval(timer)})
 </script>
 <style scoped>
 .plan-actions{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:22px}.plan-actions .el-button{margin-left:0}.field-hint{font-size:13px;color:var(--el-text-color-secondary);line-height:1.7}.book-filters{display:flex;gap:12px;margin-bottom:18px}.book-filters .el-input{width:240px}.book-filters .el-select{width:180px}.cell-main{font-weight:500}.cell-sub{display:block;font-size:12px;color:var(--el-text-color-secondary);margin-top:5px}.order-list{max-height:55vh;overflow:auto;margin-top:16px}.order-row{display:flex;gap:12px;align-items:center;padding:12px 4px;border-bottom:1px solid var(--el-border-color-lighter)}.order-row>div{flex:1;min-width:0}.order-row small{display:block;color:var(--el-text-color-secondary);margin-top:4px}.drag-handle{cursor:grab;font-size:22px;color:var(--el-text-color-secondary)}@media(max-width:600px){.book-filters{flex-direction:column}.book-filters .el-input,.book-filters .el-select{width:100%}.order-row{gap:6px}.order-row .el-button{padding:6px;font-size:12px}}

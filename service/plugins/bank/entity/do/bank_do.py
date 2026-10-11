@@ -127,6 +127,8 @@ class QbQuestion(Base):
         Index('idx_qb_question_grade_term', 'grade', 'term'),
         Index('idx_qb_question_type_difficulty', 'question_type', 'difficulty'),
         Index('idx_qb_question_status', 'status'),
+        Index('idx_qb_question_coverage', 'question_id', 'subject_id', 'status', 'readiness_revision',
+              'source_provider', 'external_question_id', 'content_hash'),
         {'comment': '题库题目当前数据'},
     )
 
@@ -187,6 +189,7 @@ class QbQuestionCatalog(Base):
             unique=True,
         ),
         Index('idx_qb_question_catalog_catalog', 'catalog_id', 'question_id'),
+        Index('idx_qb_question_catalog_lookup', 'catalog_id', 'relation_type', 'question_id'),
         CheckConstraint(
             "relation_type IN ('query_catalog', 'knowledge')", name='chk_qb_question_catalog_relation_type'
         ),
@@ -251,6 +254,7 @@ class QbQuestionAsset(Base):
         Index('uk_qb_question_asset', 'question_id', 'asset_key', unique=True),
         Index('idx_qb_question_asset_file_hash', 'file_hash'),
         Index('idx_qb_question_asset_status', 'download_status'),
+        Index('idx_qb_question_asset_download_hash', 'download_status', 'file_hash'),
         {'comment': '题目素材当前数据'},
     )
 

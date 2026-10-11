@@ -15,7 +15,7 @@ from plugins.bank.entity.do.bank_do import (
 from plugins.bank.service.question_readiness import current_facts_predicate, usable_predicate
 
 
-def enabled_scope():
+def enabled_scope(*, include_question=True):
     return and_(
         QbCatalogNode.status == '0',
         QbTextbook.status == '0',
@@ -23,7 +23,7 @@ def enabled_scope():
         QbSubject.status == '0',
         QbCatalogNode.subject_id == QbTextbook.subject_id,
         QbTextbookVersion.subject_id == QbTextbook.subject_id,
-        QbQuestion.subject_id == QbTextbook.subject_id,
+        QbQuestion.subject_id == QbTextbook.subject_id if include_question else True,
         QbTextbookVersion.source_provider == QbTextbook.source_provider,
     )
 
@@ -56,27 +56,47 @@ def _scope_joins(query):
 
 
 async def book_stem_counts(db, textbook_ids):
-    active = and_(enabled_scope(), QbQuestion.status == '0')
-    checked = exists(select(1).where(current_facts_predicate()))
-    invalid = exists(select(1).where(current_facts_predicate(), QbQuestionReadiness.status == 'invalid'))
+    if not textbook_ids:
+        return {}
+    # Collapse repeated directory/evidence memberships before reading question
+    # and readiness rows. A question counts once per book, even if it appears
+    # in several enabled and disabled directories.
+    scopes = _scope_joins(select(
+        QbCatalogNode.catalog_id.label('catalog'),
+        QbTextbook.textbook_id.label('book'),
+        QbTextbook.subject_id.label('subject'),
+        case((enabled_scope(include_question=False), 1), else_=0).label('active'),
+    ).select_from(QbCatalogNode)).where(QbTextbook.textbook_id.in_(textbook_ids)).distinct().subquery()
+    memberships = select(
+        scopes.c.book, scopes.c.subject, QbQuestionCatalog.question_id.label('question'),
+        func.max(scopes.c.active).label('active'),
+    ).select_from(scopes).join(QbQuestionCatalog, and_(
+        QbQuestionCatalog.catalog_id == scopes.c.catalog,
+        QbQuestionCatalog.relation_type == 'query_catalog',
+    )).group_by(scopes.c.book, scopes.c.subject, QbQuestionCatalog.question_id).subquery()
+    active = and_(
+        memberships.c.active == 1,
+        QbQuestion.status == '0',
+        QbQuestion.subject_id == memberships.c.subject,
+    )
+    ready = and_(
+        QbQuestionReadiness.status == 'ready',
+        QbQuestionReadiness.stem_valid == 1,
+        QbQuestionReadiness.assets_ready == 1,
+    )
     query = (
         select(
-            QbTextbook.textbook_id,
-            func.count(func.distinct(case((and_(active, usable_predicate()), QbQuestion.question_id)))),
-            func.count(func.distinct(case((and_(active, ~checked), QbQuestion.question_id)))),
-            func.count(func.distinct(case((and_(active, invalid), QbQuestion.question_id)))),
+            memberships.c.book,
+            func.sum(case((and_(active, ready), 1), else_=0)),
+            func.sum(case((and_(active, QbQuestionReadiness.question_id.is_(None)), 1), else_=0)),
+            func.sum(case((and_(active, QbQuestionReadiness.status == 'invalid'), 1), else_=0)),
         )
-        .select_from(QbCatalogNode)
-        .join(
-            QbQuestionCatalog,
-            and_(
-                QbQuestionCatalog.catalog_id == QbCatalogNode.catalog_id,
-                QbQuestionCatalog.relation_type == 'query_catalog',
-            ),
-        )
-        .join(QbQuestion, QbQuestion.question_id == QbQuestionCatalog.question_id)
+        .select_from(memberships)
+        .join(QbQuestion, QbQuestion.question_id == memberships.c.question)
+        .outerjoin(QbQuestionReadiness, current_facts_predicate())
+        .group_by(memberships.c.book)
+        .with_hint(QbQuestion, 'FORCE INDEX (idx_qb_question_coverage)', dialect_name='mysql')
     )
-    query = _scope_joins(query).where(QbTextbook.textbook_id.in_(textbook_ids)).group_by(QbTextbook.textbook_id)
     return {
         int(book): {
             'usableQuestionCount': int(ready),

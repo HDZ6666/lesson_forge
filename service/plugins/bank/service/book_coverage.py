@@ -19,7 +19,7 @@ from plugins.bank.service.import_dates import utc_datetime
 from plugins.bank.service.run_coverage import FORMAT
 
 
-async def book_coverage(db: Any, textbook_ids: list[int], *, formal_counts: dict[int, int] | None = None):
+async def book_coverage(db: Any, textbook_ids: list[int], *, formal_counts: dict[int, int] | None = None, active_counts: dict[int, int] | None = None):
     if not textbook_ids:
         return {}
     if len(textbook_ids) > 500 or any(type(value) is not int or value <= 0 for value in textbook_ids):
@@ -27,7 +27,8 @@ async def book_coverage(db: Any, textbook_ids: list[int], *, formal_counts: dict
     from plugins.bank.service.coverage_queries import book_stem_counts
 
     stems = await book_stem_counts(db, textbook_ids)
-    active = await BankDao.textbook_stats(db, textbook_ids, include_disabled=False)
+    if active_counts is None:
+        active_counts = {key: value[1] for key, value in (await BankDao.textbook_stats(db, textbook_ids, include_disabled=False)).items()}
     if formal_counts is None:
         formal = await BankDao.textbook_stats(db, textbook_ids, include_disabled=True)
         formal_counts = {key: value[1] for key, value in formal.items()}
@@ -141,7 +142,7 @@ async def book_coverage(db: Any, textbook_ids: list[int], *, formal_counts: dict
     return {
         value: {
             'formalQuestionCount': formal_counts.get(value, 0),
-            'activeQuestionCount': active.get(value, (0, 0))[1],
+            'activeQuestionCount': active_counts.get(value, 0),
             'latestSourceObservation': observations.get(value),
             'unresolvedIssueCount': pending.get(value, 0),
             **task_info.get(value, {}),
