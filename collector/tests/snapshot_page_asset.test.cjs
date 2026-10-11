@@ -186,8 +186,9 @@ test('snapshot-page rejects an unfinished run before returning any collection ro
   }
 });
 
-test('sealed import pages expose partial results without weakening the default API', async () => {
-  const fixture = seedRun({ status: 'failed', errors: 1 });
+for (const status of ['failed', 'cancelled']) {
+test(`sealed import pages expose ${status} results without weakening the default API`, async () => {
+  const fixture = seedRun({ status, errors: 1 });
   const server = createCollectorServer({ dbPath: fixture.dbPath, dataDir: fixture.dataDir, token: 'snapshot-page-token' });
   const baseUrl = await listen(server);
   try {
@@ -198,7 +199,7 @@ test('sealed import pages expose partial results without weakening the default A
     assert.equal(response.status, 200);
     const page = await response.json();
     assert.equal(page.snapshotComplete, false);
-    assert.equal(page.run.status, 'failed');
+    assert.equal(page.run.status, status);
     assert.equal(page.items.length, 2);
     const summaryResponse = await fetch(`${baseUrl}/v1/runs/${fixture.runId}/snapshot-summary?textbookExternalId=tb1&sealedForImport=true`, options);
     assert.equal(summaryResponse.status, 200);
@@ -206,6 +207,8 @@ test('sealed import pages expose partial results without weakening the default A
     assert.equal((await fetch(`${baseUrl}/v1/runs/${fixture.runId}/snapshot-page${suffix}&sealedForImport=1`, options)).status, 400);
   } finally { await close(server); fs.rmSync(fixture.directory, { recursive: true, force: true }); }
 });
+
+}
 
 test('sealed import mode still rejects running or unlocked results', () => {
   const fixture = seedRun({ status: 'failed', errors: 1 });

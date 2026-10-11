@@ -83,8 +83,10 @@ def fixture_client(monkeypatch):
     return client, summary, rows, calls
 
 
-def test_partial_qc_is_resumable_and_never_claims_complete(monkeypatch, tmp_path: Path):
+@pytest.mark.parametrize('status', ['failed', 'cancelled'])
+def test_partial_qc_is_resumable_and_never_claims_complete(monkeypatch, tmp_path: Path, status):
     client, summary, _rows, calls = fixture_client(monkeypatch)
+    summary['run']['status'] = status
     path = tmp_path / 'sealed.sqlite3'
     with pytest.raises(ServiceException, match='未完成'):
         spool_snapshot(client, 27, 'tb1', path)
@@ -111,7 +113,7 @@ def test_partial_qc_is_resumable_and_never_claims_complete(monkeypatch, tmp_path
         assert batches[0]['verdicts'][0]['normalized']['snapshot_complete'] is False
         assert batches[1]['verdicts'][0]['questionId'] == 'q2'
         assert '题干' in batches[1]['verdicts'][0]['reason']
-    assert summary['run']['status'] == 'failed'
+    assert summary['run']['status'] == status
     assert summary['snapshotComplete'] is False
 
 

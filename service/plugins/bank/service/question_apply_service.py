@@ -936,6 +936,7 @@ def _normalise_snapshot_summary(  # noqa: PLR0912, PLR0915
     accepted_statuses = (
         {'success', 'completed'}
         | ({'interrupted', 'failed', 'blocked'} if allow_incomplete or sealed_for_import else set())
+        | ({'cancelled'} if sealed_for_import else set())
     )
     if status not in accepted_statuses:
         raise ServiceException(message=f'collector 运行 {run_id or ""} 未成功完成')

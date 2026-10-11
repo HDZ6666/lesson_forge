@@ -443,7 +443,7 @@ function assertApplyableSnapshotRun(db, run, { sealedForImport = false } = {}) {
       'snapshot_unavailable',
     );
   }
-  const statuses = sealedForImport ? ['success', 'completed', 'interrupted', 'failed', 'blocked'] : ['success', 'completed'];
+  const statuses = sealedForImport ? ['success', 'completed', 'interrupted', 'failed', 'blocked', 'cancelled'] : ['success', 'completed'];
   if (!statuses.includes(String(run.status || '').toLowerCase()) || !run.finishedAt) {
     throw httpError(`内容运行 ${run.id} 未成功完成，暂无可用快照`, 409, 'snapshot_unavailable');
   }
