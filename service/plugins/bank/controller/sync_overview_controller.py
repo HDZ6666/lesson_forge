@@ -39,7 +39,7 @@ async def overview(
     ids = list((await db.scalars(books)).all())
     stem_counts = {}
     for offset in range(0, len(ids), 500):
-        stem_counts.update(await book_stem_counts(db, ids[offset : offset + 500]))
+        stem_counts.update(await book_stem_counts(db, ids[offset : offset + 500], display=True))
     total = len(ids)
     populated = sum(value['usableQuestionCount'] > 0 for value in stem_counts.values())
     issue_query = select(QbSyncIssue.status, func.count()).group_by(QbSyncIssue.status)

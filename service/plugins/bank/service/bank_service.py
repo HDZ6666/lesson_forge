@@ -180,14 +180,16 @@ class BankService:
     async def list_textbooks(cls, db: AsyncSession, query: TextbookQueryModel) -> PageModel:
         from plugins.bank.service.book_coverage import book_coverage
 
-        page = _rows_page(await BankDao.list_textbooks(db, query), TextbookModel)
+        page = _rows_page(await BankDao.list_textbooks(db, query, with_counts=False), TextbookModel)
         coverage = await book_coverage(
             db, [row['textbookId'] for row in page.rows],
-            formal_counts={row['textbookId']: row['questionCount'] for row in page.rows} if query.include_disabled else None,
-            active_counts={row['textbookId']: row['questionCount'] for row in page.rows} if not query.include_disabled else None,
+            display=True,
         )
         for row in page.rows:
-            row.update(coverage.get(row['textbookId'], {}))
+            counts = coverage.get(row['textbookId'], {})
+            row.update(counts)
+            row['questionCount'] = counts.get('formalQuestionCount' if query.include_disabled else 'activeQuestionCount', 0)
+            row['catalogCount'] = counts.get('catalogCount' if query.include_disabled else 'activeCatalogCount', 0)
         return page
 
     @classmethod

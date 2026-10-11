@@ -5,7 +5,6 @@ from typing import Any
 from sqlalchemy import func, select
 
 from exceptions.exception import ServiceException
-from plugins.bank.dao.bank_dao import BankDao
 from plugins.bank.entity.do.bank_do import (
     QbQuestionImport,
     QbSyncBookState,
@@ -19,19 +18,18 @@ from plugins.bank.service.import_dates import utc_datetime
 from plugins.bank.service.run_coverage import FORMAT
 
 
-async def book_coverage(db: Any, textbook_ids: list[int], *, formal_counts: dict[int, int] | None = None, active_counts: dict[int, int] | None = None):
+async def book_coverage(db: Any, textbook_ids: list[int], *, formal_counts: dict[int, int] | None = None, active_counts: dict[int, int] | None = None, display=False):
     if not textbook_ids:
         return {}
     if len(textbook_ids) > 500 or any(type(value) is not int or value <= 0 for value in textbook_ids):
         raise ServiceException(message='教材覆盖查询范围无效')
-    from plugins.bank.service.coverage_queries import book_stem_counts
+    from plugins.bank.service.coverage_queries import book_metrics
 
-    stems = await book_stem_counts(db, textbook_ids)
+    stems = await book_metrics(db, textbook_ids, display=display)
     if active_counts is None:
-        active_counts = {key: value[1] for key, value in (await BankDao.textbook_stats(db, textbook_ids, include_disabled=False)).items()}
+        active_counts = {key: row['activeQuestionCount'] for key, row in stems.items()}
     if formal_counts is None:
-        formal = await BankDao.textbook_stats(db, textbook_ids, include_disabled=True)
-        formal_counts = {key: value[1] for key, value in formal.items()}
+        formal_counts = {key: row['formalQuestionCount'] for key, row in stems.items()}
     latest = (
         select(
             QbSyncJobScope.local_textbook_id.label('book'),
@@ -147,7 +145,10 @@ async def book_coverage(db: Any, textbook_ids: list[int], *, formal_counts: dict
             'unresolvedIssueCount': pending.get(value, 0),
             **task_info.get(value, {}),
             **schedule_info.get(value, {}),
-            **stems.get(value, {'usableQuestionCount': 0, 'uncheckedQuestionCount': 0, 'unusableQuestionCount': 0}),
+            **{key: stems.get(value, {}).get(key, 0) for key in (
+                'usableQuestionCount', 'uncheckedQuestionCount', 'unusableQuestionCount',
+                'catalogCount', 'activeCatalogCount',
+            )},
         }
         for value in textbook_ids
     }

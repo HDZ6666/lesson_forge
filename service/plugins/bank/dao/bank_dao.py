@@ -98,7 +98,7 @@ class BankDao:
 
     @classmethod
     async def list_textbooks(
-        cls, db: AsyncSession, query_object: TextbookQueryModel
+        cls, db: AsyncSession, query_object: TextbookQueryModel, *, with_counts=True
     ) -> PageModel | list[dict[str, Any]]:
         query = cls._apply_status_filter(select(QbTextbook), QbTextbook.status, query_object)
         if getattr(query_object, 'subject_id', None):
@@ -116,7 +116,7 @@ class BankDao:
         query = query.order_by(QbTextbook.sort_order, QbTextbook.textbook_id)
         page = await PageUtil.paginate(db, query, query_object.page_num, query_object.page_size, True)
         rows = getattr(page, 'rows', [])
-        if rows:
+        if rows and with_counts:
             textbook_ids = [row.get('textbookId') if isinstance(row, dict) else row.textbook_id for row in rows]
             counts = await cls.textbook_stats(db, textbook_ids, cls._include_disabled(query_object))
             for row in rows:

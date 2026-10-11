@@ -55,21 +55,61 @@ def _scope_joins(query):
     )
 
 
-async def book_stem_counts(db, textbook_ids):
+async def book_stem_counts(db, textbook_ids, *, display=False):
+    counts = await book_metrics(db, textbook_ids, display=display)
+    return {book: {key: row[key] for key in (
+        'usableQuestionCount', 'uncheckedQuestionCount', 'unusableQuestionCount',
+    )} for book, row in counts.items() if row['hasMembership']}
+
+
+async def book_metrics(db, textbook_ids, *, display=False):
+    if not textbook_ids:
+        return {}
+    if not display or db.bind.dialect.name != 'mysql':
+        return await _book_metrics(db, textbook_ids)
+    # Display-only, 15-second projection. Scheduling and writes always read
+    # fresh counts. Own the session so a disconnected HTTP request cannot
+    # close a shared in-flight calculation's database connection.
+    import hashlib
+
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from plugins.bank.service.live_progress_cache import get_or_load
+
+    identity = str(db.bind.url) + ':' + ','.join(map(str, sorted(set(textbook_ids))))
+    key = 'bank:book-metrics:v1:' + hashlib.sha256(identity.encode()).hexdigest()
+
+    async def load():
+        async with AsyncSession(bind=db.bind) as snapshot:
+            return await _book_metrics(snapshot, textbook_ids)
+
+    values = await get_or_load(key, load, ttl=15)
+    return {int(book): row for book, row in values.items()}
+
+
+async def _book_metrics(db, textbook_ids):
     if not textbook_ids:
         return {}
     # Collapse repeated directory/evidence memberships before reading question
     # and readiness rows. A question counts once per book, even if it appears
     # in several enabled and disabled directories.
-    scopes = _scope_joins(select(
+    scopes = select(
         QbCatalogNode.catalog_id.label('catalog'),
         QbTextbook.textbook_id.label('book'),
         QbTextbook.subject_id.label('subject'),
         case((enabled_scope(include_question=False), 1), else_=0).label('active'),
-    ).select_from(QbCatalogNode)).where(QbTextbook.textbook_id.in_(textbook_ids)).distinct().subquery()
+        case((QbCatalogNode.subject_id == QbTextbook.subject_id, 1), else_=0).label('owned'),
+        case((and_(QbCatalogNode.subject_id == QbTextbook.subject_id, QbCatalogNode.status == '0'), 1), else_=0).label('catalog_enabled'),
+    ).select_from(QbCatalogNode).join(QbTextbook, QbTextbook.textbook_id == QbCatalogNode.textbook_id).outerjoin(
+        QbTextbookVersion, QbTextbookVersion.version_id == QbTextbook.version_id,
+    ).outerjoin(QbSubject, QbSubject.subject_id == QbTextbook.subject_id).where(
+        QbTextbook.textbook_id.in_(textbook_ids),
+    ).distinct().subquery()
     memberships = select(
         scopes.c.book, scopes.c.subject, QbQuestionCatalog.question_id.label('question'),
         func.max(scopes.c.active).label('active'),
+        func.max(scopes.c.owned).label('owned'),
+        func.max(scopes.c.catalog_enabled).label('catalog_enabled'),
     ).select_from(scopes).join(QbQuestionCatalog, and_(
         QbQuestionCatalog.catalog_id == scopes.c.catalog,
         QbQuestionCatalog.relation_type == 'query_catalog',
@@ -79,6 +119,8 @@ async def book_stem_counts(db, textbook_ids):
         QbQuestion.status == '0',
         QbQuestion.subject_id == memberships.c.subject,
     )
+    formal = and_(memberships.c.owned == 1, QbQuestion.subject_id == memberships.c.subject)
+    enabled = and_(formal, memberships.c.catalog_enabled == 1, QbQuestion.status == '0')
     ready = and_(
         QbQuestionReadiness.status == 'ready',
         QbQuestionReadiness.stem_valid == 1,
@@ -90,6 +132,8 @@ async def book_stem_counts(db, textbook_ids):
             func.sum(case((and_(active, ready), 1), else_=0)),
             func.sum(case((and_(active, QbQuestionReadiness.question_id.is_(None)), 1), else_=0)),
             func.sum(case((and_(active, QbQuestionReadiness.status == 'invalid'), 1), else_=0)),
+            func.sum(case((formal, 1), else_=0)),
+            func.sum(case((enabled, 1), else_=0)),
         )
         .select_from(memberships)
         .join(QbQuestion, QbQuestion.question_id == memberships.c.question)
@@ -97,14 +141,23 @@ async def book_stem_counts(db, textbook_ids):
         .group_by(memberships.c.book)
         .with_hint(QbQuestion, 'FORCE INDEX (idx_qb_question_coverage)', dialect_name='mysql')
     )
-    return {
+    counts = {
         int(book): {
-            'usableQuestionCount': int(ready),
-            'uncheckedQuestionCount': int(unknown),
-            'unusableQuestionCount': int(bad),
+            'usableQuestionCount': int(ready), 'uncheckedQuestionCount': int(unknown),
+            'unusableQuestionCount': int(bad), 'formalQuestionCount': int(formal),
+            'activeQuestionCount': int(enabled), 'hasMembership': True,
         }
-        for book, ready, unknown, bad in (await db.execute(query)).all()
+        for book, ready, unknown, bad, formal, enabled in (await db.execute(query)).all()
     }
+    catalogs = (await db.execute(select(
+        scopes.c.book, func.sum(scopes.c.owned), func.sum(scopes.c.catalog_enabled),
+    ).group_by(scopes.c.book))).all()
+    for book, total, enabled in catalogs:
+        counts.setdefault(int(book), dict.fromkeys((
+            'usableQuestionCount', 'uncheckedQuestionCount', 'unusableQuestionCount',
+            'formalQuestionCount', 'activeQuestionCount', 'hasMembership',
+        ), 0)).update(catalogCount=int(total), activeCatalogCount=int(enabled))
+    return counts
 
 
 async def catalog_coverage(db, textbook_ids, *, include_disabled=False):

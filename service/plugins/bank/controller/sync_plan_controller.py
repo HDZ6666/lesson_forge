@@ -126,7 +126,7 @@ async def plan_history(plan_id:int,db:DB,before:Annotated[int|None,Query(gt=0)]=
 
 @sync_plan_controller.get('/plans/{plan_id}/books', dependencies=[READ])
 async def plan_books(plan_id: int, db: DB) -> Response:
-    return ResponseUtil.success(data=await sync_plans.list_books(db, plan_id))
+    return ResponseUtil.success(data=await sync_plans.list_books(db, plan_id, display=True))
 
 
 @sync_plan_controller.put(

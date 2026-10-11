@@ -185,7 +185,7 @@ async def test_formal_and_enabled_counts_deduplicate_and_exclude_foreign_subject
     event.listen(db.bind.sync_engine, 'before_cursor_execute', record)
     try:
         result = await book_coverage(db, [1, 2])
-        assert len(statements) == 9  # Separate cheap directory counts; all queries remain batched across books.
+        assert len(statements) == 6  # One shared question aggregation and cheap directory counts, no per-book queries.
     finally:
         event.remove(db.bind.sync_engine, 'before_cursor_execute', record)
     assert result[1]['formalQuestionCount'] == 3 and result[1]['activeQuestionCount'] == 1

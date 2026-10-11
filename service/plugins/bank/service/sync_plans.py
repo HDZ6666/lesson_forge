@@ -172,7 +172,7 @@ async def save_plan(db, payload):
     return plan_dump(row)
 
 
-async def list_books(db, plan_id):
+async def list_books(db, plan_id, *, display=False):
     plan = await db.get(QbSyncPlan, plan_id)
     if plan is None:
         raise ServiceException(message='计划不存在')
@@ -190,7 +190,7 @@ async def list_books(db, plan_id):
     }
     counts = {}
     for offset in range(0, len(books), 500):
-        counts.update(await book_stem_counts(db, [book.textbook_id for book, _, _ in books[offset : offset + 500]]))
+        counts.update(await book_stem_counts(db, [book.textbook_id for book, _, _ in books[offset : offset + 500]], display=display))
     targets = set(plan.cycle_targets or [])
     task_progress = await _book_task_progress(db, states.values(), plan.cycle_no)
     ordered=list(plan.textbook_order or [])
