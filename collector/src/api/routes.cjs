@@ -38,6 +38,8 @@ function queryBoolean(url, key) {
 function createCollectorServer(options = {}) {
   const token = String(options.token ?? process.env.COLLECTOR_API_TOKEN ?? '');
   const manager = options.manager || new CollectorJobManager(options);
+  const {ManualRecovery}=require('./manual_recovery.cjs');
+  const recovery=new ManualRecovery(manager);
   const server = http.createServer(async (request, response) => {
     try {
       const url = new URL(request.url || '/', 'http://collector.local');
@@ -51,6 +53,12 @@ function createCollectorServer(options = {}) {
           sendJson(response, 401, { error: { code: 'unauthorized', message: '采集器 API 认证失败' } });
           return;
         }
+      }
+      if (request.method === 'POST' && url.pathname.startsWith('/v1/manual-recovery/')) {
+        const action=url.pathname.split('/').pop();
+        if(!['open','check','validate','finish','close'].includes(action))throw new Error('未知人工处理操作');
+        const result=await recovery[action](await readJson(request));
+        sendJson(response,200,action==='validate'?recovery.public(result):result);return;
       }
       if (request.method === 'GET' && url.pathname === '/v1/health') {
         sendJson(response, 200, {
@@ -75,6 +83,7 @@ function createCollectorServer(options = {}) {
       }
       if (request.method === 'POST' && url.pathname === '/v1/source-control/resume') {
         // Deployment token is checked above. No provider/session override.
+        if(recovery.active || manager.sourceControl.status().manualRequired) { sendJson(response,409,{error:{message:'请通过打开浏览器处理、检查恢复后再继续'}}); return; }
         const body = await readJson(request);
         sendJson(response, 200, manager.sourceControl.resume(body.expectedRevision));
         return;
@@ -259,6 +268,7 @@ function createCollectorServer(options = {}) {
     }
   });
   server.collectorManager = manager;
+  recovery.attach(server,token);
   return server;
 }
 

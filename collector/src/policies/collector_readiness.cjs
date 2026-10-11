@@ -14,6 +14,7 @@ function collectorReadiness(manager) {
       notBefore: deadlines.length ? new Date(Math.max(...deadlines)).toISOString() : null,
     };
   }
+  if(manager.manualRecovery?.active)gate={...gate,paused:true,manualRequired:true,reason:'管理员正在处理来源验证'};
   return { sourceControl: gate, sourceBudget: budget, resources };
 }
 

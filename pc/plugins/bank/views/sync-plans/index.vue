@@ -5,8 +5,8 @@
     <SyncWorkflow v-if="showCreate"/>
     <section v-if="loading && !plan.planId" class="sync-panel" role="status" aria-busy="true"><p>正在加载学科计划…</p><el-skeleton :rows="5" animated/></section>
     <el-alert v-if="error" :title="error" type="error" :closable="false" show-icon/>
-    <el-alert v-if="control.automaticReason" :title="control.automaticReason" type="info" :closable="false" show-icon/>
-    <el-alert v-if="control.source?.manualRequired" :title="control.source.reason || '来源需要人工处理'" type="warning" :closable="false" show-icon><el-button v-hasPermi="['bank:sync:control']" :loading="saving" @click="resumeSource">已完成来源验证，恢复调度</el-button></el-alert>
+    <el-alert v-if="control.automaticReason && !control.source?.manualRequired" :title="control.automaticReason" type="info" :closable="false" show-icon/>
+    <ManualRecovery v-if="control.source?.manualRequired" :subject-id="Number(subjectId)" :reason="control.source.reason" @updated="load"/>
     <section v-if="plan.planId" class="sync-panel">
       <div class="section-heading"><div><h3>{{ plan.cycleName || '准备首次同步' }}</h3><p>{{ phase }}</p><p v-if="plan.nextCycleAt">下一轮：{{ formatTime(plan.nextCycleAt) }}</p><p v-else-if="!plan.autoUpdate">自动更新已关闭，本轮结束后不再自动创建下一轮。</p></div><el-tag :type="plan.enabled ? 'success' : 'warning'">{{ controlLabel }}</el-tag></div>
       <div class="plan-actions">
@@ -60,6 +60,7 @@ import draggable from 'vuedraggable'
 import request from '@/utils/request'
 import SubjectSelect from '../../components/SubjectSelect.vue'
 import TaskExecutionHistory from '../../components/TaskExecutionHistory.vue'
+import ManualRecovery from '../../components/ManualRecovery.vue'
 import SyncCenterNav from '../../components/SyncCenterNav.vue'
 import SyncWorkflow from '../../components/SyncWorkflow.vue'
 import PlanSettingsFields from '../../components/PlanSettingsFields.vue'
@@ -69,8 +70,8 @@ const route=useRoute(),router=useRouter(),subjectId=ref(Number(route.query.subje
 const form=ref({planName:'',enabled:true,autoUpdate:true,refreshDays:7,listConcurrency:8}),settingsVisible=ref(false),endVisible=ref(false),keepUpdates=ref(true)
 const orderVisible=ref(false),orderBooks=ref([]),orderRevision=ref(),singleVisible=ref(false),singleBook=ref(),singleConcurrency=ref(0),allowPaused=ref(false)
 const bookForm=ref({}),bookDialog=ref(false),bookSearch=ref(''),bookStatus=ref(''),historyVisible=ref(false),historyRows=ref([]),historyCursor=ref()
-const progress=computed(()=>planProgress(books.value)),phase=computed(()=>planPhase(plan.value,progress.value))
-const controlLabel=computed(()=>({active:plan.value.enabled?'运行中':'已暂停',paused:'已暂停',pausing:'正在暂停',ending:'正在结束本轮'})[plan.value.controlState]||'准备中')
+const progress=computed(()=>planProgress(books.value)),phase=computed(()=>control.value.source?.manualRequired ? '等待人工处理来源验证，后续采集已暂停' : planPhase(plan.value,progress.value))
+const controlLabel=computed(()=>control.value.source?.manualRequired ? '等待人工处理' : ({active:plan.value.enabled?'运行中':'已暂停',paused:'已暂停',pausing:'正在暂停',ending:'正在结束本轮'})[plan.value.controlState]||'准备中')
 const filteredBooks=computed(()=>books.value.filter(b=>(!bookSearch.value||`${b.versionName} ${b.textbookName}`.includes(bookSearch.value.trim()))&&(!bookStatus.value||(bookStatus.value==='active'?['collecting','checking','importing'].includes(planBookStage(b).key):bookStatus.value==='issues'?['failed','partial'].includes(planBookStage(b).key):bookStatus.value==='waiting'?planBookStage(b).key==='queued':planBookStage(b).key==='paused'||!b.enabled||b.exceptionKind))))
 const data=r=>r.data||r
 const loadedSubjectId=ref(null)

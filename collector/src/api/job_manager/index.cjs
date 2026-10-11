@@ -251,6 +251,7 @@ class CollectorJobManager {
   }
 
   start(payload = {}) {
+    if(this.manualRecovery?.active) {const error=new Error('管理员正在处理来源验证，等待浏览器交回');error.statusCode=409;throw error;}
     if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
       throw new Error('请求体必须是 JSON 对象');
     }

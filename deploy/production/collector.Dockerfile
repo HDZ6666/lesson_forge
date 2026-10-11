@@ -18,6 +18,7 @@ RUN sed -i \
       fonts-liberation \
       fonts-noto-cjk \
       xvfb \
+      x11vnc \
     && mkdir -p /opt/google/chrome \
     && ln -s /usr/bin/chromium /opt/google/chrome/chrome \
     && rm -rf /var/lib/apt/lists/*

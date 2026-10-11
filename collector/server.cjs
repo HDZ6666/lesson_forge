@@ -52,6 +52,7 @@ async function main() {
     const closed = new Promise(resolve => server.close(resolve));
     server.closeIdleConnections?.();
     stopping = (async () => {
+      if(server.collectorManager.manualRecovery?.active){const r=server.collectorManager.manualRecovery;await r.close({sessionId:r.current.id,owner:r.current.owner});}
       await server.collectorManager.shutdown();
       server.closeAllConnections?.();
       await closed;

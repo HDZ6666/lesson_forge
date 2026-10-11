@@ -22,6 +22,7 @@
     "@antv/g2plot": "^2.4.31",
     "@antv/infographic": "^0.2.13",
     "@element-plus/icons-vue": "2.3.2",
+    "@novnc/novnc": "1.5.0",
     "@terrastruct/d2": "0.1.33",
     "@vueup/vue-quill": "1.2.0",
     "@vueuse/core": "14.1.0",

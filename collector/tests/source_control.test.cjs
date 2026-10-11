@@ -125,9 +125,10 @@ test('受保护来源 API 显示公共暂停，新作业拒绝；恢复需 token
     const stale = await fetch(`${base}/v1/source-control/resume`, { method: 'POST', headers,
       body: JSON.stringify({ expectedRevision: current.revision - 1 }) });
     assert.equal(stale.status, 409);
-    const resumed = await (await fetch(`${base}/v1/source-control/resume`, { method: 'POST', headers,
-      body: JSON.stringify({ expectedRevision: current.revision }) })).json();
-    assert.equal(resumed.paused, false);
+    const resumed = await fetch(`${base}/v1/source-control/resume`, { method: 'POST', headers,
+      body: JSON.stringify({ expectedRevision: current.revision }) });
+    assert.equal(resumed.status, 409);
+    assert.equal(manager.sourceControl.status().manualRequired, true);
   } finally {
     await manager.shutdown();
     await new Promise((resolve) => server.close(resolve));
