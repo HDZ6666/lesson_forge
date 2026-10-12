@@ -1,0 +1,43 @@
+{
+  "date": "2026-10-12",
+  "serviceRevision": "af5f379",
+  "frontendRevision": "0f1b8d0",
+  "collectorRevision": "91581be",
+  "environment": "production server, real MySQL; read-only service/controller calls, not end-to-end browser latency; plan paused for baseline comparison",
+  "baseline": {
+    "nginx499Last24Hours": {
+      "planBooks": 14,
+      "overview": 1
+    },
+    "bookStemCountsSeconds": [
+      10.635,
+      11.496
+    ],
+    "textbookListSeconds": 42.371
+  },
+  "afterSeconds": {
+    "planBooksEmptyDisplayCache": 4.156,
+    "planBooksRepeated": 0.067,
+    "overviewUsingSharedCounts": 1.019,
+    "textbooksEmptyDisplayCache": 3.959,
+    "textbooksRepeated": 0.018,
+    "catalogCoverage": 0.223,
+    "questions": 0.081,
+    "bookQuestions": 1.382,
+    "usableBookQuestions": 0.467,
+    "task14Detail": 0.026
+  },
+  "correctness": {
+    "oldAndNewStemCountsIdentical": true,
+    "booksWithMembership": 10,
+    "displayCacheTtlSeconds": 15,
+    "workflowCountsCached": false
+  },
+  "validation": {
+    "backendPassed": 502,
+    "backendSkipped": 19,
+    "mysqlPassed": 61,
+    "frontendTestGroups": 17,
+    "frontendBuildSeconds": 17.57
+  }
+}
