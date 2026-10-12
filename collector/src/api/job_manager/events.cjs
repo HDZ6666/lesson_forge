@@ -77,6 +77,10 @@ class EventMethods {
         break;
       }
       case 'heartbeat':
+        if (event.stage === 'browser_recycled') {
+          job.browserRecycleCount = Number(job.browserRecycleCount || 0) + 1;
+          if (this.metrics) this.metrics.browserRecycles += 1;
+        }
         if (event.browserRssMb != null) {
           job.childBrowserRssMb = event.browserRssMb;
           job.childBrowserRssPeakMb = Math.max(Number(job.childBrowserRssPeakMb || 0), event.browserRssMb);

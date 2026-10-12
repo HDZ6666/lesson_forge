@@ -8,6 +8,8 @@
 const http = require('node:http');
 
 const { ReaderPool } = require('./reader_pool.cjs');
+const { renderMetrics } = require('./metrics.cjs');
+const { describeConfig, validateConfig } = require('../shared/config.cjs');
 const { readJson, safeEqual, sendAssetResponse, sendJson } = require('./http.cjs');
 const { CollectorJobManager, intInRange } = require('./job_manager.cjs');
 const { publicJobAsync } = require('./progress.cjs');
@@ -48,6 +50,21 @@ function createCollectorServer(options = {}) {
           sendJson(response, 401, { error: { code: 'unauthorized', message: '采集器 API 认证失败' } });
           return;
         }
+      }
+      if (request.method === 'GET' && url.pathname === '/metrics') {
+        const body = renderMetrics({ manager, readers });
+        response.writeHead(200, {
+          'content-type': 'text/plain; version=0.0.4; charset=utf-8',
+          'content-length': Buffer.byteLength(body),
+          'cache-control': 'no-store',
+        });
+        response.end(body);
+        return;
+      }
+      if (request.method === 'GET' && url.pathname === '/v1/config') {
+        const config = options.config || validateConfig(process.env).values;
+        sendJson(response, 200, { settings: describeConfig(config, { redactPaths: true }) });
+        return;
       }
       if (request.method === 'POST' && url.pathname.startsWith('/v1/manual-recovery/')) {
         const action=url.pathname.split('/').pop();

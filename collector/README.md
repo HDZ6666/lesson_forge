@@ -14,19 +14,18 @@ collector/
   zujuan_question_sync.cjs     题库内容采集 CLI 入口（实现在 src/jobs、src/cli）
   zujuan_metadata_sync.cjs     版本 / 教材发现 CLI 入口（实现在 src/jobs、src/cli）
   qbpkg.cjs                    离线包构建（兼容的离线发布路径）
-  lib/api_store.cjs            只读查询 facade，实现在 src/storage/readers/
-  lib/run_snapshots.cjs        运行快照 schema 与不可变触发器
-  lib/qbpkg/                   qbpkg 实现
+  lib/                         兼容 facade（service 契约依赖这些路径），实现都在 src/
   src/
-    shared/                    工具、文件锁、URL 白名单、HTML 小解析器、错误类
+    shared/                    工具、文件锁、URL 白名单、HTML 小解析器、错误类、配置注册表（config.cjs）
     sources/zujuan/            常量、URL、目录/题目/元数据解析、请求、响应分类、Chrome 会话、8 路列表窗口
     policies/                  分页边界、重试/限速、完整性判定（纯函数）
     assets/                    素材下载与公式 SVG 回退
-    storage/                   SQLite schema、题库/元数据 store、续采校验、原始页、只读 readers
+    storage/                   SQLite schema、运行快照与不可变触发器、题库/元数据 store、续采校验、原始页、只读 readers
+    qbpkg/                     离线包构建与校验
     jobs/                      单次运行（question_run、metadata_run）、结构化事件
-    api/                       路由、HTTP 边界、publicJob 投影、job 持久化与编排
+    api/                       路由、HTTP 边界、publicJob 投影、job 持久化与编排、读取线程池、/metrics
     cli/                       两个采集脚本的参数解析与入口
-  legacy/                      旧页面点击采集器 zujuan_sync.cjs 及其 cron 包装脚本
+  legacy/                      旧页面点击采集器 zujuan_sync.cjs 及其 cron 包装脚本（仅本地与测试使用，不进入镜像）
   tests/                       Node 测试；tests/fixtures 为脱敏真实响应；tests/tools 为静态扫描
   data/zujuan.sqlite3          候选库（含 collector_jobs 任务表）
   data/zujuan/assets/          题图和公式（同步 MySQL 前放这里）
@@ -110,6 +109,8 @@ npm start
 - 子进程通过结构化事件上报 `run_created`、`progress`、`heartbeat`、`verification_wait`、`error`、`sealed`、`metadata_run_created`、`metadata_summary`；`server.cjs` 不再从日志文本中解析 run 或计数，日志只作为 `logTail` 诊断。`error` 事件带 `code/message/recoverable/failedPages`，`GET /v1/jobs/:id` 的 `errorCode` 与 `errorMessage` 来自该事件，不会被 CLI 的帮助提示覆盖。
 - 任务持久化在同一 SQLite 的 `collector_jobs` 表：`active_slot` 唯一索引是跨进程互斥（第二个活动任务得到 409）；重启后前一进程遗留的活动任务被封存为 `interrupted`/`failed`、`errorCode=collector_restarted`，对应 run 同时封存，`GET /v1/jobs/:id` 仍能查到历史任务。
 - 直接运行 CLI 时可加隐藏参数 `--events-stdout`，把同样的事件打印为 `@@event` 行。
+- 进度类写入按 `COLLECTOR_PERSIST_INTERVAL_MS`（默认 5000 ms）合并，并在间隔结束时补写最后一次；状态变化、错误和封存总是立即写入。内容没有变化的行不重写。
+- API 的 SQLite 读取（快照分页、运行汇总、实时进度等）在 `COLLECTOR_READER_THREADS` 个工作线程中执行（默认 2，`0` 回到主线程读取），单次超过 `COLLECTOR_READER_TIMEOUT_MS`（默认 30000）返回 504 并替换该线程。大查询不再阻塞 `/health` 和任务状态轮询。
 
 ### 新建、重试与续采
 
@@ -133,6 +134,8 @@ npm start
 - `GET /v1/runs/{runId}/snapshot-page`：按 `collection`、`cursor`、`pageSize` 和 `textbookExternalId` 读取一个不可变运行快照页；`collection` 只能是 `catalogs`、`questions`、`questionCatalogs`、`tags` 或 `assets`，响应会受行数和字节上限约束，并返回 `nextCursor`；
 - `GET /v1/runs/{runId}/assets/{sha256}`：按素材 SHA-256 和可选的 `textbookExternalId` 下载素材字节；collector 会校验快照归属、路径安全性、文件大小及实际 SHA-256 后才开始传输；
 - `GET /health` 用于无敏感信息存活检查，`GET /v1/health` 需要认证。
+- `GET /metrics`（需要认证）：Prometheus 文本格式，包含当前任务进度、页数、子进程与 Chrome 内存、浏览器回收次数、内存水位等级、磁盘余量、来源暂停与配额、读取线程与落库统计。只读内存状态和两张单行表，可每 15 秒抓取。
+- `GET /v1/config`（需要认证）：当前生效的全部 `COLLECTOR_*` 配置，令牌与主机路径已隐藏。启动时同样把生效值打印到日志；非法值直接拒绝启动，未知的 `COLLECTOR_*` 变量会打印警告。
 - `GET /v1/source-control` 读取固定 `zujuan` 公共暂停；`POST /v1/source-control/resume` 提交读取到的 `expectedRevision` 显式解除人工暂停。沿用 API 认证，不能指定其他 provider、URL 或会话；较新的暂停事件导致 409，解除人工暂停也不能缩短来源要求的冷却。
 - `GET /v1/source-budget` 读取当日共享配额及已用量；没有修改或清零接口。`GET /v1/health` 返回合并的 `sourceControl` 执行门槛，以及独立的 `sourceBudget`、`resources`。`ok=true` 只代表采集器可用；任何来源暂停、配额耗尽或资源不足都会阻止新任务，解除人工暂停不能解除其余限制。
 
@@ -207,7 +210,7 @@ Publisher 提供 `verify/register/process/publish/rollback/recover/run-pending/c
 
 先按 `taskId/jobId/runId` 定位运行，再看具体目录、页结果、原始错误与快照完整性。SQLite ExperimentalWarning、浏览器最小化警告和 CLI 最后一行帮助文字都不能单独证明采集失败原因。
 
-`npm test` 是离线测试入口，不代表生产整册采集成功；容器退出验证见运行存储说明。新问题和实际验证写入[实施任务清单](../docs/实施任务清单.md)对应项及证据，历史复现只查归档，不再维护旧进度台账。
+`npm test` 是离线测试入口，不代表生产整册采集成功；`npm run check` 依次执行未声明标识符扫描、格式检查和测试，与 CI（`.github/workflows/collector.yml`）一致。容器退出验证见运行存储说明。新问题和实际验证写入[实施任务清单](../docs/实施任务清单.md)对应项及证据，历史复现只查归档，不再维护旧进度台账。
 
 ### 出错页面现场
 

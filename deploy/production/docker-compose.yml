@@ -85,6 +85,10 @@ services:
       COLLECTOR_BROWSER_RECYCLE_MB: ${COLLECTOR_BROWSER_RECYCLE_MB:-1000}
       # 采集子进程内存上限（MB）：超过即停止并封存为可续采，避免再次拖垮 3.7GB 的宿主机（COL-015）。
       COLLECTOR_CHILD_MAX_RSS_MB: "1536"
+      # API 读取线程：快照分页等 SQLite 读取不占用主事件循环（0 回到主线程读取）。
+      COLLECTOR_READER_THREADS: ${COLLECTOR_READER_THREADS:-2}
+      COLLECTOR_READER_TIMEOUT_MS: ${COLLECTOR_READER_TIMEOUT_MS:-30000}
+      COLLECTOR_PERSIST_INTERVAL_MS: ${COLLECTOR_PERSIST_INTERVAL_MS:-5000}
       TZ: Asia/Shanghai
     volumes:
       - collector_data:/data

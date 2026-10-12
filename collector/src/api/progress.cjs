@@ -276,6 +276,7 @@ function publicJob(job, options = {}) {
     childRssPeakMb: job.childRssPeakMb == null ? null : Number(job.childRssPeakMb),
     childBrowserRssMb: job.childBrowserRssMb == null ? null : Number(job.childBrowserRssMb),
     childBrowserRssPeakMb: job.childBrowserRssPeakMb == null ? null : Number(job.childBrowserRssPeakMb),
+    browserRecycleCount: Number(job.browserRecycleCount || 0),
     startedAt: job.startedAt,
     finishedAt: job.finishedAt,
     createdAt: job.createdAt,

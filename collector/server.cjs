@@ -10,7 +10,7 @@
  *   routes.cjs       route table
  *
  * Route table (all under the configured token except GET /health):
- *   GET  /health, GET /v1/health
+ *   GET  /health, GET /v1/health, GET /metrics, GET /v1/config
  *   POST /v1/jobs, GET /v1/jobs/{jobId}, POST /v1/jobs/{jobId}/cancel
  *   POST /v1/metadata/validate, GET /v1/metadata/snapshot
  *   GET  /v1/candidates, GET /v1/catalog-progress
@@ -24,8 +24,16 @@ const process = require('node:process');
 const { CollectorJobManager, deploymentBoolean, intInRange } = require('./src/api/job_manager.cjs');
 const { aggregateLiveProgress, publicJob } = require('./src/api/progress.cjs');
 const { createCollectorServer } = require('./src/api/routes.cjs');
+const { formatConfig, validateConfig } = require('./src/shared/config.cjs');
 
 async function main() {
+  // Check every COLLECTOR_* setting before anything starts, including the
+  // ones only the crawl child reads, so a bad value fails the deployment now
+  // rather than a crawl hours later.
+  const config = validateConfig(process.env);
+  if (config.errors.length) throw new Error(`配置无效：\n  ${config.errors.join('\n  ')}`);
+  for (const warning of config.warnings) console.warn(`[配置] ${warning}`);
+  console.log(`[配置] 生效值：\n${formatConfig(config.values)}`);
   const host = String(process.env.COLLECTOR_API_HOST || '127.0.0.1');
   const port = intInRange(process.env.COLLECTOR_API_PORT || 9110, 'COLLECTOR_API_PORT', 1, 65535);
   const token = String(process.env.COLLECTOR_API_TOKEN || '');
@@ -39,6 +47,9 @@ async function main() {
     profileDir: process.env.COLLECTOR_PROFILE_DIR,
     nodeBin: process.env.COLLECTOR_NODE_BIN,
     headful: process.env.COLLECTOR_HEADFUL,
+    config: config.values,
+    readerThreads: config.values.COLLECTOR_READER_THREADS,
+    readerTimeoutMs: config.values.COLLECTOR_READER_TIMEOUT_MS,
   });
   await new Promise((resolve, reject) => {
     server.once('error', reject);

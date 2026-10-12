@@ -93,6 +93,8 @@ class CollectorJobManager {
       'persistIntervalMs',
     );
     this.persistStats = { writes: 0, failures: 0 };
+    // Process-lifetime counters for GET /metrics.
+    this.metrics = { startedAt: Date.now(), browserRecycles: 0, jobsFinished: {}, jobErrors: {} };
     // Headful is an operator/deployment setting only.  It is intentionally
     // read once here and never taken from a request payload.
     this.headful = deploymentBoolean(

@@ -20,6 +20,10 @@ class LifecycleMethods {
     job.currentTextbookId = null;
     job.currentTextbookName = null;
     job.finishedAt = new Date().toISOString();
+    if (this.metrics) {
+      this.metrics.jobsFinished[status] = (this.metrics.jobsFinished[status] || 0) + 1;
+      if (job.errorCode) this.metrics.jobErrors[job.errorCode] = (this.metrics.jobErrors[job.errorCode] || 0) + 1;
+    }
     for (const scope of job.scopeItems || []) {
       if (status === 'cancelled') {
         if (!['completed', 'failed', 'blocked', 'interrupted'].includes(scope.status)) scope.status = 'cancelled';
