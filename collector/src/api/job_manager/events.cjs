@@ -5,6 +5,7 @@
  * log-text fallbacks used when a child died without reporting.
  */
 
+const diagnostics = require('../../shared/diagnostics.cjs');
 const { normalizeEvent, parseEventLine } = require('../../jobs/events.cjs');
 const { lastError, looksBlocked } = require('../orphan_runs.cjs');
 const { BLOCKED_ERROR_CODES, MAX_LOG_LINES, TERMINAL_STATUSES } = require('./constants.cjs');
@@ -17,6 +18,7 @@ class EventMethods {
   record(job, rawLine, label = 'stdout') {
     const line = String(rawLine || '').trim();
     if (!line) return;
+    diagnostics.write('task_output', { jobId: job.id, runId: job.collectorRunId, label, line }, job.id);
     const event = label === 'stdout' ? parseEventLine(line) : null;
     if (event) {
       this.handleEvent(job, event);
@@ -31,6 +33,7 @@ class EventMethods {
   handleEvent(job, rawEvent) {
     const event = normalizeEvent(rawEvent);
     if (!event || !job || TERMINAL_STATUSES.has(String(job.status))) return;
+    diagnostics.write('task_event', { jobId: job.id, event }, job.id);
     job.lastActivityAt = Date.now();
     const scope = this.scopeFor(job, job.currentTextbookId);
     switch (event.type) {

@@ -18,6 +18,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from exceptions.exception import ServiceException
+from plugins.bank.service.diagnostics import audited_request, event, request_id
 
 DEFAULT_TIMEOUT_SECONDS = 15.0
 DEFAULT_MAX_RESPONSE_BYTES = 64 * 1024 * 1024
@@ -110,6 +111,7 @@ class CollectorClient:
             raise ServiceException(message=f'{name} 必须是正整数')
         return value
 
+    @audited_request
     def _request(
         self,
         method: str,
@@ -130,13 +132,17 @@ class CollectorClient:
         if payload is not None:
             body = json.dumps(payload, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
             headers['Content-Type'] = 'application/json; charset=utf-8'
+        if request_id():
+            headers['X-Lesson-Request-Id'] = request_id()
         if self.token:
             headers['Authorization'] = f'Bearer {self.token}'
         request = urllib.request.Request(url, data=body, headers=headers, method=method)
         try:
             with urllib.request.urlopen(request, timeout=self.timeout) as response:
                 raw = response.read(self.max_response_bytes + 1)
+                event('collector_http_response',status=getattr(response,'status',None),bytes=len(raw))
         except urllib.error.HTTPError as exc:
+            event('collector_http_response',status=exc.code,outcome='http_error')
             raw = exc.read(self.max_response_bytes + 1)
             message = self._error_message(raw) or f'HTTP {exc.code}'
             raise ServiceException(message=f'collector API 请求失败：{message}') from exc
@@ -152,6 +158,7 @@ class CollectorClient:
             raise ServiceException(message='collector API 响应结构不正确')
         return value
 
+    @audited_request
     def _request_bytes(
         self,
         method: str,
@@ -170,6 +177,8 @@ class CollectorClient:
             if encoded:
                 url = f'{url}?{encoded}'
         headers = {'Accept': 'application/octet-stream'}
+        if request_id():
+            headers['X-Lesson-Request-Id'] = request_id()
         if self.token:
             headers['Authorization'] = f'Bearer {self.token}'
         request = urllib.request.Request(url, headers=headers, method=method)
@@ -188,7 +197,9 @@ class CollectorClient:
                     except ValueError as exc:
                         raise ServiceException(message='collector 素材响应长度无效') from exc
                 raw = response.read(limit + 1)
+                event('collector_http_response',status=getattr(response,'status',None),bytes=len(raw))
         except urllib.error.HTTPError as exc:
+            event('collector_http_response',status=exc.code,outcome='http_error')
             raw = exc.read(min(limit + 1, self.max_response_bytes) if limit > 0 else 1)
             message = self._error_message(raw) or f'HTTP {exc.code}'
             raise ServiceException(message=f'collector API 素材请求失败：{message}') from exc

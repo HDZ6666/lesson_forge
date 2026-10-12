@@ -1,5 +1,7 @@
 'use strict';
 
+const diagnostics = require('../shared/diagnostics.cjs');
+
 // One provider row, shared by discovery, content, assets and every manager.
 // Connections are short-lived; no SQLite transaction spans network waits.
 const { DatabaseSync } = require('node:sqlite');
@@ -89,6 +91,7 @@ class SourceControl {
           )
           .run(until, '来源返回 HTTP 429，等待公共冷却'),
       );
+      diagnostics.write('source_cooldown_enter', { status, state: this.status() });
       this.assertAllowed();
     }
     if (verification && [401, 403, 405].includes(status))
@@ -104,7 +107,9 @@ class SourceControl {
         )
         .run(String(reason).slice(0, 500)),
     );
-    return this.status();
+    const state = this.status();
+    diagnostics.write('source_manual_enter', { state });
+    return state;
   }
 
   requireManual(reason) {
@@ -130,7 +135,9 @@ class SourceControl {
         throw error;
       }
       // Explicit operator resume cannot shorten a site's Retry-After.
-      return this.project(db.prepare("SELECT * FROM collector_source_control WHERE provider='zujuan'").get());
+      const state = this.project(db.prepare("SELECT * FROM collector_source_control WHERE provider='zujuan'").get());
+      diagnostics.write('source_manual_resume', { state });
+      return state;
     });
   }
 }

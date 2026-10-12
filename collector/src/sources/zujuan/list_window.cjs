@@ -1,5 +1,8 @@
 'use strict';
 
+const diagnostics = require('../../shared/diagnostics.cjs');
+const { randomUUID } = require('node:crypto');
+
 /**
  * Network layer of the question list collector: in-page fetch of the list
  * API, the paging window, the static catalog tree and textbook navigation.
@@ -75,6 +78,9 @@ async function postQuestionList(
 ) {
   const request = buildQuestionListRequest(options, catalog, pageNumber);
   const wait = options.sleepFn || sleep;
+  const operationId = randomUUID();
+  let attempt = 0;
+  let sawVerification = false;
   let retryIndex = 0;
   let networkRetryIndex = 0;
   let verificationCycles = 0;
@@ -83,9 +89,32 @@ async function postQuestionList(
     options.sourceControl?.assertAllowed();
     options.resourceGuard?.assertAllowed();
     options.sourceBudget?.request();
+    const detail = {
+      operationId,
+      attempt: ++attempt,
+      catalogId: catalog?.externalId,
+      pageNumber,
+      totalOnly,
+      url: diagnostics.safeUrl(request.url),
+    };
+    const started = performance.now();
+    diagnostics.write('list_attempt_started', detail);
     const result = await evaluateFetch(page, request.url, request);
-    options.sourceControl?.observe(Number(result.status || 0), result.headers, { verification: false });
     const classification = classifyQuestionResponse(result);
+    diagnostics.write('list_attempt_response', {
+      ...detail,
+      elapsedMs: Math.round(performance.now() - started),
+      status: result.status,
+      classification: classification.kind,
+      code: classification.code,
+      networkError: result.networkError,
+      retryAfter: result.headers?.['retry-after'],
+    });
+    if (classification.kind === 'verification') {
+      sawVerification = true;
+      diagnostics.write('verification_detected', { ...detail, code: classification.code, status: result.status });
+    }
+    options.sourceControl?.observe(Number(result.status || 0), result.headers, { verification: false });
     if (classification.kind === 'verification') {
       if (!allowVerificationWait) {
         throw new VerificationRequiredError(
@@ -137,6 +166,12 @@ async function postQuestionList(
         options.randomFn || Math.random,
       );
       retryIndex += 1;
+      diagnostics.write('request_retry_scheduled', {
+        ...detail,
+        retryIndex,
+        delayMs: delay,
+        reason: classification.code,
+      });
       console.warn(
         `[重试] 目录 ${catalog?.externalId || ''} 第 ${pageNumber} 页 HTTP ${classification.status}，等待 ${(delay / 1000).toFixed(1)} 秒`,
       );
@@ -156,6 +191,12 @@ async function postQuestionList(
       }
       const delay = retryDelay('normal', networkRetryIndex, {}, options.randomFn || Math.random);
       networkRetryIndex += 1;
+      diagnostics.write('request_retry_scheduled', {
+        ...detail,
+        retryIndex: networkRetryIndex,
+        delayMs: delay,
+        reason: 'network_error',
+      });
       await wait(delay);
       continue;
     }
@@ -164,12 +205,21 @@ async function postQuestionList(
         result.payload ||
         classification.payload ||
         (result && result.code != null ? result : JSON.parse(String(result.text || '')));
-      return totalOnly
+      const parsed = totalOnly
         ? parseQuestionListTotalPayload(payload)
         : parseQuestionListPayload(payload, options.baseUrl || DEFAULT_BASE_URL);
+      if (sawVerification)
+        diagnostics.write('verification_api_recovered', {
+          ...detail,
+          waitedMs: verificationStartedAt == null ? null : Date.now() - verificationStartedAt,
+        });
+      diagnostics.write('list_attempt_accepted', detail);
+      return parsed;
     } catch (error) {
       if (error instanceof QuestionSyncError && error.code === 'list_api_contract') throw error;
       if (looksLikeHtml(result.text)) {
+        sawVerification = true;
+        diagnostics.write('verification_detected', { ...detail, code: 'json_html', status: result.status });
         if (!allowVerificationWait) {
           throw new VerificationRequiredError(
             `题目列表返回验证/防护：目录 ${catalog?.externalId || ''} 第 ${pageNumber} 页`,

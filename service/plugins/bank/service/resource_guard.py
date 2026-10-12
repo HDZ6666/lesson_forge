@@ -11,6 +11,7 @@ from pathlib import Path
 import psutil
 
 from exceptions.exception import ServiceException
+from plugins.bank.service.diagnostics import event, resource_snapshot
 
 MIB = 1024 * 1024
 _CACHE: tuple[tuple, float, dict] | None = None
@@ -105,6 +106,7 @@ def assert_resources(*, root: Path | None = None) -> None:
         # a valid import or silently run without its intended protection.
         raise ResourcePressure(message=exc.message) from exc
     if state['paused']:
+        event('resource_guard_triggered',state=state,measurementAgeMs=round((time.monotonic()-_CACHE[1])*1000) if _CACHE else None,triggerSnapshot=resource_snapshot())
         raise ResourcePressure(message=state['reason'])
 
 
@@ -115,4 +117,5 @@ def assert_import_resources(*, root: Path | None = None) -> None:
     state = resource_status(root=root)
     memory = state.get('availableMemoryMiB')
     if minimum and memory is not None and memory < minimum:
+        event('resource_guard_triggered',stage='import',state=state,importMinimumMiB=minimum,measurementAgeMs=round((time.monotonic()-_CACHE[1])*1000) if _CACHE else None,triggerSnapshot=resource_snapshot())
         raise ResourcePressure(message=f'入库暂缓，为网站和采集保留内存：当前可用 {memory} MiB，入库需 {minimum} MiB；资源恢复后自动继续')

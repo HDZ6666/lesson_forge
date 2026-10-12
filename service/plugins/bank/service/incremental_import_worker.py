@@ -11,6 +11,7 @@ from typing import Any
 
 from config.database import DataSourceRegistry
 from exceptions.exception import ServiceException
+from plugins.bank.service import diagnostics
 from plugins.bank.service.collector_client import CollectorClient
 from plugins.bank.service.incremental_import import (
     advance_incremental_preparation,
@@ -61,9 +62,10 @@ def _prepare(ticket: dict[str, Any], client: Any, path: Path, stop: threading.Ev
         except BlockingIOError as exc:
             raise PreparationBusy(message='正在等待上次暂存释放，稍后自动继续') from exc
         progress()
-        summary = client.run_snapshot_summary(
-            ticket['collectorRunId'], textbook_external_id=ticket['textbookExternalId'], sealed_for_import=True,
-        )
+        with diagnostics.span('snapshot_summary'):
+            summary = client.run_snapshot_summary(
+                ticket['collectorRunId'], textbook_external_id=ticket['textbookExternalId'], sealed_for_import=True,
+            )
         normalized = _normalise_snapshot_summary(
             summary, ticket['taskId'], ticket['textbookExternalId'], sealed_for_import=True,
         )
@@ -76,13 +78,15 @@ def _prepare(ticket: dict[str, Any], client: Any, path: Path, stop: threading.Ev
             and ticket['coverageEvidence'] != normalized['run_coverage']
         ):
             raise ServiceException(message='远端封存与提交入库时的任务身份不一致')
-        spool_snapshot(
-            client, ticket['collectorRunId'], ticket['textbookExternalId'], path,
-            sealed_for_import=True, on_progress=progress,
-        )
+        with diagnostics.span('snapshot_download'):
+            spool_snapshot(
+                client, ticket['collectorRunId'], ticket['textbookExternalId'], path,
+                sealed_for_import=True, on_progress=progress,
+            )
         progress()
         with SealedSnapshotReader(path, summary, ticket['taskId'], ticket['textbookExternalId']) as reader:
-            report = check_sealed_snapshot(reader, path, on_progress=progress)
+            with diagnostics.span('snapshot_quality_check'):
+                report = check_sealed_snapshot(reader, path, on_progress=progress)
             return {**report, 'coverageEvidence': normalized['run_coverage']}
 
 
@@ -120,6 +124,8 @@ async def execute_incremental_import(
             if current is not None:
                 current.cancel()
 
+    diagnostic_token = diagnostics.bind(taskId=ticket['taskId'],importId=ticket['importId'],collectorRunId=ticket['collectorRunId'],textbookExternalId=ticket['textbookExternalId'])
+    diagnostics.event('import_execution_started',cursor=ticket.get('cursor'))
     pulse = asyncio.create_task(heartbeat(), name=f'bank-import-heartbeat-{owner["importId"]}')
     try:
         assert_import_resources(root=path.parent)
@@ -132,11 +138,15 @@ async def execute_incremental_import(
             assert_import_resources(root=path.parent)
             async with session_factory() as db:
                 await advance_incremental_preparation(db, owner, 'assets')
-            verdicts = await asyncio.to_thread(read_checked_batch, path, owner)
-            prepared = await prepare_incremental_verdicts(verdicts)
+            with diagnostics.span('batch_read',cursor=owner['cursor']):
+                verdicts = await asyncio.to_thread(read_checked_batch, path, owner)
+            with diagnostics.span('batch_assets',cursor=owner['cursor']):
+                prepared = await prepare_incremental_verdicts(verdicts)
             assert_import_resources(root=path.parent)
-            async with session_factory() as db:
-                result = await submit_incremental_import_batch(db, owner, prepared, expected_cursor=owner['cursor'])
+            with diagnostics.span('batch_mysql_commit',cursor=owner['cursor']) as timing:
+                async with session_factory() as db:
+                    result = await submit_incremental_import_batch(db, owner, prepared, expected_cursor=owner['cursor'])
+                timing['result'] = result['incrementalImport']
             state = result['incrementalImport']
             owner['cursor'] = state['processedCount']
             owner['done'] = state['status'] in {'completed', 'partial'}
@@ -147,6 +157,7 @@ async def execute_incremental_import(
         # a permanent failure requiring manual retry.
         raise
     except (PlanWorkPaused, SourceWriteBusy, PreparationBusy, ResourcePressure) as exc:
+        diagnostics.event('import_deferred',cursor=owner.get('cursor'),errorType=type(exc).__name__,message=exc.message)
         async with session_factory() as db:
             await defer_incremental_import(db, owner, exc.message)
     except Exception as exc:
@@ -158,6 +169,8 @@ async def execute_incremental_import(
             pass  # An expired owner cannot change its successor's result.
         logger.warning(f'题库入库 {owner["importId"]} 未完成，类型 {type(exc).__name__}')
     finally:
+        diagnostics.event('import_execution_finished',cursor=owner.get('cursor'),done=owner.get('done'))
+        diagnostics.reset(diagnostic_token)
         stop.set()
         pulse.cancel()
         await asyncio.gather(pulse, return_exceptions=True)

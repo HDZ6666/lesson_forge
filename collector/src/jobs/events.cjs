@@ -13,6 +13,8 @@
  * Nothing here parses human log lines; free text stays diagnostic only.
  */
 
+const diagnostics = require('../shared/diagnostics.cjs');
+
 const EVENT_PREFIX = '@@event ';
 const MAX_EVENT_STRING = 4000;
 const MAX_FAILED_PAGES = 200;
@@ -193,6 +195,13 @@ function createProcessEventEmitter(options = {}) {
   const emit = (type, payload = {}) => {
     const event = normalizeEvent({ ...payload, type, at: new Date().toISOString() });
     if (!event) return null;
+    if (['run_created', 'metadata_run_created'].includes(type))
+      diagnostics.bind({
+        runId: event.runId,
+        runType: type === 'metadata_run_created' ? 'metadata' : event.runType,
+        textbookExternalId: event.textbookExternalId,
+      });
+    diagnostics.write('child_event', { event });
     if (sink) {
       try {
         sink(event);

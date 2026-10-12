@@ -1,5 +1,7 @@
 'use strict';
 
+const diagnostics = require('../shared/diagnostics.cjs');
+
 /**
  * One version/textbook discovery run: robots check, anonymous Chrome session,
  * seed page, chaptertextbooks API per version, UPSERT into the candidate
@@ -160,6 +162,12 @@ async function fetchTextbooksForVersion(page, version, options) {
       return { status: 0, text: '', error: String(error && error.message ? error.message : error) };
     }
   }, requestUrl);
+  diagnostics.write('metadata_api_response', {
+    url: diagnostics.safeUrl(requestUrl),
+    versionId: version.externalVersionId,
+    status: payload.status,
+    error: payload.error,
+  });
   options.sourceControl?.observe(payload.status, payload.headers, { verification: false });
   if (payload.error) throw new Error(`教材列表接口失败：${payload.error}`);
   if ([401, 403].includes(payload.status)) {
@@ -168,6 +176,12 @@ async function fetchTextbooksForVersion(page, version, options) {
   if (payload.status >= 400) throw new Error(`教材列表接口返回 HTTP ${payload.status}`);
   const protection = classifyHtmlProtection(payload.text);
   if (protection.terminalBlock || (protection.transientChallenge && !protection.hasContent)) {
+    diagnostics.write('verification_detected', {
+      url: diagnostics.safeUrl(requestUrl),
+      versionId: version.externalVersionId,
+      status: payload.status,
+      code: 'html_protection',
+    });
     throw new StopCrawlError(protectionStopMessage(protection), 'challenge');
   }
   const textbooks = parseTextbooksFromApiHtml(payload.text, {

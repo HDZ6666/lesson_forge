@@ -1,5 +1,7 @@
 'use strict';
 
+const diagnostics = require('../shared/diagnostics.cjs');
+
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -185,7 +187,14 @@ class ResourceGuard {
 
   assertAllowed() {
     const state = this.status();
-    if (state.paused) throw new ResourcePressureError(state);
+    if (state.paused) {
+      diagnostics.write('resource_guard_triggered', {
+        state,
+        measuredAt: new Date(this.cached.at).toISOString(),
+        triggerSnapshot: diagnostics.resources(),
+      });
+      throw new ResourcePressureError(state);
+    }
   }
 }
 
