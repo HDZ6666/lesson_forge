@@ -84,9 +84,9 @@ function runInline(name, args) {
 }
 
 class ReaderPool {
-  constructor({ threads = 2, timeoutMs = 30000, workerScript = WORKER_SCRIPT } = {}) {
+  constructor({ threads = 2, timeoutMs = 25000, workerScript = WORKER_SCRIPT } = {}) {
     this.threads = Math.max(0, Math.floor(Number(threads) || 0));
-    this.timeoutMs = Math.max(1000, Math.floor(Number(timeoutMs) || 30000));
+    this.timeoutMs = Math.max(1000, Math.floor(Number(timeoutMs) || 25000));
     this.workerScript = workerScript;
     this.workers = [];
     this.queue = [];

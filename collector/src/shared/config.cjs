@@ -78,11 +78,11 @@ const SETTINGS = [
   {
     name: 'COLLECTOR_READER_TIMEOUT_MS',
     kind: 'int',
-    fallback: 30000,
+    fallback: 25000,
     min: 1000,
     max: 600000,
     scope: 'api',
-    doc: '单次读取时限，超时返回 504',
+    doc: '单次读取时限，超时返回 504；需小于 Service 的 30 秒请求超时',
   },
   // Crawl pacing (passed to the child as CLI flags)
   {
