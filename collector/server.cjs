@@ -68,6 +68,9 @@ async function main() {
         await r.close({ sessionId: r.current.id, owner: r.current.owner });
       }
       await server.collectorManager.shutdown();
+      // A reclaim in progress gets a short grace period, then is terminated;
+      // SQLite rolls it back and the service repeats it after restart.
+      await server.maintenance?.close();
       server.closeAllConnections?.();
       await closed;
     })().catch((error) => {

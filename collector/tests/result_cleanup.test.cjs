@@ -106,3 +106,43 @@ test('仍在运行时不回收任何旧成果', () => {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('HTTP 回收在维护线程执行，期间 /health 正常、重复请求幂等', async () => {
+  const { createCollectorServer } = require('../server.cjs');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cleanup-http-'));
+  const dbPath = path.join(dir, 'db.sqlite3');
+  const store = new SyncStore(dbPath, { dataDir: dir });
+  const first = seed(store, 'q1');
+  seed(store, 'q2');
+  const snapshotLockedAt = store.db
+    .prepare('SELECT snapshot_locked_at FROM sync_runs WHERE id=?')
+    .get(first).snapshot_locked_at;
+  store.close();
+  const server = createCollectorServer({ dbPath, dataDir: dir, token: 't' });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const headers = { authorization: 'Bearer t', 'content-type': 'application/json' };
+  try {
+    const body = JSON.stringify({ textbookExternalId: 'tb1', snapshotLockedAt });
+    const pending = fetch(`${base}/v1/runs/${first}/reclaim`, { method: 'POST', headers, body });
+    const health = await fetch(`${base}/health`);
+    assert.equal(health.status, 200);
+    const response = await pending;
+    assert.equal(response.status, 200);
+    assert.equal((await response.json()).runId, first);
+    const repeat = await fetch(`${base}/v1/runs/${first}/reclaim`, { method: 'POST', headers, body });
+    assert.equal(repeat.status, 200);
+    const latest = await fetch(`${base}/v1/runs/${first + 1}/reclaim`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ textbookExternalId: 'tb1', snapshotLockedAt }),
+    });
+    assert.equal(latest.status, 409);
+    const metrics = await (await fetch(`${base}/metrics`, { headers })).text();
+    assert.match(metrics, /collector_maintenance_completed_total 2/);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    await server.maintenance.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

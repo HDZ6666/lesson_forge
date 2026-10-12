@@ -387,6 +387,7 @@ class CollectorJobManager {
     };
     const existing = replay();
     if (existing) return existing;
+    this.maintenance?.assertIdle();
     this.sourceControl.assertAllowed();
     this.sourceBudget.assertCanStart(runType);
     this.resourceGuard.assertAllowed();

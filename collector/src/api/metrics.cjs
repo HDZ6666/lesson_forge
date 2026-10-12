@@ -65,7 +65,7 @@ function safely(read) {
   }
 }
 
-function renderMetrics({ manager, readers = null, now = Date.now() }) {
+function renderMetrics({ manager, readers = null, maintenance = null, now = Date.now() }) {
   const out = new MetricWriter();
   const metrics = manager.metrics || {};
   out.sample('collector_up', 'gauge', 'API process is serving (0 while shutting down)', manager.stopping ? 0 : 1);
@@ -223,6 +223,18 @@ function renderMetrics({ manager, readers = null, now = Date.now() }) {
     out.sample('collector_reader_calls_total', 'counter', 'Reads served', pool.calls);
     out.sample('collector_reader_failures_total', 'counter', 'Reads that failed', pool.failures);
     out.sample('collector_reader_timeouts_total', 'counter', 'Reads aborted by the timeout', pool.timeouts);
+  }
+  if (maintenance) {
+    const m = maintenance.status();
+    out.sample('collector_maintenance_busy', 'gauge', 'Reclaim or WAL checkpoint in progress', m.busy ? 1 : 0);
+    out.sample('collector_maintenance_completed_total', 'counter', 'Maintenance tasks finished', m.completed);
+    out.sample('collector_maintenance_failed_total', 'counter', 'Maintenance tasks that failed', m.failed);
+    out.sample(
+      'collector_maintenance_last_duration_seconds',
+      'gauge',
+      'Duration of the last maintenance task',
+      m.lastDurationMs / 1000,
+    );
   }
   if (manager.persistStats) {
     out.sample(

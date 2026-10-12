@@ -73,6 +73,7 @@ class LifecycleMethods {
     this.stopWatchdog(job);
     if (this.activeJobId === job.id) this.activeJobId = null;
     this.persist(job, { force: true });
+    this.scheduleIdleCheckpoint();
     if (this.store) {
       try {
         this.store.release(job.id);
@@ -141,6 +142,7 @@ class LifecycleMethods {
   dispose() {
     if (this.disposed) return;
     this.disposed = true;
+    clearTimeout(this.idleCheckpointTimer);
     unregisterOwner(this.ownerToken);
     for (const job of this.jobs.values()) this.stopWatchdog(job);
     if (this.store) {
@@ -160,6 +162,17 @@ class LifecycleMethods {
     }
     this.persist(job, { force: true });
     this.terminateChild(job);
+  }
+
+  /**
+   * Truncates the WAL shortly after a job ends. The delay lets the child
+   * close its connection first. Skipped when a new job has started by then.
+   */
+  scheduleIdleCheckpoint(delayMs = 2000) {
+    if (!this.maintenance || !this.dbPath) return;
+    clearTimeout(this.idleCheckpointTimer);
+    this.idleCheckpointTimer = setTimeout(() => void this.maintenance.checkpoint(this.dbPath), delayMs);
+    this.idleCheckpointTimer.unref?.();
   }
 
   shutdown() {

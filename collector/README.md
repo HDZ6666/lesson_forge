@@ -110,7 +110,8 @@ npm start
 - 任务持久化在同一 SQLite 的 `collector_jobs` 表：`active_slot` 唯一索引是跨进程互斥（第二个活动任务得到 409）；重启后前一进程遗留的活动任务被封存为 `interrupted`/`failed`、`errorCode=collector_restarted`，对应 run 同时封存，`GET /v1/jobs/:id` 仍能查到历史任务。
 - 直接运行 CLI 时可加隐藏参数 `--events-stdout`，把同样的事件打印为 `@@event` 行。
 - 进度类写入按 `COLLECTOR_PERSIST_INTERVAL_MS`（默认 5000 ms）合并，并在间隔结束时补写最后一次；状态变化、错误和封存总是立即写入。内容没有变化的行不重写。
-- API 的 SQLite 读取（快照分页、运行汇总、实时进度等）在 `COLLECTOR_READER_THREADS` 个工作线程中执行（默认 2，`0` 回到主线程读取），单次超过 `COLLECTOR_READER_TIMEOUT_MS`（默认 30000）返回 504 并替换该线程。大查询不再阻塞 `/health` 和任务状态轮询。
+- API 的 SQLite 读取（快照分页、运行汇总、实时进度等）在 `COLLECTOR_READER_THREADS` 个工作线程中执行（默认 2，`0` 回到主线程读取），单次超过 `COLLECTOR_READER_TIMEOUT_MS`（默认 25000，需小于 Service 的 30 秒请求超时）返回 504 并替换该线程。大查询不再阻塞 `/health` 和任务状态轮询。
+- 成果回收（`POST /v1/runs/{id}/reclaim`）和 WAL 整理在独立维护线程中执行，同一时间只跑一个：同一 run 的重复请求合并到进行中的任务，其他维护请求返回 409 `maintenance_busy`，维护期间启动采集同样返回 409。每次回收后以及每个任务结束后，会执行 `wal_checkpoint(TRUNCATE)`，把 -wal 文件截回 0；空闲页留给后续采集复用，不做 VACUUM。
 
 ### 新建、重试与续采
 
@@ -134,7 +135,7 @@ npm start
 - `GET /v1/runs/{runId}/snapshot-page`：按 `collection`、`cursor`、`pageSize` 和 `textbookExternalId` 读取一个不可变运行快照页；`collection` 只能是 `catalogs`、`questions`、`questionCatalogs`、`tags` 或 `assets`，响应会受行数和字节上限约束，并返回 `nextCursor`；
 - `GET /v1/runs/{runId}/assets/{sha256}`：按素材 SHA-256 和可选的 `textbookExternalId` 下载素材字节；collector 会校验快照归属、路径安全性、文件大小及实际 SHA-256 后才开始传输；
 - `GET /health` 用于无敏感信息存活检查，`GET /v1/health` 需要认证。
-- `GET /metrics`（需要认证）：Prometheus 文本格式，包含当前任务进度、页数、子进程与 Chrome 内存、浏览器回收次数、内存水位等级、磁盘余量、来源暂停与配额、读取线程与落库统计。只读内存状态和两张单行表，可每 15 秒抓取。
+- `GET /metrics`（需要认证）：Prometheus 文本格式，包含当前任务进度、页数、子进程与 Chrome 内存、浏览器回收次数、内存水位等级、磁盘余量、来源暂停与配额、读取线程、维护任务与落库统计。只读内存状态和两张单行表，可每 15 秒抓取。
 - `GET /v1/config`（需要认证）：当前生效的全部 `COLLECTOR_*` 配置，令牌与主机路径已隐藏。启动时同样把生效值打印到日志；非法值直接拒绝启动，未知的 `COLLECTOR_*` 变量会打印警告。
 - `GET /v1/source-control` 读取固定 `zujuan` 公共暂停；`POST /v1/source-control/resume` 提交读取到的 `expectedRevision` 显式解除人工暂停。沿用 API 认证，不能指定其他 provider、URL 或会话；较新的暂停事件导致 409，解除人工暂停也不能缩短来源要求的冷却。
 - `GET /v1/source-budget` 读取当日共享配额及已用量；没有修改或清零接口。`GET /v1/health` 返回合并的 `sourceControl` 执行门槛，以及独立的 `sourceBudget`、`resources`。`ok=true` 只代表采集器可用；任何来源暂停、配额耗尽或资源不足都会阻止新任务，解除人工暂停不能解除其余限制。

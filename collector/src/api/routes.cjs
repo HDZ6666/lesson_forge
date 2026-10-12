@@ -14,7 +14,7 @@ const { readJson, safeEqual, sendAssetResponse, sendJson } = require('./http.cjs
 const { CollectorJobManager, intInRange } = require('./job_manager.cjs');
 const { publicJobAsync } = require('./progress.cjs');
 const { collectorReadiness } = require('../policies/collector_readiness.cjs');
-const { reclaimRun } = require('../storage/result_cleanup.cjs');
+const { Maintenance } = require('./maintenance.cjs');
 const { readFailurePage } = require('../storage/failure_pages.cjs');
 
 function queryBoolean(url, key) {
@@ -36,9 +36,18 @@ function createCollectorServer(options = {}) {
     options.readerPool ||
     new ReaderPool({
       threads: options.readerThreads ?? manager.config?.readerThreads ?? 2,
-      timeoutMs: options.readerTimeoutMs ?? manager.config?.readerTimeoutMs ?? 30000,
+      timeoutMs: options.readerTimeoutMs ?? manager.config?.readerTimeoutMs ?? 25000,
     });
   const read = (name, ...args) => readers.call(name, ...args);
+  // Reclaim and WAL checkpoints write for seconds to minutes; they run in
+  // their own worker so the API keeps answering.
+  const maintenance =
+    options.maintenance ||
+    new Maintenance({
+      threads: options.readerThreads ?? manager.config?.readerThreads ?? 2,
+      isJobActive: () => Boolean(manager.activeJobId),
+    });
+  manager.maintenance = maintenance;
   const server = http.createServer(async (request, response) => {
     try {
       const url = new URL(request.url || '/', 'http://collector.local');
@@ -54,7 +63,7 @@ function createCollectorServer(options = {}) {
         }
       }
       if (request.method === 'GET' && url.pathname === '/metrics') {
-        const body = renderMetrics({ manager, readers });
+        const body = renderMetrics({ manager, readers, maintenance });
         response.writeHead(200, {
           'content-type': 'text/plain; version=0.0.4; charset=utf-8',
           'content-length': Buffer.byteLength(body),
@@ -134,11 +143,15 @@ function createCollectorServer(options = {}) {
       const cleanupMatch = url.pathname.match(/^\/v1\/runs\/(\d+)\/reclaim$/);
       if (request.method === 'POST' && cleanupMatch) {
         const body = await readJson(request);
-        if (manager.activeJobId) {
-          sendJson(response, 409, { error: { code: 'cleanup_busy', message: '采集进行中，稍后自动回收' } });
-          return;
-        }
-        sendJson(response, 200, reclaimRun(manager.dbPath, manager.dataDir, cleanupMatch[1], body));
+        const result = await maintenance.run(
+          'reclaimRun',
+          cleanupMatch[1],
+          manager.dbPath,
+          manager.dataDir,
+          cleanupMatch[1],
+          body,
+        );
+        sendJson(response, 200, result);
         return;
       }
       const runCatalogMatch = url.pathname.match(/^\/v1\/runs\/([^/]+)\/catalogs\/?$/i);
@@ -335,6 +348,7 @@ function createCollectorServer(options = {}) {
   });
   server.collectorManager = manager;
   server.readerPool = readers;
+  server.maintenance = maintenance;
   server.once('close', () => {
     if (!options.readerPool) readers.close();
   });
