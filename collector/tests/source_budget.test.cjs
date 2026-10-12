@@ -20,7 +20,14 @@ function fixture(options = {}) {
   const dbPath = path.join(directory, 'collector.sqlite3');
   let now = Date.UTC(2026, 9, 3, 23, 59, 59);
   const budget = new SourceBudget(dbPath, { clock: () => now, ...options });
-  return { directory, dbPath, budget, advance: (ms) => { now += ms; } };
+  return {
+    directory,
+    dbPath,
+    budget,
+    advance: (ms) => {
+      now += ms;
+    },
+  };
 }
 
 test('当日主动请求配额跨教材和重启共享，到下一 UTC 日恢复而不改旧记录', () => {
@@ -35,8 +42,13 @@ test('当日主动请求配额跨教材和重启共享，到下一 UTC 日恢复
     f.advance(1001);
     assert.equal(next.status().paused, false);
     assert.equal(next.request(), 1);
-    assert.equal(next.withDb((db) => db.prepare('SELECT SUM(requests) AS n FROM collector_source_usage').get().n), 3);
-  } finally { fs.rmSync(f.directory, { recursive: true, force: true }); }
+    assert.equal(
+      next.withDb((db) => db.prepare('SELECT SUM(requests) AS n FROM collector_source_usage').get().n),
+      3,
+    );
+  } finally {
+    fs.rmSync(f.directory, { recursive: true, force: true });
+  }
 });
 
 test('开始身份幂等；最大启动本数不结束当前教材或禁止发现，来源请求仍共享', () => {
@@ -54,7 +66,9 @@ test('开始身份幂等；最大启动本数不结束当前教材或禁止发�
     assert.equal(f.budget.startRun('content:2', 'content'), true);
     assert.equal(f.budget.status().usage.bookStarts, 1);
     assert.throws(() => f.budget.startRun('metadata:2', 'content'), /运行身份/);
-  } finally { fs.rmSync(f.directory, { recursive: true, force: true }); }
+  } finally {
+    fs.rmSync(f.directory, { recursive: true, force: true });
+  }
 });
 
 test('两个真实子进程竞争请求配额，SQLite 原子领取最多允许配置次数', async () => {
@@ -64,35 +78,63 @@ test('两个真实子进程竞争请求配额，SQLite 原子领取最多允许�
     const b=new SourceBudget(process.argv[2],{requestLimit:37,clock:()=>Date.UTC(2026,9,3,23,59,59)});
     let accepted=0; for(let i=0;i<50;i++){try{b.request();accepted++;}catch(e){if(e.code!=='source_budget')throw e;}}
     process.stdout.write(String(accepted));`;
-  const run = () => new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, ['-e', script, modulePath, f.dbPath], { stdio: ['ignore', 'pipe', 'pipe'] });
-    let output = ''; child.stdout.on('data', (chunk) => { output += chunk; });
-    child.on('error', reject);
-    child.on('close', (code) => code === 0 ? resolve(Number(output)) : reject(new Error(`budget subprocess ${code}`)));
-  });
+  const run = () =>
+    new Promise((resolve, reject) => {
+      const child = spawn(process.execPath, ['-e', script, modulePath, f.dbPath], {
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      let output = '';
+      child.stdout.on('data', (chunk) => {
+        output += chunk;
+      });
+      child.on('error', reject);
+      child.on('close', (code) =>
+        code === 0 ? resolve(Number(output)) : reject(new Error(`budget subprocess ${code}`)),
+      );
+    });
   try {
     const accepted = await Promise.all([run(), run()]);
     assert.equal(accepted[0] + accepted[1], 37);
     assert.equal(f.budget.status().usage.requests, 37);
-  } finally { fs.rmSync(f.directory, { recursive: true, force: true }); }
+  } finally {
+    fs.rmSync(f.directory, { recursive: true, force: true });
+  }
 });
 
 test('探针/重试占用主动请求，额度耗尽后目录/教材/素材不再发新请求', async () => {
   const f = fixture({ requestLimit: 2 });
   let calls = 0;
-  const page = { evaluate: async () => { calls += 1; return { status: 500, text: 'busy' }; } };
-  const opts = { sourceBudget: f.budget, baseUrl: 'https://zujuan.xkw.com', bankPath: 'czsx', textbookId: '1', sleepFn: async () => {} };
+  const page = {
+    evaluate: async () => {
+      calls += 1;
+      return { status: 500, text: 'busy' };
+    },
+  };
+  const opts = {
+    sourceBudget: f.budget,
+    baseUrl: 'https://zujuan.xkw.com',
+    bankPath: 'czsx',
+    textbookId: '1',
+    sleepFn: async () => {},
+  };
   try {
     await assert.rejects(postQuestionList(page, opts, { externalId: '1' }, 1), SourceBudgetError);
     assert.equal(calls, 2);
     await assert.rejects(fetchCatalogTree(page, opts), SourceBudgetError);
     await assert.rejects(fetchTextbooksForVersion(page, { externalVersionId: '1' }, opts), SourceBudgetError);
-    page.goto = async () => { calls += 1; throw new Error('must not request'); };
+    page.goto = async () => {
+      calls += 1;
+      throw new Error('must not request');
+    };
     await assert.rejects(navigateToTextbook(page, 'https://zujuan.xkw.com/czsx/zj1/', opts), SourceBudgetError);
-    await assert.rejects(downloadAsset({ request: { get: page.goto } }, opts,
-      { sourceUrl: 'https://staticzujuan.xkw.com/a.png' }), SourceBudgetError);
+    await assert.rejects(
+      downloadAsset({ request: { get: page.goto } }, opts, { sourceUrl: 'https://staticzujuan.xkw.com/a.png' }),
+      SourceBudgetError,
+    );
     assert.equal(calls, 2);
-  } finally { fs.rmSync(f.directory, { recursive: true, force: true }); }
+  } finally {
+    fs.rmSync(f.directory, { recursive: true, force: true });
+  }
 });
 
 test('人工解除验证不能清零预算；提高部署上限也保留已用记录', () => {
@@ -106,28 +148,44 @@ test('人工解除验证不能清零预算；提高部署上限也保留已用�
     const changed = new SourceBudget(f.dbPath, { clock: f.budget.clock, requestLimit: 2 });
     assert.equal(changed.request(), 2);
     assert.throws(() => changed.request(), SourceBudgetError);
-    for (const value of [-1, 1.5, 'NaN', true]) assert.throws(() => new SourceBudget(f.dbPath, { requestLimit: value }), /非负整数/);
-  } finally { fs.rmSync(f.directory, { recursive: true, force: true }); }
+    for (const value of [-1, 1.5, 'NaN', true])
+      assert.throws(() => new SourceBudget(f.dbPath, { requestLimit: value }), /非负整数/);
+  } finally {
+    fs.rmSync(f.directory, { recursive: true, force: true });
+  }
 });
 
 test('资源检查区分存储卷，不公开路径；采集途中压力恢复后可继续', () => {
   let now = 0;
   let memory = 200;
   let data = 300;
-  const guard = new ResourceGuard({ paths: { data: '/private/data', profile: '/private/profile' },
-    minDiskMiB: 100, minMemoryMiB: 100, clock: () => now,
+  const guard = new ResourceGuard({
+    paths: { data: '/private/data', profile: '/private/profile' },
+    minDiskMiB: 100,
+    minMemoryMiB: 100,
+    clock: () => now,
     diskReader: (p) => (p.endsWith('data') ? data : 400) * 1024 * 1024,
-    memoryReader: () => memory * 1024 * 1024 });
+    memoryReader: () => memory * 1024 * 1024,
+  });
   guard.assertAllowed();
-  data = 50; now += 1001;
+  data = 50;
+  now += 1001;
   assert.throws(() => guard.assertAllowed(), ResourcePressureError);
   assert.equal(JSON.stringify(guard.status()).includes('/private'), false);
-  data = 300; memory = 99; now += 1001;
+  data = 300;
+  memory = 99;
+  now += 1001;
   assert.throws(() => guard.assertAllowed(), /内存/);
-  memory = 200; now += 1001;
+  memory = 200;
+  now += 1001;
   guard.assertAllowed();
-  const unknown = new ResourceGuard({ paths: { data: '/missing' }, minDiskMiB: 1,
-    diskReader: () => { throw new Error('unavailable'); } });
+  const unknown = new ResourceGuard({
+    paths: { data: '/missing' },
+    minDiskMiB: 1,
+    diskReader: () => {
+      throw new Error('unavailable');
+    },
+  });
   assert.throws(() => unknown.assertAllowed(), /无法确认/);
 });
 
@@ -143,13 +201,20 @@ test('健康组合状态取所有限制的最晚时间，解除来源不绕过�
     assert.equal(state.sourceControl.notBefore, '2026-10-04T00:09:59.000Z');
     assert.match(state.sourceControl.reason, /预算/);
     assert.match(state.sourceControl.reason, /内存/);
-  } finally { fs.rmSync(f.directory, { recursive: true, force: true }); }
+  } finally {
+    fs.rmSync(f.directory, { recursive: true, force: true });
+  }
 });
 
 test('API 预算配置需认证；任务载荷不能覆盖额度', async () => {
   const f = fixture({ requestLimit: 1 });
-  const manager = new CollectorJobManager({ dbPath: f.dbPath,
-    sourceBudgetOptions: { requestLimit: 1 }, spawnImpl: () => { throw new Error('must not start'); } });
+  const manager = new CollectorJobManager({
+    dbPath: f.dbPath,
+    sourceBudgetOptions: { requestLimit: 1 },
+    spawnImpl: () => {
+      throw new Error('must not start');
+    },
+  });
   manager.sourceBudget.request();
   const server = createCollectorServer({ manager, token: 'budget-fixture' });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -161,21 +226,31 @@ test('API 预算配置需认证；任务载荷不能覆盖额度', async () => {
     assert.equal(health.ok, true);
     assert.equal(health.sourceControl.paused, true);
     assert.equal(health.sourceBudget.usage.requests, 1);
-    const response = await fetch(`${base}/v1/jobs`, { method: 'POST', headers,
-      body: JSON.stringify({ runType: 'metadata', acknowledgeSourcePolicy: true, requestLimit: 0 }) });
+    const response = await fetch(`${base}/v1/jobs`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ runType: 'metadata', acknowledgeSourcePolicy: true, requestLimit: 0 }),
+    });
     assert.equal(response.status, 423);
     assert.equal((await response.json()).error.code, 'source_budget');
     const budget = await (await fetch(`${base}/v1/source-budget`, { headers })).json();
     assert.equal(budget.usage.requests, 1);
     const payload = { expectedRevision: 0, requests: 0, books: 0, activeSeconds: 0, downloadMiB: 0 };
-    assert.equal((await fetch(`${base}/v1/source-budget`, { method: 'PUT', body: JSON.stringify(payload) })).status, 401);
+    assert.equal(
+      (await fetch(`${base}/v1/source-budget`, { method: 'PUT', body: JSON.stringify(payload) })).status,
+      401,
+    );
     const changed = await fetch(`${base}/v1/source-budget`, { method: 'PUT', headers, body: JSON.stringify(payload) });
     assert.equal(changed.status, 200);
     assert.equal((await changed.json()).paused, false);
     assert.equal(manager.sourceBudget.status().usage.requests, 1);
-    assert.equal((await fetch(`${base}/v1/source-budget`, { method: 'PUT', headers, body: JSON.stringify(payload) })).status, 409);
+    assert.equal(
+      (await fetch(`${base}/v1/source-budget`, { method: 'PUT', headers, body: JSON.stringify(payload) })).status,
+      409,
+    );
   } finally {
-    await manager.shutdown(); await new Promise((resolve) => server.close(resolve));
+    await manager.shutdown();
+    await new Promise((resolve) => server.close(resolve));
     fs.rmSync(f.directory, { recursive: true, force: true });
   }
 });
@@ -189,39 +264,75 @@ test('采集时长共享、UTC 跨日计数与重启不退款', () => {
     f.budget.assertRunning();
     assert.equal(f.budget.status().day, '2026-10-04');
     assert.equal(f.budget.status().usage.activeMilliseconds, 1000);
-    f.advance(1000); f.budget.assertRunning();
+    f.advance(1000);
+    f.budget.assertRunning();
     assert.equal(f.budget.status().usage.activeMilliseconds, 2000);
     f.advance(1000);
-    assert.throws(()=>f.budget.request(), SourceBudgetError);
-    const restarted=new SourceBudget(f.dbPath,{clock:f.budget.clock,activeSeconds:2});
-    assert.throws(()=>restarted.assertCanStart(), SourceBudgetError);
-  } finally { f.budget.stopTiming(); fs.rmSync(f.directory,{recursive:true,force:true}); }
+    assert.throws(() => f.budget.request(), SourceBudgetError);
+    const restarted = new SourceBudget(f.dbPath, { clock: f.budget.clock, activeSeconds: 2 });
+    assert.throws(() => restarted.assertCanStart(), SourceBudgetError);
+  } finally {
+    f.budget.stopTiming();
+    fs.rmSync(f.directory, { recursive: true, force: true });
+  }
 });
 
 test('下载失败越过额度的响应块也保存字节用量，后续请求禁止', () => {
-  const f=fixture({downloadMiB:1});
+  const f = fixture({ downloadMiB: 1 });
   try {
     f.budget.downloadReceived(1048570);
-    assert.throws(()=>f.budget.downloadReceived(100),SourceBudgetError);
-    assert.equal(f.budget.status().usage.downloadBytes,1048670);
-    assert.throws(()=>f.budget.request(),SourceBudgetError);
-  } finally {fs.rmSync(f.directory,{recursive:true,force:true});}
+    assert.throws(() => f.budget.downloadReceived(100), SourceBudgetError);
+    assert.equal(f.budget.status().usage.downloadBytes, 1048670);
+    assert.throws(() => f.budget.request(), SourceBudgetError);
+  } finally {
+    fs.rmSync(f.directory, { recursive: true, force: true });
+  }
 });
 
 test('真实流式素材复用会话且拒绝越界重定向，超额停止读取', async () => {
-  const {openAssetResponse}=require('../src/assets/request.cjs');
-  let received=0,requests=0,cookieUrl;
-  const context={cookies:async url=>{cookieUrl=url;return [{name:'session',value:'fixture'}]},pages:()=>[]};
-  const response=await openAssetResponse(context,'https://img.xkw.com/a.png',{
-    assetFetch:async(url,opts)=>{requests++;assert.equal(opts.headers.cookie,'session=fixture');return new Response(new ReadableStream({pull(controller){received++;controller.enqueue(new Uint8Array(65536));}}),{headers:{'content-type':'image/png'}})},
-    sourceBudget:{request(){},downloadReceived(){if(received>=2)throw new SourceBudgetError({reason:'素材预算耗尽'})}},
+  const { openAssetResponse } = require('../src/assets/request.cjs');
+  let received = 0,
+    requests = 0,
+    cookieUrl;
+  const context = {
+    cookies: async (url) => {
+      cookieUrl = url;
+      return [{ name: 'session', value: 'fixture' }];
+    },
+    pages: () => [],
+  };
+  const response = await openAssetResponse(context, 'https://img.xkw.com/a.png', {
+    assetFetch: async (url, opts) => {
+      requests++;
+      assert.equal(opts.headers.cookie, 'session=fixture');
+      return new Response(
+        new ReadableStream({
+          pull(controller) {
+            received++;
+            controller.enqueue(new Uint8Array(65536));
+          },
+        }),
+        { headers: { 'content-type': 'image/png' } },
+      );
+    },
+    sourceBudget: {
+      request() {},
+      downloadReceived() {
+        if (received >= 2) throw new SourceBudgetError({ reason: '素材预算耗尽' });
+      },
+    },
   });
-  await assert.rejects(response.body(),SourceBudgetError);
+  await assert.rejects(response.body(), SourceBudgetError);
   await response.dispose();
-  assert.ok(received<=4);assert.equal(requests,1);assert.equal(cookieUrl,'https://img.xkw.com/a.png');
-  await assert.rejects(openAssetResponse(context,'https://img.xkw.com/a.png',{
-    assetFetch:async()=>new Response('',{status:302,headers:{location:'https://evil.example/a'}}),
-  }),/域名|host|允许/);
+  assert.ok(received <= 4);
+  assert.equal(requests, 1);
+  assert.equal(cookieUrl, 'https://img.xkw.com/a.png');
+  await assert.rejects(
+    openAssetResponse(context, 'https://img.xkw.com/a.png', {
+      assetFetch: async () => new Response('', { status: 302, headers: { location: 'https://evil.example/a' } }),
+    }),
+    /域名|host|允许/,
+  );
 });
 
 test('额度配置持久化、跨实例即时生效，解除额度不清空用量或解除来源验证', () => {
@@ -232,7 +343,13 @@ test('额度配置持久化、跨实例即时生效，解除额度不清空用�
     f.budget.startRun('content:1', 'content');
     const source = new SourceControl(f.dbPath, { clock: f.budget.clock });
     source.markManual('需要人工验证');
-    const saved = f.budget.updateSettings({ expectedRevision: 0, requests: 0, books: 0, activeSeconds: 0, downloadMiB: 0 });
+    const saved = f.budget.updateSettings({
+      expectedRevision: 0,
+      requests: 0,
+      books: 0,
+      activeSeconds: 0,
+      downloadMiB: 0,
+    });
     assert.equal(saved.revision, 1);
     assert.equal(saved.paused, false);
     assert.equal(saved.usage.requests, 1);
@@ -242,12 +359,20 @@ test('额度配置持久化、跨实例即时生效，解除额度不清空用�
     assert.equal(restarted.status().settings.requests, 0);
     assert.equal(restarted.request(), 3);
     assert.equal(source.status().manualRequired, true);
-    assert.throws(() => worker.updateSettings({ expectedRevision: 0, requests: 5, books: 0, activeSeconds: 0, downloadMiB: 0 }), /已被修改/);
+    assert.throws(
+      () => worker.updateSettings({ expectedRevision: 0, requests: 5, books: 0, activeSeconds: 0, downloadMiB: 0 }),
+      /已被修改/,
+    );
     restarted.updateSettings({ expectedRevision: 1, requests: 3, books: 0, activeSeconds: 2, downloadMiB: 2 });
     assert.throws(() => worker.request(), SourceBudgetError);
     assert.equal(worker.status().limits.activeMilliseconds, 2000);
     assert.equal(worker.status().limits.downloadBytes, 2097152);
-    assert.throws(() => worker.updateSettings({ expectedRevision: 2, requests: -1, books: 0, activeSeconds: 0, downloadMiB: 0 }), /非负整数/);
+    assert.throws(
+      () => worker.updateSettings({ expectedRevision: 2, requests: -1, books: 0, activeSeconds: 0, downloadMiB: 0 }),
+      /非负整数/,
+    );
     assert.equal(worker.status().revision, 2);
-  } finally { fs.rmSync(f.directory, { recursive: true, force: true }); }
+  } finally {
+    fs.rmSync(f.directory, { recursive: true, force: true });
+  }
 });

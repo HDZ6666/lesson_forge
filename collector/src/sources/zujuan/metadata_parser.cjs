@@ -31,11 +31,12 @@ function normalizeIsNew(input) {
     const className = String(input.className || input.class || '');
     const attrs = input.attributes || {};
     if (
-      /\bnew-version\b/.test(className)
-      || attrs['data-new'] === 'true'
-      || attrs['data-is-new'] === 'Y'
-      || input.isNew === true
-    ) return 'Y';
+      /\bnew-version\b/.test(className) ||
+      attrs['data-new'] === 'true' ||
+      attrs['data-is-new'] === 'Y' ||
+      input.isNew === true
+    )
+      return 'Y';
     if ('className' in input || 'class' in input || input.attributes) return 'N';
     return null;
   }
@@ -59,9 +60,7 @@ function textbookRawJson(textbook) {
 }
 
 function textbookListSignature(items) {
-  return (items || [])
-    .map((item) => `${item.externalTextbookId || ''}:${item.textbookName || ''}`)
-    .join('|');
+  return (items || []).map((item) => `${item.externalTextbookId || ''}:${item.textbookName || ''}`).join('|');
 }
 
 function normalizeVersionRecords(items) {
@@ -122,10 +121,11 @@ function parseVersionsFromHtml(html, extra = {}) {
     throw new StopCrawlError('页面缺少版本选择区域 #chapter_textbook_version。', 'version_contract');
   }
   const raw = parseAnchors(inner).map((anchor, index) => ({
-    externalVersionId: anchor.attributes.versionid
-      || anchor.attributes['data-versionid']
-      || anchor.attributes['data-version-id']
-      || null,
+    externalVersionId:
+      anchor.attributes.versionid ||
+      anchor.attributes['data-versionid'] ||
+      anchor.attributes['data-version-id'] ||
+      null,
     versionName: anchor.text,
     className: anchor.className,
     selected: /\bselected\b/.test(anchor.className),
@@ -145,9 +145,8 @@ function parseTextbooksFromApiHtml(html, options = {}) {
   if (protection.terminalBlock || (protection.transientChallenge && !protection.hasContent)) {
     throw new StopCrawlError(protectionStopMessage(protection), 'challenge');
   }
-  const wrapped = sliceElementById(text, 'chapter_textbooks') == null
-    ? `<div id="chapter_textbooks">${text}</div>`
-    : text;
+  const wrapped =
+    sliceElementById(text, 'chapter_textbooks') == null ? `<div id="chapter_textbooks">${text}</div>` : text;
   return parseTextbooksFromHtml(wrapped, options);
 }
 
@@ -156,31 +155,35 @@ function parseTextbooksFromHtml(html, options = {}) {
   if (inner == null) {
     throw new StopCrawlError('页面缺少教材选择区域 #chapter_textbooks。', 'textbook_contract');
   }
-  const raw = parseAnchors(inner).map((anchor, index) => {
-    const href = anchor.attributes.href || '';
-    const fromHref = href.match(/\/zj(\d+)\b/);
-    return {
-      externalTextbookId: anchor.attributes['chapter-id'] || (fromHref ? fromHref[1] : null),
-      textbookName: anchor.text,
-      href,
-      qbmid: anchor.attributes['data-qbmid'] || null,
-      selected: /\bselected\b/.test(anchor.className),
-      className: anchor.className,
-      sortOrder: index,
-      attributes: anchor.attributes,
-    };
-  }).filter((item) => item.textbookName && !item.textbookName.includes('加载中'));
+  const raw = parseAnchors(inner)
+    .map((anchor, index) => {
+      const href = anchor.attributes.href || '';
+      const fromHref = href.match(/\/zj(\d+)\b/);
+      return {
+        externalTextbookId: anchor.attributes['chapter-id'] || (fromHref ? fromHref[1] : null),
+        textbookName: anchor.text,
+        href,
+        qbmid: anchor.attributes['data-qbmid'] || null,
+        selected: /\bselected\b/.test(anchor.className),
+        className: anchor.className,
+        sortOrder: index,
+        attributes: anchor.attributes,
+      };
+    })
+    .filter((item) => item.textbookName && !item.textbookName.includes('加载中'));
   return normalizeTextbookRecords(raw, options);
 }
 
 function parseBootstrapChapterFromHtml(html) {
   const treeOpen = html.match(/<div\b[^>]*\btk-tree\b[^>]*>/i);
   const treeIdFromClassFirst = treeOpen?.[0].match(/\btree-id="([^"]+)"/i)?.[1] || null;
-  const level1 = html.match(/<li\b[^>]*\bdata-level="1"[^>]*>/i)
-    || html.match(/<li\b[^>]*\btree-id="[^"]+"[^>]*\bdata-level="1"[^>]*>/i);
-  const bootstrapFromLevel = level1?.[0].match(/\btree-id="([^"]+)"/i)?.[1]
-    || html.match(/<li\b[^>]*\btree-id="([^"]+)"[^>]*\bdata-level="1"/i)?.[1]
-    || null;
+  const level1 =
+    html.match(/<li\b[^>]*\bdata-level="1"[^>]*>/i) ||
+    html.match(/<li\b[^>]*\btree-id="[^"]+"[^>]*\bdata-level="1"[^>]*>/i);
+  const bootstrapFromLevel =
+    level1?.[0].match(/\btree-id="([^"]+)"/i)?.[1] ||
+    html.match(/<li\b[^>]*\btree-id="([^"]+)"[^>]*\bdata-level="1"/i)?.[1] ||
+    null;
   const fallbackLevel = html.match(/<li\b[^>]*\bdata-level="1"[^>]*\btree-id="([^"]+)"/i)?.[1] || null;
   return {
     textbookTreeId: treeIdFromClassFirst,

@@ -9,8 +9,14 @@ const { quoteIdentifier, sha256 } = require('../shared/utils.cjs');
 const { migrateRunSnapshotSchema } = require('./run_snapshots.cjs');
 
 function ensureColumn(db, table, column, definition) {
-  const columns = new Set(db.prepare(`PRAGMA table_info(${quoteIdentifier(table)})`).all().map((row) => String(row.name)));
-  if (!columns.has(column)) db.exec(`ALTER TABLE ${quoteIdentifier(table)} ADD COLUMN ${quoteIdentifier(column)} ${definition}`);
+  const columns = new Set(
+    db
+      .prepare(`PRAGMA table_info(${quoteIdentifier(table)})`)
+      .all()
+      .map((row) => String(row.name)),
+  );
+  if (!columns.has(column))
+    db.exec(`ALTER TABLE ${quoteIdentifier(table)} ADD COLUMN ${quoteIdentifier(column)} ${definition}`);
 }
 
 function ensureCollectorSchema(db) {

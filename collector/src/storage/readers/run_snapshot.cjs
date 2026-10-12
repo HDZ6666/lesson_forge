@@ -79,9 +79,16 @@ function readRunSnapshot(dbPath, runId, options = {}) {
     }
     const runColumns = tableColumns(db, 'sync_runs');
     const requiredRunColumns = [
-      'finished_at', 'scope_json', 'error_count', 'snapshot_locked_at',
-      'snapshot_complete', 'catalog_item_count', 'question_item_count',
-      'question_catalog_count', 'question_tag_count', 'question_asset_count',
+      'finished_at',
+      'scope_json',
+      'error_count',
+      'snapshot_locked_at',
+      'snapshot_complete',
+      'catalog_item_count',
+      'question_item_count',
+      'question_catalog_count',
+      'question_tag_count',
+      'question_asset_count',
     ];
     const missingRunColumns = requiredRunColumns.filter((column) => !runColumns.has(column));
     if (missingRunColumns.length) {
@@ -116,11 +123,15 @@ function readRunSnapshot(dbPath, runId, options = {}) {
     const rows = {};
     let totalRows = 0;
     for (const table of tableNamesForSnapshot) {
-      const found = db.prepare(`
+      const found = db
+        .prepare(
+          `
         SELECT * FROM "${table}"
         WHERE run_id = ? AND provider = ? AND textbook_external_id = ?
         LIMIT ?
-      `).all(run.id, PROVIDER, textbookExternalId, MAX_RUN_SNAPSHOT_ROWS + 1);
+      `,
+        )
+        .all(run.id, PROVIDER, textbookExternalId, MAX_RUN_SNAPSHOT_ROWS + 1);
       if (found.length > MAX_RUN_SNAPSHOT_ROWS) {
         throw httpError('运行快照超过安全响应上限，请缩小教材范围', 413, 'snapshot_too_large');
       }
@@ -140,8 +151,10 @@ function readRunSnapshot(dbPath, runId, options = {}) {
       throw httpError(`内容运行 ${run.id} 的快照缺少必要目录、题目或关系`, 409, 'snapshot_incomplete');
     }
     for (const relation of questionCatalogs) {
-      if (!questionIds.has(String(relation.question_external_id || ''))
-        || !catalogIds.has(String(relation.catalog_external_id || ''))) {
+      if (
+        !questionIds.has(String(relation.question_external_id || '')) ||
+        !catalogIds.has(String(relation.catalog_external_id || ''))
+      ) {
         throw httpError(`内容运行 ${run.id} 的目录关系包含孤儿行`, 409, 'snapshot_incomplete');
       }
     }
@@ -183,20 +196,22 @@ function readRunSnapshot(dbPath, runId, options = {}) {
         ['sync_run_question_tags', 'questionTagCount'],
         ['sync_run_question_assets', 'questionAssetCount'],
       ]) {
-        aggregateCounts[field] = Number(db.prepare(`
+        aggregateCounts[field] = Number(
+          db
+            .prepare(
+              `
           SELECT COUNT(*) AS value FROM "${table}"
           WHERE run_id = ? AND provider = ?
-        `).get(run.id, PROVIDER).value || 0);
+        `,
+            )
+            .get(run.id, PROVIDER).value || 0,
+        );
       }
     }
     for (const field of Object.keys(declaredCounts)) {
       const actual = wholeRunScope ? counts[field] : aggregateCounts[field];
       if (Number(declaredCounts[field]) !== Number(actual)) {
-        throw httpError(
-          `内容运行 ${run.id} 的 ${field} 计数不一致`,
-          409,
-          'snapshot_incomplete',
-        );
+        throw httpError(`内容运行 ${run.id} 的 ${field} 计数不一致`, 409, 'snapshot_incomplete');
       }
     }
     // Also expose the short names used by older service clients.  The
@@ -289,11 +304,18 @@ function readRunSnapshotSummary(dbPath, runId, expectedTextbookExternalId = null
     const filter = ' AND provider = ? AND textbook_external_id = ?';
     const parameters = [run.id, PROVIDER, scopeId];
     const availableTables = tableNames(db);
-    const countFor = (table) => availableTables.has(table)
-      ? Number(db.prepare(`
+    const countFor = (table) =>
+      availableTables.has(table)
+        ? Number(
+            db
+              .prepare(
+                `
         SELECT COUNT(*) AS value FROM "${table}" WHERE run_id = ?${filter}
-      `).get(...parameters).value || 0)
-      : 0;
+      `,
+              )
+              .get(...parameters).value || 0,
+          )
+        : 0;
     const counts = {
       catalogItemCount: countFor('sync_run_catalog_items'),
       questionItemCount: countFor('sync_run_question_items'),
@@ -373,11 +395,7 @@ function readRunSnapshotSummary(dbPath, runId, expectedTextbookExternalId = null
         };
         for (const [key, expectedCount] of Object.entries(expectedCounts)) {
           if (Number(expectedCount) !== Number(counts[key])) {
-            throw httpError(
-              `内容运行 ${run.id} 的 ${key} 计数不一致`,
-              409,
-              'snapshot_incomplete',
-            );
+            throw httpError(`内容运行 ${run.id} 的 ${key} 计数不一致`, 409, 'snapshot_incomplete');
           }
         }
       } else {
@@ -389,10 +407,16 @@ function readRunSnapshotSummary(dbPath, runId, expectedTextbookExternalId = null
           ['sync_run_question_tags', 'questionTagCount'],
           ['sync_run_question_assets', 'questionAssetCount'],
         ]) {
-          aggregateCounts[field] = Number(db.prepare(`
+          aggregateCounts[field] = Number(
+            db
+              .prepare(
+                `
             SELECT COUNT(*) AS value FROM "${table}"
             WHERE run_id = ? AND provider = ?
-          `).get(run.id, PROVIDER).value || 0);
+          `,
+              )
+              .get(run.id, PROVIDER).value || 0,
+          );
         }
         const expectedCounts = {
           catalogItemCount: run.catalogItemCount,
@@ -403,11 +427,7 @@ function readRunSnapshotSummary(dbPath, runId, expectedTextbookExternalId = null
         };
         for (const [key, expectedCount] of Object.entries(expectedCounts)) {
           if (Number(expectedCount) !== Number(aggregateCounts[key])) {
-            throw httpError(
-              `内容运行 ${run.id} 的 ${key} 计数不一致`,
-              409,
-              'snapshot_incomplete',
-            );
+            throw httpError(`内容运行 ${run.id} 的 ${key} 计数不一致`, 409, 'snapshot_incomplete');
           }
         }
       }
@@ -439,9 +459,11 @@ function readRunSnapshotSummary(dbPath, runId, expectedTextbookExternalId = null
       const errorTableAvailable = tableNames(db).has('sync_errors');
       output.errors = errorTableAvailable
         ? (() => {
-          const errorColumns = tableColumns(db, 'sync_errors');
-          const orderBy = errorColumns.has('id') ? ' ORDER BY id ASC' : '';
-          return db.prepare(`
+            const errorColumns = tableColumns(db, 'sync_errors');
+            const orderBy = errorColumns.has('id') ? ' ORDER BY id ASC' : '';
+            return db
+              .prepare(
+                `
             SELECT run_id,
                    ${optionalSelect(errorColumns, '', 'source_url')},
                    ${optionalSelect(errorColumns, '', 'stage')},
@@ -449,14 +471,17 @@ function readRunSnapshotSummary(dbPath, runId, expectedTextbookExternalId = null
                    ${optionalSelect(errorColumns, '', 'message')},
                    ${optionalSelect(errorColumns, '', 'created_at')}
             FROM sync_errors WHERE run_id = ?${orderBy} LIMIT ${MAX_RUN_ERRORS}
-          `).all(run.id).map((row) => ({
-            sourceUrl: boundedString(row.source_url, 4000),
-            stage: boundedString(row.stage, 200),
-            errorCode: boundedString(row.error_code, 200),
-            message: boundedString(row.message, 4000),
-            createdAt: boundedString(row.created_at, 80),
-          }));
-        })()
+          `,
+              )
+              .all(run.id)
+              .map((row) => ({
+                sourceUrl: boundedString(row.source_url, 4000),
+                stage: boundedString(row.stage, 200),
+                errorCode: boundedString(row.error_code, 200),
+                message: boundedString(row.message, 4000),
+                createdAt: boundedString(row.created_at, 80),
+              }));
+          })()
         : [];
     }
 
@@ -511,51 +536,83 @@ function readRunSnapshotScopes(dbPath, runId) {
     assertSnapshotTables(db);
     const ids = new Set(run.textbookExternalIds || []);
     for (const table of ['sync_run_catalog_items', 'sync_run_question_items']) {
-      for (const row of db.prepare(`
+      for (const row of db
+        .prepare(
+          `
         SELECT DISTINCT textbook_external_id
         FROM ${table} WHERE run_id = ? AND provider = ?
-      `).all(run.id, PROVIDER)) {
+      `,
+        )
+        .all(run.id, PROVIDER)) {
         if (row.textbook_external_id != null) ids.add(String(row.textbook_external_id));
       }
     }
     const errors = tableNames(db).has('sync_errors')
       ? (() => {
-        const errorColumns = tableColumns(db, 'sync_errors');
-        const orderBy = errorColumns.has('id') ? ' ORDER BY id ASC' : '';
-        return db.prepare(`
+          const errorColumns = tableColumns(db, 'sync_errors');
+          const orderBy = errorColumns.has('id') ? ' ORDER BY id ASC' : '';
+          return db
+            .prepare(
+              `
           SELECT ${optionalSelect(errorColumns, '', 'stage')},
                  ${optionalSelect(errorColumns, '', 'message')}
           FROM sync_errors
           WHERE run_id = ?${orderBy} LIMIT ${MAX_RUN_ERRORS}
-        `).all(run.id);
-      })()
+        `,
+            )
+            .all(run.id);
+        })()
       : [];
     return [...ids].map((textbookExternalId) => {
-      const catalogCount = Number(db.prepare(`
+      const catalogCount = Number(
+        db
+          .prepare(
+            `
         SELECT COUNT(*) AS n FROM sync_run_catalog_items
         WHERE run_id = ? AND provider = ? AND textbook_external_id = ?
-      `).get(run.id, PROVIDER, textbookExternalId).n || 0);
-      const questionCount = Number(db.prepare(`
+      `,
+          )
+          .get(run.id, PROVIDER, textbookExternalId).n || 0,
+      );
+      const questionCount = Number(
+        db
+          .prepare(
+            `
         SELECT COUNT(*) AS n FROM sync_run_question_items
         WHERE run_id = ? AND provider = ? AND textbook_external_id = ?
-      `).get(run.id, PROVIDER, textbookExternalId).n || 0);
-      const questionCatalogCount = Number(db.prepare(`
+      `,
+          )
+          .get(run.id, PROVIDER, textbookExternalId).n || 0,
+      );
+      const questionCatalogCount = Number(
+        db
+          .prepare(
+            `
         SELECT COUNT(*) AS n FROM sync_run_question_catalogs
         WHERE run_id = ? AND provider = ? AND textbook_external_id = ?
-      `).get(run.id, PROVIDER, textbookExternalId).n || 0);
-      const scopedCount = (table) => tableNames(db).has(table)
-        ? Number(db.prepare(`
+      `,
+          )
+          .get(run.id, PROVIDER, textbookExternalId).n || 0,
+      );
+      const scopedCount = (table) =>
+        tableNames(db).has(table)
+          ? Number(
+              db
+                .prepare(
+                  `
           SELECT COUNT(*) AS n FROM "${table}"
           WHERE run_id = ? AND provider = ? AND textbook_external_id = ?
-        `).get(run.id, PROVIDER, textbookExternalId).n || 0)
-        : 0;
+        `,
+                )
+                .get(run.id, PROVIDER, textbookExternalId).n || 0,
+            )
+          : 0;
       const questionTagCount = scopedCount('sync_run_question_tags');
       const questionAssetCount = scopedCount('sync_run_question_assets');
       return {
         externalTextbookId: textbookExternalId,
         textbookName: boundedString(
-          run.scope?.textbookName
-            || run.scope?.textbookNames?.[run.textbookExternalIds?.indexOf(textbookExternalId)],
+          run.scope?.textbookName || run.scope?.textbookNames?.[run.textbookExternalIds?.indexOf(textbookExternalId)],
           4000,
         ),
         collectorRunId: run.id,

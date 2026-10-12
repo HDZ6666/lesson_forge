@@ -10,76 +10,111 @@
 
 const { QuestionSyncError } = require('../../shared/errors.cjs');
 const { jsonStringify, normalizeId, nowIso, sha256, sqliteValue } = require('../../shared/utils.cjs');
-const { DEFAULT_PAGE_CAPACITY, PAGE_RESULT, PROVIDER, SCAN_ISSUE_RESULTS } = require('../../sources/zujuan/constants.cjs');
+const {
+  DEFAULT_PAGE_CAPACITY,
+  PAGE_RESULT,
+  PROVIDER,
+  SCAN_ISSUE_RESULTS,
+} = require('../../sources/zujuan/constants.cjs');
 const { finalizeQuestion, normalizeAssetType } = require('../../sources/zujuan/question_parser.cjs');
 const { assetKey: canonicalAssetKey } = require('../../qbpkg/normalize.cjs');
 const { growTargetPages } = require('../../policies/pagination.cjs');
 
 class PageRepoMethods {
   getQuestion(externalId) {
-    return this.db.prepare('SELECT * FROM questions WHERE provider = ? AND external_id = ?')
-      .get(PROVIDER, String(externalId)) || null;
+    return (
+      this.db
+        .prepare('SELECT * FROM questions WHERE provider = ? AND external_id = ?')
+        .get(PROVIDER, String(externalId)) || null
+    );
   }
 
   getRunCheckpoint(runId, scopeKey) {
-    const row = this.db.prepare(`
+    const row = this.db
+      .prepare(
+        `
       SELECT last_completed_page FROM sync_run_checkpoints
       WHERE run_id = ? AND provider = ? AND scope_key = ?
-    `).get(Number(runId), PROVIDER, String(scopeKey));
+    `,
+      )
+      .get(Number(runId), PROVIDER, String(scopeKey));
     return Number(row?.last_completed_page || 0);
   }
 
   getCheckpoint(scopeKey) {
-    const row = this.db.prepare('SELECT last_completed_page FROM sync_checkpoints WHERE scope_key = ?')
+    const row = this.db
+      .prepare('SELECT last_completed_page FROM sync_checkpoints WHERE scope_key = ?')
       .get(String(scopeKey));
     return Number(row?.last_completed_page || 0);
   }
 
   getRunPageSignatures(runId, catalogId) {
-    return this.db.prepare(`
+    return this.db
+      .prepare(
+        `
       SELECT page_number, page_signature, question_count, question_ids_json,
         result_type, attempt_count, error_code
       FROM sync_run_catalog_pages
       WHERE run_id = ? AND provider = ? AND catalog_external_id = ?
       ORDER BY page_number ASC
-    `).all(Number(runId), PROVIDER, String(catalogId)).map((row) => ({
-      pageNumber: Number(row.page_number),
-      signature: String(row.page_signature || ''),
-      questionCount: Number(row.question_count || 0),
-      resultType: String(row.result_type || PAGE_RESULT.SUCCESS),
-      attemptCount: Number(row.attempt_count || 1),
-      errorCode: row.error_code || null,
-      questionIds: (() => {
-        try { return JSON.parse(row.question_ids_json || '[]').map(String); } catch { return []; }
-      })(),
-    }));
+    `,
+      )
+      .all(Number(runId), PROVIDER, String(catalogId))
+      .map((row) => ({
+        pageNumber: Number(row.page_number),
+        signature: String(row.page_signature || ''),
+        questionCount: Number(row.question_count || 0),
+        resultType: String(row.result_type || PAGE_RESULT.SUCCESS),
+        attemptCount: Number(row.attempt_count || 1),
+        errorCode: row.error_code || null,
+        questionIds: (() => {
+          try {
+            return JSON.parse(row.question_ids_json || '[]').map(String);
+          } catch {
+            return [];
+          }
+        })(),
+      }));
   }
 
   lastContiguousSuccessfulPage(runId, textbookId, catalogId) {
-    const rows = this.db.prepare(`
+    const rows = this.db
+      .prepare(
+        `
       SELECT page_number, result_type, question_count
       FROM sync_run_catalog_pages
       WHERE run_id = ? AND provider = ? AND textbook_external_id = ?
         AND catalog_external_id = ?
       ORDER BY page_number ASC
-    `).all(Number(runId), PROVIDER, String(textbookId), String(catalogId));
-    const success = new Set(rows
-      .filter((row) => String(row.result_type || PAGE_RESULT.SUCCESS) === PAGE_RESULT.SUCCESS
-        && Number(row.question_count || 0) > 0)
-      .map((row) => Number(row.page_number)));
+    `,
+      )
+      .all(Number(runId), PROVIDER, String(textbookId), String(catalogId));
+    const success = new Set(
+      rows
+        .filter(
+          (row) =>
+            String(row.result_type || PAGE_RESULT.SUCCESS) === PAGE_RESULT.SUCCESS &&
+            Number(row.question_count || 0) > 0,
+        )
+        .map((row) => Number(row.page_number)),
+    );
     let last = 0;
     while (success.has(last + 1)) last += 1;
     return last;
   }
 
   catalogPageIssueCounts(runId, textbookId, catalogId) {
-    const rows = this.db.prepare(`
+    const rows = this.db
+      .prepare(
+        `
       SELECT result_type, COUNT(*) AS n
       FROM sync_run_catalog_pages
       WHERE run_id = ? AND provider = ? AND textbook_external_id = ?
         AND catalog_external_id = ?
       GROUP BY result_type
-    `).all(Number(runId), PROVIDER, String(textbookId), String(catalogId));
+    `,
+      )
+      .all(Number(runId), PROVIDER, String(textbookId), String(catalogId));
     const counts = {
       failedPageCount: 0,
       duplicatePageCount: 0,
@@ -101,13 +136,18 @@ class PageRepoMethods {
   }
 
   uniqueCatalogQuestionCount(runId, textbookId, catalogId) {
-    return Number(this.db.prepare(`
+    return Number(
+      this.db
+        .prepare(
+          `
       SELECT COUNT(DISTINCT question_external_id) AS n
       FROM sync_run_question_catalogs
       WHERE run_id = ? AND textbook_external_id = ? AND catalog_external_id = ?
-    `).get(Number(runId), String(textbookId), String(catalogId))?.n || 0);
+    `,
+        )
+        .get(Number(runId), String(textbookId), String(catalogId))?.n || 0,
+    );
   }
-
 
   recordPageAttempt({
     runId,
@@ -135,14 +175,18 @@ class PageRepoMethods {
     const questionCount = resultType === PAGE_RESULT.SUCCESS ? ids.length : 0;
     this.db.exec('BEGIN IMMEDIATE;');
     try {
-      const existing = this.db.prepare(`
+      const existing = this.db
+        .prepare(
+          `
         SELECT attempt_count, first_seen_at FROM sync_run_catalog_pages
         WHERE run_id = ? AND provider = ? AND textbook_external_id = ?
           AND catalog_external_id = ? AND page_number = ?
-      `).get(
-        Number(runId), PROVIDER, String(textbookExternalId), catalogId, Number(pageNumber),
-      );
-      this.db.prepare(`
+      `,
+        )
+        .get(Number(runId), PROVIDER, String(textbookExternalId), catalogId, Number(pageNumber));
+      this.db
+        .prepare(
+          `
         INSERT INTO sync_run_catalog_pages (
           run_id, provider, textbook_external_id, catalog_external_id,
           page_number, page_signature, question_count, question_ids_json, observed_at,
@@ -161,19 +205,39 @@ class PageRepoMethods {
           raw_snapshot_path = COALESCE(excluded.raw_snapshot_path, sync_run_catalog_pages.raw_snapshot_path),
           finished_at = excluded.finished_at,
           new_question_count = excluded.new_question_count
-      `).run(
-        Number(runId), PROVIDER, String(textbookExternalId), catalogId,
-        Number(pageNumber), signature, questionCount, jsonStringify(ids, '[]'), observedAt,
-        'resolved', Number(existing?.attempt_count || 0) + 1, String(resultType),
-        errorCode, rawSnapshot?.filePath || null,
-        existing?.first_seen_at || observedAt, observedAt, Number(newQuestionCount) || 0,
-      );
-      const occurrenceCount = Number(this.db.prepare(`
+      `,
+        )
+        .run(
+          Number(runId),
+          PROVIDER,
+          String(textbookExternalId),
+          catalogId,
+          Number(pageNumber),
+          signature,
+          questionCount,
+          jsonStringify(ids, '[]'),
+          observedAt,
+          'resolved',
+          Number(existing?.attempt_count || 0) + 1,
+          String(resultType),
+          errorCode,
+          rawSnapshot?.filePath || null,
+          existing?.first_seen_at || observedAt,
+          observedAt,
+          Number(newQuestionCount) || 0,
+        );
+      const occurrenceCount = Number(
+        this.db
+          .prepare(
+            `
         SELECT COALESCE(SUM(question_count), 0) AS n
         FROM sync_run_catalog_pages
         WHERE run_id = ? AND provider = ? AND textbook_external_id = ?
           AND catalog_external_id = ?
-      `).get(Number(runId), PROVIDER, String(textbookExternalId), catalogId)?.n || 0);
+      `,
+          )
+          .get(Number(runId), PROVIDER, String(textbookExternalId), catalogId)?.n || 0,
+      );
       const lastCompletedPage = this.lastContiguousSuccessfulPage(runId, textbookExternalId, catalogId);
       this._upsertCatalogProgressRow({
         runId,
@@ -191,18 +255,27 @@ class PageRepoMethods {
       });
       const scopeKey = String(queryFingerprint || '').trim();
       if (scopeKey) {
-        this.db.prepare(`
+        this.db
+          .prepare(
+            `
           INSERT INTO sync_checkpoints (
             scope_key, provider, chapter_id, filter_json, last_completed_page, updated_at
           ) VALUES (?, ?, ?, ?, ?, ?)
           ON CONFLICT(scope_key) DO UPDATE SET last_completed_page = excluded.last_completed_page,
             updated_at = excluded.updated_at
-        `).run(
-          scopeKey, PROVIDER,
-          String(catalog.chapterExternalId || catalog.externalId),
-          String(filterJson || '{}'), lastCompletedPage, observedAt,
-        );
-        this.db.prepare(`
+        `,
+          )
+          .run(
+            scopeKey,
+            PROVIDER,
+            String(catalog.chapterExternalId || catalog.externalId),
+            String(filterJson || '{}'),
+            lastCompletedPage,
+            observedAt,
+          );
+        this.db
+          .prepare(
+            `
           INSERT INTO sync_run_checkpoints (
             run_id, scope_key, provider, chapter_id, filter_json,
             last_completed_page, updated_at
@@ -210,25 +283,41 @@ class PageRepoMethods {
           ON CONFLICT(run_id, scope_key) DO UPDATE SET
             last_completed_page = excluded.last_completed_page,
             updated_at = excluded.updated_at
-        `).run(
-          Number(runId), scopeKey, PROVIDER,
-          String(catalog.chapterExternalId || catalog.externalId),
-          String(filterJson || '{}'), lastCompletedPage, observedAt,
-        );
+        `,
+          )
+          .run(
+            Number(runId),
+            scopeKey,
+            PROVIDER,
+            String(catalog.chapterExternalId || catalog.externalId),
+            String(filterJson || '{}'),
+            lastCompletedPage,
+            observedAt,
+          );
       }
       if (rawSnapshot?.filePath && rawSnapshot?.sourceUrl) {
-        this.db.prepare(`
+        this.db
+          .prepare(
+            `
           INSERT INTO source_snapshots (
             run_id, snapshot_type, source_url, content_hash, file_path, captured_at
           ) VALUES (?, ?, ?, ?, ?, ?)
-        `).run(
-          Number(runId), 'question_list_api', String(rawSnapshot.sourceUrl),
-          String(rawSnapshot.contentHash || ''), String(rawSnapshot.filePath), observedAt,
-        );
+        `,
+          )
+          .run(
+            Number(runId),
+            'question_list_api',
+            String(rawSnapshot.sourceUrl),
+            String(rawSnapshot.contentHash || ''),
+            String(rawSnapshot.filePath),
+            observedAt,
+          );
       }
       this.db.exec('COMMIT;');
     } catch (error) {
-      try { this.db.exec('ROLLBACK;'); } catch {}
+      try {
+        this.db.exec('ROLLBACK;');
+      } catch {}
       throw error;
     }
     return { resultType, lastCompletedPage: this.lastContiguousSuccessfulPage(runId, textbookExternalId, catalogId) };
@@ -238,7 +327,9 @@ class PageRepoMethods {
     const rawJson = jsonStringify(item);
     const externalId = String(item.externalId);
     const before = this.getQuestion(externalId);
-    this.db.prepare(`
+    this.db
+      .prepare(
+        `
       INSERT INTO questions (
         provider, external_id, bank_id, chapter_id, detail_url,
         source_short, source_title, source_url, question_type, question_type_id,
@@ -286,34 +377,71 @@ class PageRepoMethods {
         reference_papers_json = COALESCE(excluded.reference_papers_json, questions.reference_papers_json),
         last_seen_at = excluded.last_seen_at,
         raw_json = CASE WHEN questions.detail_fetched = 0 THEN excluded.raw_json ELSE questions.raw_json END
-    `).run(
-      PROVIDER, externalId, sqliteValue(item.bankId), sqliteValue(chapterId),
-      sqliteValue(item.detailUrl), sqliteValue(item.sourceShort), sqliteValue(item.sourceTitle),
-      sqliteValue(item.sourceUrl), sqliteValue(item.questionType), sqliteValue(item.questionTypeId),
-      sqliteValue(item.difficultyLabel), sqliteValue(item.difficultyCode), sqliteValue(item.difficultyQdid),
-      sqliteValue(item.easeCoefficient), sqliteValue(item.contentHtml), sqliteValue(item.plainText),
-      sqliteValue(item.contentHash), sqliteValue(item.listContentHash), sqliteValue(item.detailContentHash),
-      0, sqliteValue(item.contentSource, 'list_api'), item.contentComplete ? 1 : 0,
-      Number(item.subquestionCount) || 0, sqliteValue(item.childCount), item.hasImage ? 1 : 0,
-      item.hasFormula ? 1 : 0, item.hasTable ? 1 : 0, item.isNew ? 1 : 0,
-      sqliteValue(item.useCount), sqliteValue(item.providerUpdatedAt), sqliteValue(item.websiteTimeText),
-      sqliteValue(item.providerCategoryId), sqliteValue(item.providerCategoryName),
-      sqliteValue(item.titleAbbreviation), sqliteValue(item.referenceCount),
-      jsonStringify(item.referencePapers || [], '[]'), null, null, 'not_collected', null,
-      observedAt, observedAt, rawJson,
-    );
+    `,
+      )
+      .run(
+        PROVIDER,
+        externalId,
+        sqliteValue(item.bankId),
+        sqliteValue(chapterId),
+        sqliteValue(item.detailUrl),
+        sqliteValue(item.sourceShort),
+        sqliteValue(item.sourceTitle),
+        sqliteValue(item.sourceUrl),
+        sqliteValue(item.questionType),
+        sqliteValue(item.questionTypeId),
+        sqliteValue(item.difficultyLabel),
+        sqliteValue(item.difficultyCode),
+        sqliteValue(item.difficultyQdid),
+        sqliteValue(item.easeCoefficient),
+        sqliteValue(item.contentHtml),
+        sqliteValue(item.plainText),
+        sqliteValue(item.contentHash),
+        sqliteValue(item.listContentHash),
+        sqliteValue(item.detailContentHash),
+        0,
+        sqliteValue(item.contentSource, 'list_api'),
+        item.contentComplete ? 1 : 0,
+        Number(item.subquestionCount) || 0,
+        sqliteValue(item.childCount),
+        item.hasImage ? 1 : 0,
+        item.hasFormula ? 1 : 0,
+        item.hasTable ? 1 : 0,
+        item.isNew ? 1 : 0,
+        sqliteValue(item.useCount),
+        sqliteValue(item.providerUpdatedAt),
+        sqliteValue(item.websiteTimeText),
+        sqliteValue(item.providerCategoryId),
+        sqliteValue(item.providerCategoryName),
+        sqliteValue(item.titleAbbreviation),
+        sqliteValue(item.referenceCount),
+        jsonStringify(item.referencePapers || [], '[]'),
+        null,
+        null,
+        'not_collected',
+        null,
+        observedAt,
+        observedAt,
+        rawJson,
+      );
     if (item.contentHash) {
-      this.db.prepare(`
+      this.db
+        .prepare(
+          `
         INSERT OR IGNORE INTO question_revisions
           (provider, question_external_id, content_hash, captured_at, data_json)
         VALUES (?, ?, ?, ?, ?)
-      `).run(PROVIDER, externalId, item.contentHash, observedAt, rawJson);
+      `,
+        )
+        .run(PROVIDER, externalId, item.contentHash, observedAt, rawJson);
     }
     return before;
   }
 
   _saveRunQuestion(runId, textbookId, item, chapterId, observedAt) {
-    this.db.prepare(`
+    this.db
+      .prepare(
+        `
       INSERT INTO sync_run_question_items (
         run_id, provider, textbook_external_id, question_external_id,
         chapter_id, detail_url, source_short, source_title, source_url,
@@ -363,23 +491,53 @@ class PageRepoMethods {
         reference_papers_json = COALESCE(excluded.reference_papers_json, sync_run_question_items.reference_papers_json),
         raw_json = excluded.raw_json,
         captured_at = excluded.captured_at
-    `).run(
-      Number(runId), PROVIDER, String(textbookId), String(item.externalId),
-      sqliteValue(chapterId), sqliteValue(item.detailUrl), sqliteValue(item.sourceShort),
-      sqliteValue(item.sourceTitle), sqliteValue(item.sourceUrl), sqliteValue(item.questionType),
-      sqliteValue(item.questionTypeId), sqliteValue(item.difficultyLabel), sqliteValue(item.difficultyCode),
-      sqliteValue(item.difficultyQdid), sqliteValue(item.easeCoefficient), sqliteValue(item.contentHtml),
-      sqliteValue(item.plainText), sqliteValue(item.contentHash), sqliteValue(item.listContentHash),
-      sqliteValue(item.detailContentHash), sqliteValue(item.contentHash || item.listContentHash),
-      sqliteValue(item.contentSource, 'list_api'), item.contentComplete ? 1 : 0,
-      Number(item.subquestionCount) || 0, sqliteValue(item.childCount), item.hasImage ? 1 : 0,
-      item.hasFormula ? 1 : 0, item.hasTable ? 1 : 0, item.isNew ? 1 : 0,
-      sqliteValue(item.useCount), sqliteValue(item.providerUpdatedAt), sqliteValue(item.websiteTimeText),
-      sqliteValue(item.providerCategoryId), sqliteValue(item.providerCategoryName),
-      sqliteValue(item.titleAbbreviation), sqliteValue(item.referenceCount),
-      jsonStringify(item.referencePapers || [], '[]'), null, null, 'not_collected', null,
-      jsonStringify(item), observedAt,
-    );
+    `,
+      )
+      .run(
+        Number(runId),
+        PROVIDER,
+        String(textbookId),
+        String(item.externalId),
+        sqliteValue(chapterId),
+        sqliteValue(item.detailUrl),
+        sqliteValue(item.sourceShort),
+        sqliteValue(item.sourceTitle),
+        sqliteValue(item.sourceUrl),
+        sqliteValue(item.questionType),
+        sqliteValue(item.questionTypeId),
+        sqliteValue(item.difficultyLabel),
+        sqliteValue(item.difficultyCode),
+        sqliteValue(item.difficultyQdid),
+        sqliteValue(item.easeCoefficient),
+        sqliteValue(item.contentHtml),
+        sqliteValue(item.plainText),
+        sqliteValue(item.contentHash),
+        sqliteValue(item.listContentHash),
+        sqliteValue(item.detailContentHash),
+        sqliteValue(item.contentHash || item.listContentHash),
+        sqliteValue(item.contentSource, 'list_api'),
+        item.contentComplete ? 1 : 0,
+        Number(item.subquestionCount) || 0,
+        sqliteValue(item.childCount),
+        item.hasImage ? 1 : 0,
+        item.hasFormula ? 1 : 0,
+        item.hasTable ? 1 : 0,
+        item.isNew ? 1 : 0,
+        sqliteValue(item.useCount),
+        sqliteValue(item.providerUpdatedAt),
+        sqliteValue(item.websiteTimeText),
+        sqliteValue(item.providerCategoryId),
+        sqliteValue(item.providerCategoryName),
+        sqliteValue(item.titleAbbreviation),
+        sqliteValue(item.referenceCount),
+        jsonStringify(item.referencePapers || [], '[]'),
+        null,
+        null,
+        'not_collected',
+        null,
+        jsonStringify(item),
+        observedAt,
+      );
   }
 
   _saveTag(runId, textbookId, questionId, tag, queryFingerprint, observedAt) {
@@ -390,7 +548,9 @@ class PageRepoMethods {
     const relationType = String(tag.relationType || 'provider_asserted');
     const evidenceType = String(tag.evidenceType || 'provider_asserted');
     if (dimension === 'knowledge' || dimension === 'ability') {
-      this.db.prepare(`
+      this.db
+        .prepare(
+          `
         INSERT INTO question_knowledge (
           provider, question_external_id, knowledge_external_id, name,
           knowledge_kind, evidence_type, observed_at
@@ -399,20 +559,33 @@ class PageRepoMethods {
         DO UPDATE SET name = excluded.name,
           evidence_type = excluded.evidence_type,
           observed_at = excluded.observed_at
-      `).run(
-        PROVIDER, String(questionId), externalId || value, value,
-        dimension === 'ability' ? 'ability' : 'knowledge_point', evidenceType, observedAt,
-      );
+      `,
+        )
+        .run(
+          PROVIDER,
+          String(questionId),
+          externalId || value,
+          value,
+          dimension === 'ability' ? 'ability' : 'knowledge_point',
+          evidenceType,
+          observedAt,
+        );
     }
-    this.db.prepare(`
+    this.db
+      .prepare(
+        `
       INSERT INTO question_facets (
         provider, question_external_id, dimension, value,
         evidence_type, query_fingerprint, observed_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(provider, question_external_id, dimension, value, evidence_type, query_fingerprint)
       DO UPDATE SET observed_at = excluded.observed_at
-    `).run(PROVIDER, String(questionId), dimension, value, evidenceType, queryFingerprint, observedAt);
-    this.db.prepare(`
+    `,
+      )
+      .run(PROVIDER, String(questionId), dimension, value, evidenceType, queryFingerprint, observedAt);
+    this.db
+      .prepare(
+        `
       INSERT INTO sync_run_question_tags (
         run_id, provider, textbook_external_id, question_external_id,
         dimension, tag_external_id, tag_value, relation_type,
@@ -423,11 +596,22 @@ class PageRepoMethods {
         dimension, tag_external_id, tag_value, relation_type,
         evidence_type, query_fingerprint
       ) DO UPDATE SET observed_at = excluded.observed_at
-    `).run(
-      Number(runId), PROVIDER, String(textbookId), String(questionId),
-      dimension, externalId, value, relationType, evidenceType,
-      queryFingerprint, observedAt, observedAt,
-    );
+    `,
+      )
+      .run(
+        Number(runId),
+        PROVIDER,
+        String(textbookId),
+        String(questionId),
+        dimension,
+        externalId,
+        value,
+        relationType,
+        evidenceType,
+        queryFingerprint,
+        observedAt,
+        observedAt,
+      );
   }
 
   _saveAsset(runId, textbookId, questionId, asset, observedAt) {
@@ -437,7 +621,9 @@ class PageRepoMethods {
     const assetType = normalizeAssetType(sourceUrl, asset.assetType || asset.type);
     const key = canonicalAssetKey(assetType, sourceUrl);
     const storagePath = asset.storagePath || asset.localPath || null;
-    this.db.prepare(`
+    this.db
+      .prepare(
+        `
       INSERT INTO question_assets (
         provider, question_external_id, source_url, asset_type,
         local_path, sha256, mime_type, byte_size, observed_at
@@ -449,12 +635,22 @@ class PageRepoMethods {
         mime_type = COALESCE(excluded.mime_type, question_assets.mime_type),
         byte_size = COALESCE(excluded.byte_size, question_assets.byte_size),
         observed_at = excluded.observed_at
-    `).run(
-      PROVIDER, String(questionId), sourceUrl, assetType, storagePath,
-      sqliteValue(asset.contentSha256 || asset.sha256), sqliteValue(asset.mimeType),
-      sqliteValue(asset.byteSize), observedAt,
-    );
-    this.db.prepare(`
+    `,
+      )
+      .run(
+        PROVIDER,
+        String(questionId),
+        sourceUrl,
+        assetType,
+        storagePath,
+        sqliteValue(asset.contentSha256 || asset.sha256),
+        sqliteValue(asset.mimeType),
+        sqliteValue(asset.byteSize),
+        observedAt,
+      );
+    this.db
+      .prepare(
+        `
       INSERT INTO sync_run_question_assets (
         run_id, provider, textbook_external_id, question_external_id,
         asset_key, asset_type, source_url, content_sha256, storage_path,
@@ -469,18 +665,31 @@ class PageRepoMethods {
         mime_type = COALESCE(excluded.mime_type, sync_run_question_assets.mime_type),
         byte_size = COALESCE(excluded.byte_size, sync_run_question_assets.byte_size),
         observed_at = excluded.observed_at
-    `).run(
-      Number(runId), PROVIDER, String(textbookId), String(questionId), key,
-      assetType, sourceUrl, sqliteValue(asset.contentSha256 || asset.sha256),
-      sqliteValue(storagePath), sqliteValue(asset.mimeType), sqliteValue(asset.byteSize),
-      observedAt, observedAt,
-    );
+    `,
+      )
+      .run(
+        Number(runId),
+        PROVIDER,
+        String(textbookId),
+        String(questionId),
+        key,
+        assetType,
+        sourceUrl,
+        sqliteValue(asset.contentSha256 || asset.sha256),
+        sqliteValue(storagePath),
+        sqliteValue(asset.mimeType),
+        sqliteValue(asset.byteSize),
+        observedAt,
+        observedAt,
+      );
   }
 
   _saveMembership(runId, textbookId, questionId, membership, queryFingerprint, observedAt) {
     const catalogId = normalizeId(membership.externalId);
     if (!catalogId) return;
-    this.db.prepare(`
+    this.db
+      .prepare(
+        `
       INSERT INTO question_catalog_memberships (
         provider, question_external_id, catalog_external_id,
         catalog_level, catalog_name, catalog_path,
@@ -491,12 +700,22 @@ class PageRepoMethods {
         catalog_name = excluded.catalog_name,
         catalog_path = excluded.catalog_path,
         observed_at = excluded.observed_at
-    `).run(
-      PROVIDER, String(questionId), catalogId, sqliteValue(membership.level),
-      sqliteValue(membership.name), sqliteValue(membership.path || membership.name),
-      'query_membership', queryFingerprint, observedAt,
-    );
-    this.db.prepare(`
+    `,
+      )
+      .run(
+        PROVIDER,
+        String(questionId),
+        catalogId,
+        sqliteValue(membership.level),
+        sqliteValue(membership.name),
+        sqliteValue(membership.path || membership.name),
+        'query_membership',
+        queryFingerprint,
+        observedAt,
+      );
+    this.db
+      .prepare(
+        `
       INSERT INTO sync_run_question_catalogs (
         run_id, provider, textbook_external_id, question_external_id,
         catalog_external_id, catalog_level, catalog_name, catalog_path,
@@ -507,11 +726,20 @@ class PageRepoMethods {
         catalog_name = excluded.catalog_name,
         catalog_path = excluded.catalog_path,
         captured_at = excluded.captured_at
-    `).run(
-      Number(runId), PROVIDER, String(textbookId), String(questionId), catalogId,
-      sqliteValue(membership.level), sqliteValue(membership.name),
-      sqliteValue(membership.path || membership.name), 'query_membership', observedAt,
-    );
+    `,
+      )
+      .run(
+        Number(runId),
+        PROVIDER,
+        String(textbookId),
+        String(questionId),
+        catalogId,
+        sqliteValue(membership.level),
+        sqliteValue(membership.name),
+        sqliteValue(membership.path || membership.name),
+        'query_membership',
+        observedAt,
+      );
   }
 
   savePage({
@@ -540,7 +768,8 @@ class PageRepoMethods {
       ? normalizedCatalog.ancestorIds
       : [normalizedCatalog.externalId];
     for (const id of chain) {
-      const node = nodeById.get(String(id)) || (String(id) === String(normalizedCatalog.externalId) ? normalizedCatalog : null);
+      const node =
+        nodeById.get(String(id)) || (String(id) === String(normalizedCatalog.externalId) ? normalizedCatalog : null);
       if (node?.externalId) memberships.push(node);
     }
     let inserted = 0;
@@ -552,7 +781,9 @@ class PageRepoMethods {
       for (const node of nodes || []) {
         if (node?.externalId && node?.name) {
           this._insertCatalogNode(node, observedAt);
-          this.db.prepare(`
+          this.db
+            .prepare(
+              `
             INSERT INTO sync_run_catalog_items (
               run_id, provider, textbook_external_id, catalog_external_id,
               parent_external_id, node_level, node_type, name, source_path,
@@ -561,18 +792,34 @@ class PageRepoMethods {
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(run_id, provider, textbook_external_id, catalog_external_id)
             DO NOTHING
-          `).run(
-            Number(runId), PROVIDER, String(textbookExternalId), String(node.externalId),
-            sqliteValue(node.parentExternalId), sqliteValue(node.level),
-            sqliteValue(node.type || node.nodeType), String(node.name), sqliteValue(node.sourcePath),
-            sqliteValue(node.path || node.name), sqliteValue(node.sortOrder), observedAt,
-            jsonStringify(node.raw || node), sqliteValue(node.categoryId),
-            sqliteValue(node.catelogTokpointId), node.isKnowledge ? 1 : 0,
-          );
+          `,
+            )
+            .run(
+              Number(runId),
+              PROVIDER,
+              String(textbookExternalId),
+              String(node.externalId),
+              sqliteValue(node.parentExternalId),
+              sqliteValue(node.level),
+              sqliteValue(node.type || node.nodeType),
+              String(node.name),
+              sqliteValue(node.sourcePath),
+              sqliteValue(node.path || node.name),
+              sqliteValue(node.sortOrder),
+              observedAt,
+              jsonStringify(node.raw || node),
+              sqliteValue(node.categoryId),
+              sqliteValue(node.catelogTokpointId),
+              node.isKnowledge ? 1 : 0,
+            );
         }
       }
       for (const question of normalizedQuestions) {
-        const before = this._saveGlobalQuestion(question, normalizedCatalog.chapterExternalId || normalizedCatalog.externalId, observedAt);
+        const before = this._saveGlobalQuestion(
+          question,
+          normalizedCatalog.chapterExternalId || normalizedCatalog.externalId,
+          observedAt,
+        );
         if (!before) inserted += 1;
         else if (before.list_content_hash !== question.listContentHash) updated += 1;
         this._saveRunQuestion(
@@ -583,7 +830,14 @@ class PageRepoMethods {
           observedAt,
         );
         for (const membership of memberships) {
-          this._saveMembership(runId, textbookExternalId, question.externalId, membership, normalizedScopeKey, observedAt);
+          this._saveMembership(
+            runId,
+            textbookExternalId,
+            question.externalId,
+            membership,
+            normalizedScopeKey,
+            observedAt,
+          );
         }
         const tags = [
           ...(question.providerLabels || []),
@@ -604,25 +858,37 @@ class PageRepoMethods {
             evidenceType: 'provider_asserted',
           });
         }
-        for (const tag of tags) this._saveTag(runId, textbookExternalId, question.externalId, tag, normalizedScopeKey, observedAt);
-        for (const asset of question.assets || []) this._saveAsset(runId, textbookExternalId, question.externalId, asset, observedAt);
+        for (const tag of tags)
+          this._saveTag(runId, textbookExternalId, question.externalId, tag, normalizedScopeKey, observedAt);
+        for (const asset of question.assets || [])
+          this._saveAsset(runId, textbookExternalId, question.externalId, asset, observedAt);
         void before;
       }
 
       const ids = normalizedQuestions.map((question) => String(question.externalId));
       const pageSignature = sha256(ids.join(','));
-      const existingPage = this.db.prepare(`
+      const existingPage = this.db
+        .prepare(
+          `
         SELECT attempt_count, first_seen_at FROM sync_run_catalog_pages
         WHERE run_id = ? AND provider = ? AND textbook_external_id = ?
           AND catalog_external_id = ? AND page_number = ?
-      `).get(
-        Number(runId), PROVIDER, String(textbookExternalId),
-        String(normalizedCatalog.externalId), Number(pageNumber),
+      `,
+        )
+        .get(
+          Number(runId),
+          PROVIDER,
+          String(textbookExternalId),
+          String(normalizedCatalog.externalId),
+          Number(pageNumber),
+        );
+      const assetErrors = normalizedQuestions.reduce(
+        (sum, question) => sum + (question.assets || []).filter((asset) => asset?.downloadFailed).length,
+        0,
       );
-      const assetErrors = normalizedQuestions.reduce((sum, question) => (
-        sum + (question.assets || []).filter((asset) => asset?.downloadFailed).length
-      ), 0);
-      this.db.prepare(`
+      this.db
+        .prepare(
+          `
         INSERT INTO sync_run_catalog_pages (
           run_id, provider, textbook_external_id, catalog_external_id,
           page_number, page_signature, question_count, question_ids_json, observed_at,
@@ -641,26 +907,46 @@ class PageRepoMethods {
           raw_snapshot_path = COALESCE(excluded.raw_snapshot_path, sync_run_catalog_pages.raw_snapshot_path),
           finished_at = excluded.finished_at,
           new_question_count = excluded.new_question_count
-      `).run(
-        Number(runId), PROVIDER, String(textbookExternalId), String(normalizedCatalog.externalId),
-        Number(pageNumber), pageSignature, ids.length, jsonStringify(ids, '[]'), observedAt,
-        'resolved', Number(existingPage?.attempt_count || 0) + 1, PAGE_RESULT.SUCCESS, null,
-        rawSnapshot?.filePath || null, existingPage?.first_seen_at || observedAt, observedAt,
-        ids.length,
-      );
+      `,
+        )
+        .run(
+          Number(runId),
+          PROVIDER,
+          String(textbookExternalId),
+          String(normalizedCatalog.externalId),
+          Number(pageNumber),
+          pageSignature,
+          ids.length,
+          jsonStringify(ids, '[]'),
+          observedAt,
+          'resolved',
+          Number(existingPage?.attempt_count || 0) + 1,
+          PAGE_RESULT.SUCCESS,
+          null,
+          rawSnapshot?.filePath || null,
+          existingPage?.first_seen_at || observedAt,
+          observedAt,
+          ids.length,
+        );
       // Recompute the occurrence count from the idempotent page snapshot.
       // Retrying a page, or cloning a completed page during resume, must not
       // add the same page to list_seen_count a second time.
-      const occurrenceCount = Number(this.db.prepare(`
+      const occurrenceCount = Number(
+        this.db
+          .prepare(
+            `
         SELECT COALESCE(SUM(question_count), 0) AS n
         FROM sync_run_catalog_pages
         WHERE run_id = ? AND provider = ? AND textbook_external_id = ?
           AND catalog_external_id = ?
-      `).get(
-        Number(runId), PROVIDER, String(textbookExternalId), String(normalizedCatalog.externalId),
-      )?.n || 0);
+      `,
+          )
+          .get(Number(runId), PROVIDER, String(textbookExternalId), String(normalizedCatalog.externalId))?.n || 0,
+      );
       const lastCompletedPage = this.lastContiguousSuccessfulPage(
-        runId, textbookExternalId, normalizedCatalog.externalId,
+        runId,
+        textbookExternalId,
+        normalizedCatalog.externalId,
       );
       let grownTarget = growTargetPages(expectedPages, expectedTotal, pageCapacity);
       const boundedTargetPageLimit = Number(targetPageLimit);
@@ -681,18 +967,27 @@ class PageRepoMethods {
         assetErrorDelta: assetErrors,
         observedAt,
       });
-      this.db.prepare(`
+      this.db
+        .prepare(
+          `
         INSERT INTO sync_checkpoints (
           scope_key, provider, chapter_id, filter_json, last_completed_page, updated_at
         ) VALUES (?, ?, ?, ?, ?, ?)
         ON CONFLICT(scope_key) DO UPDATE SET last_completed_page = excluded.last_completed_page,
           updated_at = excluded.updated_at
-      `).run(
-        normalizedScopeKey, PROVIDER,
-        String(normalizedCatalog.chapterExternalId || normalizedCatalog.externalId),
-        String(filterJson || '{}'), lastCompletedPage, observedAt,
-      );
-      this.db.prepare(`
+      `,
+        )
+        .run(
+          normalizedScopeKey,
+          PROVIDER,
+          String(normalizedCatalog.chapterExternalId || normalizedCatalog.externalId),
+          String(filterJson || '{}'),
+          lastCompletedPage,
+          observedAt,
+        );
+      this.db
+        .prepare(
+          `
         INSERT INTO sync_run_checkpoints (
           run_id, scope_key, provider, chapter_id, filter_json,
           last_completed_page, updated_at
@@ -700,12 +995,20 @@ class PageRepoMethods {
         ON CONFLICT(run_id, scope_key) DO UPDATE SET
           last_completed_page = excluded.last_completed_page,
           updated_at = excluded.updated_at
-      `).run(
-        Number(runId), normalizedScopeKey, PROVIDER,
-        String(normalizedCatalog.chapterExternalId || normalizedCatalog.externalId),
-        String(filterJson || '{}'), lastCompletedPage, observedAt,
-      );
-      this.db.prepare(`
+      `,
+        )
+        .run(
+          Number(runId),
+          normalizedScopeKey,
+          PROVIDER,
+          String(normalizedCatalog.chapterExternalId || normalizedCatalog.externalId),
+          String(filterJson || '{}'),
+          lastCompletedPage,
+          observedAt,
+        );
+      this.db
+        .prepare(
+          `
         INSERT INTO catalog_list_stats (
           scope_key, provider, catalog_external_id, chapter_id, filter_json,
           expected_total, page_capacity, expected_pages, list_seen_count,
@@ -721,26 +1024,44 @@ class PageRepoMethods {
           last_completed_page = excluded.last_completed_page,
           list_seen_count = excluded.list_seen_count,
           updated_at = excluded.updated_at
-      `).run(
-        normalizedScopeKey, PROVIDER, String(normalizedCatalog.externalId),
-        String(normalizedCatalog.chapterExternalId || normalizedCatalog.externalId),
-        String(filterJson || '{}'), expectedTotal == null ? null : Number(expectedTotal),
-        Number(pageCapacity) || DEFAULT_PAGE_CAPACITY, grownTarget || null,
-        occurrenceCount, lastCompletedPage, observedAt,
-      );
+      `,
+        )
+        .run(
+          normalizedScopeKey,
+          PROVIDER,
+          String(normalizedCatalog.externalId),
+          String(normalizedCatalog.chapterExternalId || normalizedCatalog.externalId),
+          String(filterJson || '{}'),
+          expectedTotal == null ? null : Number(expectedTotal),
+          Number(pageCapacity) || DEFAULT_PAGE_CAPACITY,
+          grownTarget || null,
+          occurrenceCount,
+          lastCompletedPage,
+          observedAt,
+        );
       if (rawSnapshot?.filePath && rawSnapshot?.sourceUrl) {
-        this.db.prepare(`
+        this.db
+          .prepare(
+            `
           INSERT INTO source_snapshots (
             run_id, snapshot_type, source_url, content_hash, file_path, captured_at
           ) VALUES (?, ?, ?, ?, ?, ?)
-        `).run(
-          Number(runId), 'question_list_api', String(rawSnapshot.sourceUrl),
-          String(rawSnapshot.contentHash || ''), String(rawSnapshot.filePath), observedAt,
-        );
+        `,
+          )
+          .run(
+            Number(runId),
+            'question_list_api',
+            String(rawSnapshot.sourceUrl),
+            String(rawSnapshot.contentHash || ''),
+            String(rawSnapshot.filePath),
+            observedAt,
+          );
       }
       this.db.exec('COMMIT;');
     } catch (error) {
-      try { this.db.exec('ROLLBACK;'); } catch {}
+      try {
+        this.db.exec('ROLLBACK;');
+      } catch {}
       throw error;
     }
     return {
@@ -752,44 +1073,63 @@ class PageRepoMethods {
   }
 
   reopenCatalogProgress(runId, textbookId, catalogId) {
-    this.db.prepare(`
+    this.db
+      .prepare(
+        `
       UPDATE sync_run_catalog_progress
       SET status = 'running', scan_complete = 0, observed_at = ?
       WHERE run_id = ? AND provider = ? AND textbook_external_id = ?
         AND catalog_external_id = ? AND status IN ('completed', 'stalled')
-    `).run(nowIso(), Number(runId), PROVIDER, String(textbookId), String(catalogId));
+    `,
+      )
+      .run(nowIso(), Number(runId), PROVIDER, String(textbookId), String(catalogId));
   }
-
 
   catalogHasDataIssues(runId, textbookId, catalogId) {
     const issueCounts = this.catalogPageIssueCounts(runId, textbookId, catalogId);
-    const highestSuccess = Number(this.db.prepare(`
+    const highestSuccess = Number(
+      this.db
+        .prepare(
+          `
       SELECT COALESCE(MAX(page_number), 0) AS n FROM sync_run_catalog_pages
       WHERE run_id = ? AND provider = ? AND textbook_external_id = ?
         AND catalog_external_id = ? AND result_type = ?
         AND question_count > 0
-    `).get(
-      Number(runId), PROVIDER, String(textbookId), String(catalogId), PAGE_RESULT.SUCCESS,
-    )?.n || 0);
-    const holeEmpties = Number(this.db.prepare(`
+    `,
+        )
+        .get(Number(runId), PROVIDER, String(textbookId), String(catalogId), PAGE_RESULT.SUCCESS)?.n || 0,
+    );
+    const holeEmpties = Number(
+      this.db
+        .prepare(
+          `
       SELECT COUNT(*) AS n FROM sync_run_catalog_pages
       WHERE run_id = ? AND provider = ? AND textbook_external_id = ?
         AND catalog_external_id = ? AND result_type = ?
         AND page_number < ?
-    `).get(
-      Number(runId), PROVIDER, String(textbookId), String(catalogId),
-      PAGE_RESULT.EMPTY_PAGE, highestSuccess,
-    )?.n || 0);
-    const assets = Number(this.db.prepare(`
+    `,
+        )
+        .get(Number(runId), PROVIDER, String(textbookId), String(catalogId), PAGE_RESULT.EMPTY_PAGE, highestSuccess)
+        ?.n || 0,
+    );
+    const assets = Number(
+      this.db
+        .prepare(
+          `
       SELECT COALESCE(asset_error_count, 0) AS n FROM sync_run_catalog_progress
       WHERE run_id = ? AND provider = ? AND textbook_external_id = ?
         AND catalog_external_id = ?
-    `).get(Number(runId), PROVIDER, String(textbookId), String(catalogId))?.n || 0);
-    return issueCounts.failedPageCount > 0
-      || issueCounts.duplicatePageCount > 0
-      || issueCounts.parseErrorCount > 0
-      || holeEmpties > 0
-      || assets > 0;
+    `,
+        )
+        .get(Number(runId), PROVIDER, String(textbookId), String(catalogId))?.n || 0,
+    );
+    return (
+      issueCounts.failedPageCount > 0 ||
+      issueCounts.duplicatePageCount > 0 ||
+      issueCounts.parseErrorCount > 0 ||
+      holeEmpties > 0 ||
+      assets > 0
+    );
   }
 
   completeCatalog({
@@ -818,14 +1158,18 @@ class PageRepoMethods {
     let completionQuality = 'completed';
     this.db.exec('BEGIN IMMEDIATE;');
     try {
-      const occurrenceCount = Number(this.db.prepare(`
+      const occurrenceCount = Number(
+        this.db
+          .prepare(
+            `
         SELECT COALESCE(SUM(question_count), 0) AS n
         FROM sync_run_catalog_pages
         WHERE run_id = ? AND provider = ? AND textbook_external_id = ?
           AND catalog_external_id = ?
-      `).get(
-        Number(runId), PROVIDER, String(textbookExternalId), catalogId,
-      )?.n || 0);
+      `,
+          )
+          .get(Number(runId), PROVIDER, String(textbookExternalId), catalogId)?.n || 0,
+      );
       lastCompletedPage = this.lastContiguousSuccessfulPage(runId, textbookExternalId, catalogId);
       dataComplete = !stalled && !this.catalogHasDataIssues(runId, textbookExternalId, catalogId);
       completionQuality = dataComplete ? 'completed' : 'completed_with_issues';
@@ -848,7 +1192,7 @@ class PageRepoMethods {
         // treated as a data error. Keep the reason in the progress row so the
         // UI can say explicitly that the catalog stopped at the configured
         // 1000-page boundary.
-        stallReason: stallReason || (pageLimitReached ? 'page_limit_1000' : (stalled ? 'pagination_safety_limit' : null)),
+        stallReason: stallReason || (pageLimitReached ? 'page_limit_1000' : stalled ? 'pagination_safety_limit' : null),
         observedAt,
       });
       let statsExpectedPages = growTargetPages(expectedPages, expectedTotal, pageCapacity);
@@ -856,7 +1200,9 @@ class PageRepoMethods {
       if (Number.isFinite(boundedTargetPageLimit) && boundedTargetPageLimit > 0) {
         statsExpectedPages = Math.min(statsExpectedPages, boundedTargetPageLimit);
       }
-      this.db.prepare(`
+      this.db
+        .prepare(
+          `
         INSERT INTO catalog_list_stats (
           scope_key, provider, catalog_external_id, chapter_id, filter_json,
           expected_total, page_capacity, expected_pages, list_seen_count,
@@ -872,27 +1218,44 @@ class PageRepoMethods {
           list_seen_count = excluded.list_seen_count,
           last_completed_page = excluded.last_completed_page,
           updated_at = excluded.updated_at
-      `).run(
-        normalizedScopeKey, PROVIDER, catalogId,
-        String(normalizedCatalog.chapterExternalId || normalizedCatalog.externalId),
-        String(filterJson || '{}'), expectedTotal == null ? null : Number(expectedTotal),
-        Number(pageCapacity) || DEFAULT_PAGE_CAPACITY,
-        statsExpectedPages || null,
-        occurrenceCount, lastCompletedPage, observedAt,
-      );
+      `,
+        )
+        .run(
+          normalizedScopeKey,
+          PROVIDER,
+          catalogId,
+          String(normalizedCatalog.chapterExternalId || normalizedCatalog.externalId),
+          String(filterJson || '{}'),
+          expectedTotal == null ? null : Number(expectedTotal),
+          Number(pageCapacity) || DEFAULT_PAGE_CAPACITY,
+          statsExpectedPages || null,
+          occurrenceCount,
+          lastCompletedPage,
+          observedAt,
+        );
       if (rawSnapshot?.filePath && rawSnapshot?.sourceUrl) {
-        this.db.prepare(`
+        this.db
+          .prepare(
+            `
           INSERT INTO source_snapshots (
             run_id, snapshot_type, source_url, content_hash, file_path, captured_at
           ) VALUES (?, ?, ?, ?, ?, ?)
-        `).run(
-          Number(runId), 'question_list_api', String(rawSnapshot.sourceUrl),
-          String(rawSnapshot.contentHash || ''), String(rawSnapshot.filePath), observedAt,
-        );
+        `,
+          )
+          .run(
+            Number(runId),
+            'question_list_api',
+            String(rawSnapshot.sourceUrl),
+            String(rawSnapshot.contentHash || ''),
+            String(rawSnapshot.filePath),
+            observedAt,
+          );
       }
       this.db.exec('COMMIT;');
     } catch (error) {
-      try { this.db.exec('ROLLBACK;'); } catch {}
+      try {
+        this.db.exec('ROLLBACK;');
+      } catch {}
       throw error;
     }
     return {
@@ -905,8 +1268,6 @@ class PageRepoMethods {
       pageLimitReached,
     };
   }
-
-
 }
 
 module.exports = { PageRepoMethods };

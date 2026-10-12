@@ -60,14 +60,20 @@ async function main() {
   const shutdown = () => {
     if (stopping) return stopping;
     // Stop accepting connections before waiting for the active writer.
-    const closed = new Promise(resolve => server.close(resolve));
+    const closed = new Promise((resolve) => server.close(resolve));
     server.closeIdleConnections?.();
     stopping = (async () => {
-      if(server.collectorManager.manualRecovery?.active){const r=server.collectorManager.manualRecovery;await r.close({sessionId:r.current.id,owner:r.current.owner});}
+      if (server.collectorManager.manualRecovery?.active) {
+        const r = server.collectorManager.manualRecovery;
+        await r.close({ sessionId: r.current.id, owner: r.current.owner });
+      }
       await server.collectorManager.shutdown();
       server.closeAllConnections?.();
       await closed;
-    })().catch(error => { console.error(`[停止失败] ${error.message}`); process.exitCode = 1; });
+    })().catch((error) => {
+      console.error(`[停止失败] ${error.message}`);
+      process.exitCode = 1;
+    });
     return stopping;
   };
   process.once('SIGINT', shutdown);

@@ -26,9 +26,16 @@ const ORPHAN_HEARTBEAT_MS = 3 * 60 * 1000;
 // Structured error codes the child reports for real source protection.  They
 // map to the `blocked` terminal status without scanning log text.
 const BLOCKED_ERROR_CODES = new Set([
-  'verification_required', 'waiting_verification', 'json_html', 'http_401', 'http_403',
-  'robots_disallowed', 'protection_block', 'blocked',
-  'source_verification', 'source_cooldown',
+  'verification_required',
+  'waiting_verification',
+  'json_html',
+  'http_401',
+  'http_403',
+  'robots_disallowed',
+  'protection_block',
+  'blocked',
+  'source_verification',
+  'source_cooldown',
   'source_budget',
   'resource_pressure',
 ]);

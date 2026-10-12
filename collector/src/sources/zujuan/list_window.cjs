@@ -10,12 +10,7 @@
 
 const { QuestionSyncError, VerificationRequiredError } = require('../../shared/errors.cjs');
 const { sleep } = require('../../shared/utils.cjs');
-const {
-  DEFAULT_BASE_URL,
-  DEFAULT_VERIFICATION_TIMEOUT,
-  MAX_RETRIES,
-  RETRYABLE_HTTP,
-} = require('./constants.cjs');
+const { DEFAULT_BASE_URL, DEFAULT_VERIFICATION_TIMEOUT, MAX_RETRIES, RETRYABLE_HTTP } = require('./constants.cjs');
 const { catalogTreeUrl } = require('./urls.cjs');
 const { buildQuestionListRequest, responseHeaders, responseStatus } = require('./request.cjs');
 const { classifyQuestionResponse, looksLikeHtml } = require('./response_classifier.cjs');
@@ -27,32 +22,37 @@ async function evaluateFetch(page, url, request) {
   if (!page || typeof page.evaluate !== 'function') {
     throw new QuestionSyncError('缺少可执行 fetch 的采集页面。', 'page_unavailable');
   }
-  return page.evaluate(async ({ target, body, headers, credentials }) => {
-    try {
-      const response = await fetch(target, {
-        method: 'POST',
-        credentials,
-        headers,
-        body,
-      });
-      const text = await response.text();
-      const responseHeaders = {};
-      response.headers.forEach((value, key) => { responseHeaders[key] = value; });
-      return { status: response.status, headers: responseHeaders, text };
-    } catch (error) {
-      return {
-        status: 0,
-        headers: {},
-        text: '',
-        networkError: String(error?.message || error),
-      };
-    }
-  }, {
-    target: url,
-    body: request.body,
-    headers: request.headers,
-    credentials: request.credentials,
-  });
+  return page.evaluate(
+    async ({ target, body, headers, credentials }) => {
+      try {
+        const response = await fetch(target, {
+          method: 'POST',
+          credentials,
+          headers,
+          body,
+        });
+        const text = await response.text();
+        const responseHeaders = {};
+        response.headers.forEach((value, key) => {
+          responseHeaders[key] = value;
+        });
+        return { status: response.status, headers: responseHeaders, text };
+      } catch (error) {
+        return {
+          status: 0,
+          headers: {},
+          text: '',
+          networkError: String(error?.message || error),
+        };
+      }
+    },
+    {
+      target: url,
+      body: request.body,
+      headers: request.headers,
+      credentials: request.credentials,
+    },
+  );
 }
 
 function listWindow(startPage, lastPage, concurrency) {
@@ -66,10 +66,13 @@ function listWindow(startPage, lastPage, concurrency) {
   return Array.from({ length: end - start + 1 }, (_, index) => start + index);
 }
 
-async function postQuestionList(page, options, catalog, pageNumber, {
-  totalOnly = false,
-  allowVerificationWait = true,
-} = {}) {
+async function postQuestionList(
+  page,
+  options,
+  catalog,
+  pageNumber,
+  { totalOnly = false, allowVerificationWait = true } = {},
+) {
   const request = buildQuestionListRequest(options, catalog, pageNumber);
   const wait = options.sleepFn || sleep;
   let retryIndex = 0;
@@ -92,8 +95,11 @@ async function postQuestionList(page, options, catalog, pageNumber, {
       }
       verificationCycles += 1;
       const maxVerificationCycles = Number(options.maxVerificationCycles);
-      if (Number.isFinite(maxVerificationCycles) && maxVerificationCycles >= 0
-        && verificationCycles > maxVerificationCycles) {
+      if (
+        Number.isFinite(maxVerificationCycles) &&
+        maxVerificationCycles >= 0 &&
+        verificationCycles > maxVerificationCycles
+      ) {
         throw new VerificationRequiredError(
           `题目列表仍处于验证/防护状态，已等待 ${maxVerificationCycles} 次；请人工恢复后续跑同一页。`,
           classification,
@@ -131,7 +137,9 @@ async function postQuestionList(page, options, catalog, pageNumber, {
         options.randomFn || Math.random,
       );
       retryIndex += 1;
-      console.warn(`[重试] 目录 ${catalog?.externalId || ''} 第 ${pageNumber} 页 HTTP ${classification.status}，等待 ${(delay / 1000).toFixed(1)} 秒`);
+      console.warn(
+        `[重试] 目录 ${catalog?.externalId || ''} 第 ${pageNumber} 页 HTTP ${classification.status}，等待 ${(delay / 1000).toFixed(1)} 秒`,
+      );
       await wait(delay);
       continue;
     }
@@ -152,9 +160,10 @@ async function postQuestionList(page, options, catalog, pageNumber, {
       continue;
     }
     try {
-      const payload = result.payload
-        || classification.payload
-        || (result && result.code != null ? result : JSON.parse(String(result.text || '')));
+      const payload =
+        result.payload ||
+        classification.payload ||
+        (result && result.code != null ? result : JSON.parse(String(result.text || '')));
       return totalOnly
         ? parseQuestionListTotalPayload(payload)
         : parseQuestionListPayload(payload, options.baseUrl || DEFAULT_BASE_URL);
@@ -179,10 +188,7 @@ async function postQuestionList(page, options, catalog, pageNumber, {
         });
         continue;
       }
-      throw new QuestionSyncError(
-        `题目列表接口 JSON 解析失败：${error.message}`,
-        'list_api_contract',
-      );
+      throw new QuestionSyncError(`题目列表接口 JSON 解析失败：${error.message}`, 'list_api_contract');
     }
   }
 }
@@ -230,10 +236,16 @@ async function fetchCatalogTree(page, options) {
         try {
           options.sourceControl?.observe(status, responseHeaders(response), { verification: false });
           text = status < 400 ? await response.text() : null;
-        } finally { try { await response.dispose?.(); } catch {} }
+        } finally {
+          try {
+            await response.dispose?.();
+          } catch {}
+        }
         if (text != null) return JSON.parse(text);
       }
-    } catch (error) { if (error.blocked) throw error; }
+    } catch (error) {
+      if (error.blocked) throw error;
+    }
     throw new QuestionSyncError(`目录请求失败：${result.networkError}`, 'tree_network_error');
   }
   if (Number(result?.status || 0) >= 400) {
@@ -259,7 +271,8 @@ async function navigateToTextbook(page, url, options) {
     try {
       response = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: options.timeout });
     } catch (error) {
-      if (retryIndex >= MAX_RETRIES) throw new QuestionSyncError(`打开教材入口失败：${error.message}`, 'navigation_error');
+      if (retryIndex >= MAX_RETRIES)
+        throw new QuestionSyncError(`打开教材入口失败：${error.message}`, 'navigation_error');
       await wait(retryDelay('normal', retryIndex, {}, options.randomFn || Math.random));
       retryIndex += 1;
       continue;
@@ -279,8 +292,16 @@ async function navigateToTextbook(page, url, options) {
       continue;
     }
     if (status === 429 || RETRYABLE_HTTP.has(status)) {
-      if (retryIndex >= MAX_RETRIES) throw new QuestionSyncError(`教材入口 HTTP ${status} 重试耗尽。`, `http_${status}`);
-      await wait(retryDelay(status === 429 ? '429' : 'normal', retryIndex, responseHeaders(response), options.randomFn || Math.random));
+      if (retryIndex >= MAX_RETRIES)
+        throw new QuestionSyncError(`教材入口 HTTP ${status} 重试耗尽。`, `http_${status}`);
+      await wait(
+        retryDelay(
+          status === 429 ? '429' : 'normal',
+          retryIndex,
+          responseHeaders(response),
+          options.randomFn || Math.random,
+        ),
+      );
       retryIndex += 1;
       continue;
     }

@@ -7,17 +7,20 @@
 
 const { QuestionSyncError } = require('../../shared/errors.cjs');
 const { normalizeId, normalizeWhitespace } = require('../../shared/utils.cjs');
-const {
-  DEFAULT_BANK_ID,
-  DEFAULT_BANK_PATH,
-  DEFAULT_TEXTBOOK_ID,
-} = require('./constants.cjs');
+const { DEFAULT_BANK_ID, DEFAULT_BANK_PATH, DEFAULT_TEXTBOOK_ID } = require('./constants.cjs');
 const { parseCatalogQueryFromHref } = require('./urls.cjs');
 
 function parseCatalogRoot(raw, textbookId) {
   let value = raw;
-  if (value && typeof value === 'object' && value.data && typeof value.data === 'object'
-    && !Array.isArray(value.data) && !value.children) value = value.data;
+  if (
+    value &&
+    typeof value === 'object' &&
+    value.data &&
+    typeof value.data === 'object' &&
+    !Array.isArray(value.data) &&
+    !value.children
+  )
+    value = value.data;
   if (Array.isArray(value)) {
     return {
       id: String(textbookId),
@@ -29,8 +32,7 @@ function parseCatalogRoot(raw, textbookId) {
   if (!value || typeof value !== 'object' || !Array.isArray(value.children)) {
     throw new QuestionSyncError('教材目录 JSON 缺少根节点 children。', 'tree_contract');
   }
-  if (!value.id && value.children.length === 1
-    && String(value.children[0]?.id || '') === String(textbookId)) {
+  if (!value.id && value.children.length === 1 && String(value.children[0]?.id || '') === String(textbookId)) {
     return value.children[0];
   }
   return value;
@@ -41,18 +43,14 @@ function parseCatalogRoot(raw, textbookId) {
  * parent; raw parentId is retained only in raw_json because knowledge nodes
  * use a different provider knowledge-system parent ID.
  */
-function normalizeCatalogTree(raw, {
-  textbookId = DEFAULT_TEXTBOOK_ID,
-  bankId = DEFAULT_BANK_ID,
-  bankPath = DEFAULT_BANK_PATH,
-} = {}) {
+function normalizeCatalogTree(
+  raw,
+  { textbookId = DEFAULT_TEXTBOOK_ID, bankId = DEFAULT_BANK_ID, bankPath = DEFAULT_BANK_PATH } = {},
+) {
   const root = parseCatalogRoot(raw, textbookId);
   const rootId = String(root.id || textbookId);
   if (rootId !== String(textbookId)) {
-    throw new QuestionSyncError(
-      `目录根 ID ${rootId} 与教材 ID ${textbookId} 不一致。`,
-      'tree_contract',
-    );
+    throw new QuestionSyncError(`目录根 ID ${rootId} 与教材 ID ${textbookId} 不一致。`, 'tree_contract');
   }
   const nodes = [];
   const byId = new Map();
@@ -85,13 +83,12 @@ function normalizeCatalogTree(raw, {
       const nearestCategory = [...ancestorNodes].reverse().find((node) => !node.isKnowledge);
       const hrefQuery = parseCatalogQueryFromHref(
         source.href,
-        isKnowledge ? (nearestCategory?.externalId || displayParent || sourceId) : sourceId,
+        isKnowledge ? nearestCategory?.externalId || displayParent || sourceId : sourceId,
       );
       if (isKnowledge && hrefQuery.parsed && hrefQuery.catelogTokpointId === '0') {
         throw new QuestionSyncError(`知识点目录缺少 ctk 参数：${source.href}`, 'tree_contract');
       }
-      if (isKnowledge && hrefQuery.parsed
-        && hrefQuery.catelogTokpointId !== sourceId) {
+      if (isKnowledge && hrefQuery.parsed && hrefQuery.catelogTokpointId !== sourceId) {
         throw new QuestionSyncError(
           `知识点目录 ctk=${hrefQuery.catelogTokpointId} 与节点 ID=${sourceId} 不一致：${source.href}`,
           'tree_contract',
@@ -101,11 +98,10 @@ function normalizeCatalogTree(raw, {
         throw new QuestionSyncError(`普通目录意外包含 ctk 参数：${source.href}`, 'tree_contract');
       }
       const categoryId = isKnowledge
-        ? (nearestCategory?.externalId || hrefQuery.categoryId || displayParent || sourceId)
-        : (hrefQuery.categoryId || sourceId);
+        ? nearestCategory?.externalId || hrefQuery.categoryId || displayParent || sourceId
+        : hrefQuery.categoryId || sourceId;
       const catelogTokpointId = isKnowledge ? sourceId : '0';
-      const externalId = isKnowledge && pointOccurrences.get(sourceId) > 1
-        ? `ctk_${categoryId}_${sourceId}` : sourceId;
+      const externalId = isKnowledge && pointOccurrences.get(sourceId) > 1 ? `ctk_${categoryId}_${sourceId}` : sourceId;
       if (byId.has(externalId)) {
         throw new QuestionSyncError(
           `目录 ID 重复：${sourceId}；位置：${byId.get(externalId).path} / ${[...names, name].join(' › ')}`,
@@ -120,8 +116,8 @@ function normalizeCatalogTree(raw, {
         parentExternalId: displayParent ? String(displayParent) : null,
         rawParentExternalId: source.parentId == null ? null : String(source.parentId),
         level,
-        type: isKnowledge ? 'point' : (level === 1 ? 'chapter' : 'section'),
-        nodeType: isKnowledge ? 'point' : (level === 1 ? 'chapter' : 'section'),
+        type: isKnowledge ? 'point' : level === 1 ? 'chapter' : 'section',
+        nodeType: isKnowledge ? 'point' : level === 1 ? 'chapter' : 'section',
         isKnowledge,
         name,
         sourcePath: source.href ? String(source.href) : null,
@@ -154,21 +150,22 @@ function normalizeCatalogTree(raw, {
 }
 
 function selectCatalogs(tree, options = {}) {
-  const nodes = Array.isArray(tree?.nodes) ? tree.nodes : (Array.isArray(tree) ? tree : []);
+  const nodes = Array.isArray(tree?.nodes) ? tree.nodes : Array.isArray(tree) ? tree : [];
   const byId = new Map(nodes.map((node) => [String(node.externalId), node]));
   const requestedIds = Array.isArray(options.catalogIds) ? options.catalogIds.map(String) : [];
   let selected;
   if (requestedIds.length > 0) {
-    const matches = (id) => byId.has(id) ? [byId.get(id)] : nodes.filter((node) => node.sourceExternalId === id);
+    const matches = (id) => (byId.has(id) ? [byId.get(id)] : nodes.filter((node) => node.sourceExternalId === id));
     const missing = requestedIds.filter((id) => !matches(id).length);
     if (missing.length > 0) {
       throw new QuestionSyncError(`目录树中未找到 catalog-id：${missing.join('、')}`, 'catalog_not_found');
     }
-    selected = [...new Map(requestedIds.flatMap(matches).map(node => [node.externalId, node])).values()];
+    selected = [...new Map(requestedIds.flatMap(matches).map((node) => [node.externalId, node])).values()];
   } else {
-    const levels = Array.isArray(options.catalogLevels) && options.catalogLevels.length > 0
-      ? new Set(options.catalogLevels.map(Number))
-      : null;
+    const levels =
+      Array.isArray(options.catalogLevels) && options.catalogLevels.length > 0
+        ? new Set(options.catalogLevels.map(Number))
+        : null;
     selected = nodes.filter((node) => !levels || levels.has(Number(node.level)));
   }
   const maxCatalogs = Number(options.maxCatalogs) || 0;

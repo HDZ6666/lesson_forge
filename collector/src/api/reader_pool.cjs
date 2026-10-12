@@ -177,10 +177,12 @@ class ReaderPool {
     this.stats.restarts += 1;
     this.workers = this.workers.filter((candidate) => candidate !== slot);
     slot.worker.terminate().catch(() => {});
-    task.reject(Object.assign(new Error(`读取超过 ${Math.round(this.timeoutMs / 1000)} 秒，已中止`), {
-      statusCode: 504,
-      code: 'reader_timeout',
-    }));
+    task.reject(
+      Object.assign(new Error(`读取超过 ${Math.round(this.timeoutMs / 1000)} 秒，已中止`), {
+        statusCode: 504,
+        code: 'reader_timeout',
+      }),
+    );
     this._drain();
   }
 
@@ -199,10 +201,12 @@ class ReaderPool {
     const pending = this.queue.splice(0);
     for (const task of pending) task.reject(Object.assign(new Error('采集器正在停止'), { statusCode: 503 }));
     const workers = this.workers.splice(0);
-    await Promise.all(workers.map(async (slot) => {
-      if (slot.task) this._fail(slot, new Error('采集器正在停止'));
-      await slot.worker.terminate().catch(() => {});
-    }));
+    await Promise.all(
+      workers.map(async (slot) => {
+        if (slot.task) this._fail(slot, new Error('采集器正在停止'));
+        await slot.worker.terminate().catch(() => {});
+      }),
+    );
   }
 }
 

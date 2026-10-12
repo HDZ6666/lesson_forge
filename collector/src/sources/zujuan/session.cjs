@@ -23,11 +23,7 @@ const {
   DEFAULT_VERIFICATION_TIMEOUT,
   SOURCE_CONTENT_SELECTOR,
 } = require('./constants.cjs');
-const {
-  classifyProtectionState,
-  isProtectionText,
-  protectionStopMessage,
-} = require('./response_classifier.cjs');
+const { classifyProtectionState, isProtectionText, protectionStopMessage } = require('./response_classifier.cjs');
 
 async function loadPlaywright() {
   try {
@@ -48,10 +44,7 @@ async function loadPlaywright() {
 function profileLooksWarm(profileDir) {
   const root = String(profileDir || '').trim();
   if (!root) return false;
-  const candidates = [
-    path.join(root, 'Default', 'Network', 'Cookies'),
-    path.join(root, 'Default', 'Cookies'),
-  ];
+  const candidates = [path.join(root, 'Default', 'Network', 'Cookies'), path.join(root, 'Default', 'Cookies')];
   return candidates.some((item) => {
     try {
       return fs.existsSync(item) && fs.statSync(item).size > 0;
@@ -105,9 +98,7 @@ function collectorPageIsBlank(page) {
 }
 
 async function minimizeCollectorWindow(context, page = null) {
-  let target = collectorPageIsOpen(page)
-    ? page
-    : context.pages().find(collectorPageIsOpen);
+  let target = collectorPageIsOpen(page) ? page : context.pages().find(collectorPageIsOpen);
   let created = false;
   let session;
   try {
@@ -242,7 +233,9 @@ function clearStaleProfileLock(profileDir, { hostname = os.hostname(), isAlive =
   const sameHost = lockHost === String(hostname);
   if (sameHost && isAlive(lockPid)) return { cleared: false, reason: 'live', lockHost, lockPid };
   for (const name of SINGLETON_FILES) {
-    try { fs.unlinkSync(path.join(root, name)); } catch {}
+    try {
+      fs.unlinkSync(path.join(root, name));
+    } catch {}
   }
   return {
     cleared: true,
@@ -291,7 +284,9 @@ async function launchCollectorContext(playwright, options) {
 
 async function closeCollectorContext(context) {
   if (!context) return;
-  try { await context.close(); } catch {}
+  try {
+    await context.close();
+  } catch {}
 }
 
 async function connectCollectorOverCDP(playwright, options) {
@@ -351,7 +346,9 @@ async function launchFreshCollectorSession(playwright, options) {
     const page = await context.newPage();
     return { browser, context, page };
   } catch (error) {
-    try { await browser.close(); } catch {}
+    try {
+      await browser.close();
+    } catch {}
     throw error;
   }
 }
@@ -400,10 +397,7 @@ async function settleSourcePage(page, options, extras = {}) {
   if (lastState.terminalBlock || lastState.transientChallenge || lastState.hasChallengeInputs) {
     throw new StopCrawlError(protectionStopMessage(lastState), 'challenge');
   }
-  throw new StopCrawlError(
-    `${label} 未出现来源内容（${lastState.title || '无标题'}），可能仍在防护页。`,
-    'challenge',
-  );
+  throw new StopCrawlError(`${label} 未出现来源内容（${lastState.title || '无标题'}），可能仍在防护页。`, 'challenge');
 }
 
 async function detectBlockedPage(page) {
@@ -443,7 +437,7 @@ async function safeGoto(page, url, gate, options, label) {
         throw new StopCrawlError(`HTTP ${status}，任务已熔断。`, `http_${status}`);
       }
       if (retryableStatuses.has(status)) {
-        const retryMs = retryAfterMsFromResponse(response) ?? 1000 * (2 ** attempt) + randomBetween(0, 1000);
+        const retryMs = retryAfterMsFromResponse(response) ?? 1000 * 2 ** attempt + randomBetween(0, 1000);
         if (attempt === 3) throw new StopCrawlError(`HTTP ${status}，重试耗尽。`, `http_${status}`);
         console.warn(`[重试] ${label} 返回 HTTP ${status}，等待 ${(retryMs / 1000).toFixed(1)} 秒`);
         await sleep(retryMs);
@@ -457,7 +451,7 @@ async function safeGoto(page, url, gate, options, label) {
       if (error instanceof StopCrawlError) throw error;
       lastError = error;
       if (attempt === 3) break;
-      const backoff = 1000 * (2 ** attempt) + randomBetween(0, 1000);
+      const backoff = 1000 * 2 ** attempt + randomBetween(0, 1000);
       console.warn(`[重试] ${label} 失败：${error.message}；等待 ${(backoff / 1000).toFixed(1)} 秒`);
       await sleep(backoff);
     }
@@ -475,14 +469,24 @@ async function inspectRobots(context, options) {
       timeout: Math.min(options.timeout, 10000),
       failOnStatusCode: false,
     });
-    try { options.sourceControl?.observe(response.status(), response.headers(), { verification: false }); }
-    catch (error) { try { await response.dispose?.(); } catch {} throw error; }
+    try {
+      options.sourceControl?.observe(response.status(), response.headers(), { verification: false });
+    } catch (error) {
+      try {
+        await response.dispose?.();
+      } catch {}
+      throw error;
+    }
     if ([401, 403].includes(response.status())) {
-      try { await response.dispose?.(); } catch {}
+      try {
+        await response.dispose?.();
+      } catch {}
       return { status: 'unavailable', reason: `HTTP ${response.status()}` };
     }
     const text = await response.text();
-    try { await response.dispose?.(); } catch {}
+    try {
+      await response.dispose?.();
+    } catch {}
     if (!/^\s*user-agent\s*:/im.test(text)) {
       return { status: 'unknown', reason: '返回内容不是可解析的 robots.txt（可能是 JS 防护页）' };
     }
@@ -517,15 +521,13 @@ async function bringVerificationPageToFront(page) {
 
 async function waitForVerification(page, options = {}) {
   const timeoutValue = Number(options.verificationTimeout ?? DEFAULT_VERIFICATION_TIMEOUT);
-  const timeout = Number.isFinite(timeoutValue) && timeoutValue >= 0
-    ? timeoutValue : DEFAULT_VERIFICATION_TIMEOUT;
+  const timeout = Number.isFinite(timeoutValue) && timeoutValue >= 0 ? timeoutValue : DEFAULT_VERIFICATION_TIMEOUT;
   const pollValue = Number(options.verificationPoll ?? DEFAULT_VERIFICATION_POLL);
   const poll = Math.max(100, Number.isFinite(pollValue) ? pollValue : DEFAULT_VERIFICATION_POLL);
   const requiresProbe = options.requireProbe === true;
   options.sourceControl?.assertAllowed();
   const probeValue = Number(options.verificationProbeInterval ?? DEFAULT_VERIFICATION_PROBE_INTERVAL);
-  const probeInterval = Math.max(100, Number.isFinite(probeValue)
-    ? probeValue : DEFAULT_VERIFICATION_PROBE_INTERVAL);
+  const probeInterval = Math.max(100, Number.isFinite(probeValue) ? probeValue : DEFAULT_VERIFICATION_PROBE_INTERVAL);
   const wait = options.sleepFn || sleep;
   const startedAt = Date.now();
   // Structured hook for the job manager: a human-verification wait is
@@ -533,7 +535,9 @@ async function waitForVerification(page, options = {}) {
   const notifyWait = (state) => {
     if (typeof options.onVerificationWait !== 'function') return;
     let url = '';
-    try { url = state?.url || (typeof page?.url === 'function' ? String(page.url()) : ''); } catch {}
+    try {
+      url = state?.url || (typeof page?.url === 'function' ? String(page.url()) : '');
+    } catch {}
     try {
       options.onVerificationWait({
         reason: options.verificationReason || 'verification',
@@ -545,19 +549,19 @@ async function waitForVerification(page, options = {}) {
   if (requiresProbe) {
     await bringVerificationPageToFront(page);
     let currentUrl = '';
-    try { currentUrl = typeof page?.url === 'function' ? String(page.url()) : ''; } catch {}
+    try {
+      currentUrl = typeof page?.url === 'function' ? String(page.url()) : '';
+    } catch {}
     console.warn(
       `[验证] 题目 API 返回 ${options.verificationReason || '验证/防护'}，请在当前 Chrome 窗口人工恢复${currentUrl ? `（${currentUrl}）` : ''}；不会自动绕过滑块。`,
     );
     notifyWait({ url: currentUrl });
   }
   const configuredInitialWait = Number(options.verificationInitialWait ?? poll);
-  const initialWait = timeout === 0 ? 0 : Math.max(
-    0,
-    requiresProbe
-      ? Math.max(configuredInitialWait, probeInterval)
-      : configuredInitialWait,
-  );
+  const initialWait =
+    timeout === 0
+      ? 0
+      : Math.max(0, requiresProbe ? Math.max(configuredInitialWait, probeInterval) : configuredInitialWait);
   if (initialWait > 0) {
     const remaining = Math.max(0, timeout - (Date.now() - startedAt));
     await wait(Math.min(initialWait, remaining));
@@ -573,9 +577,14 @@ async function waitForVerification(page, options = {}) {
           const combined = `${title}\n${text}`;
           const hasContent = Boolean(document.querySelector(contentSelector));
           return {
-            challenge: Boolean(document.querySelector(
-              '#parm_0, #parm_1, [class*="slider"], [class*="captcha"], [data-captcha="true"]',
-            )) || (!hasContent && /验证码|滑块|安全验证|请按住滑块|拖动滑块|challenge|captcha|access denied/i.test(combined)),
+            challenge:
+              Boolean(
+                document.querySelector(
+                  '#parm_0, #parm_1, [class*="slider"], [class*="captcha"], [data-captcha="true"]',
+                ),
+              ) ||
+              (!hasContent &&
+                /验证码|滑块|安全验证|请按住滑块|拖动滑块|challenge|captcha|access denied/i.test(combined)),
             hasContent,
             title,
             text: text.slice(0, 1000),
@@ -586,8 +595,9 @@ async function waitForVerification(page, options = {}) {
         state = { challenge: true, text: error.message, title: '' };
       }
     }
-    const challenge = Boolean(state?.challenge)
-      || (!state?.hasContent && isProtectionText(`${state?.title || ''} ${state?.text || ''}`));
+    const challenge =
+      Boolean(state?.challenge) ||
+      (!state?.hasContent && isProtectionText(`${state?.title || ''} ${state?.text || ''}`));
     if (!challenge) {
       if (requiresProbe) {
         console.warn('[验证] 当前页未显示挑战控件；将以间隔 API probe，恢复后继续同一目录/页。');

@@ -9,19 +9,9 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { DatabaseSync } = require('node:sqlite');
 
-const {
-  ensureDir,
-  isStableExternalId,
-  normalizeWhitespace,
-  nowIso,
-  writeFileAtomic,
-} = require('../shared/utils.cjs');
+const { ensureDir, isStableExternalId, normalizeWhitespace, nowIso, writeFileAtomic } = require('../shared/utils.cjs');
 const { PROVIDER } = require('../sources/zujuan/constants.cjs');
-const {
-  classifyChange,
-  emptyValidation,
-  textbookRawJson,
-} = require('../sources/zujuan/metadata_parser.cjs');
+const { classifyChange, emptyValidation, textbookRawJson } = require('../sources/zujuan/metadata_parser.cjs');
 const { migrateMetadataSnapshotSchema } = require('./metadata_schema.cjs');
 
 class MetadataStore {
@@ -229,12 +219,16 @@ class MetadataStore {
     this.db.exec('BEGIN IMMEDIATE;');
     try {
       const existingVersion = this.getVersion(version.externalVersionId);
-      const versionKind = classifyChange(existingVersion, {
-        version_name: version.versionName,
-        source_url: version.sourceUrl,
-        is_new: version.isNew,
-        sort_order: version.sortOrder,
-      }, ['version_name', 'source_url', 'is_new', 'sort_order']);
+      const versionKind = classifyChange(
+        existingVersion,
+        {
+          version_name: version.versionName,
+          source_url: version.sourceUrl,
+          is_new: version.isNew,
+          sort_order: version.sortOrder,
+        },
+        ['version_name', 'source_url', 'is_new', 'sort_order'],
+      );
       this.stmt.upsertVersion.run(
         PROVIDER,
         String(version.externalVersionId),
@@ -266,23 +260,27 @@ class MetadataStore {
         if (!isStableExternalId(textbook.bootstrapChapterExternalId) && existingTextbook) {
           textbook.bootstrapChapterExternalId = existingTextbook.bootstrap_chapter_external_id || null;
         }
-        const textbookKind = classifyChange(existingTextbook, {
-          version_external_id: textbook.versionExternalId,
-          textbook_name: textbook.textbookName,
-          grade: textbook.grade,
-          volume: textbook.volume,
-          source_url: textbook.sourceUrl,
-          sort_order: textbook.sortOrder,
-          bootstrap_chapter_external_id: textbook.bootstrapChapterExternalId,
-        }, [
-          'version_external_id',
-          'textbook_name',
-          'grade',
-          'volume',
-          'source_url',
-          'sort_order',
-          'bootstrap_chapter_external_id',
-        ]);
+        const textbookKind = classifyChange(
+          existingTextbook,
+          {
+            version_external_id: textbook.versionExternalId,
+            textbook_name: textbook.textbookName,
+            grade: textbook.grade,
+            volume: textbook.volume,
+            source_url: textbook.sourceUrl,
+            sort_order: textbook.sortOrder,
+            bootstrap_chapter_external_id: textbook.bootstrapChapterExternalId,
+          },
+          [
+            'version_external_id',
+            'textbook_name',
+            'grade',
+            'volume',
+            'source_url',
+            'sort_order',
+            'bootstrap_chapter_external_id',
+          ],
+        );
         this.stmt.upsertTextbook.run(
           PROVIDER,
           String(textbook.externalTextbookId),
@@ -317,7 +315,9 @@ class MetadataStore {
       }
       this.db.exec('COMMIT;');
     } catch (error) {
-      try { this.db.exec('ROLLBACK;'); } catch {}
+      try {
+        this.db.exec('ROLLBACK;');
+      } catch {}
       throw error;
     }
     return counts;
@@ -373,22 +373,22 @@ function lookupTextbookByNames(dbPath, versionName, textbookName, { provider = P
     return null;
   }
   try {
-    const table = db.prepare(
-      `SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'source_textbooks'`,
-    ).get();
+    const table = db.prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'source_textbooks'`).get();
     if (!table) return null;
-    const row = db.prepare(`
+    const row = db
+      .prepare(
+        `
       SELECT t.external_textbook_id, t.textbook_name, t.bootstrap_chapter_external_id, t.source_url,
              v.external_version_id, v.version_name
       FROM source_textbooks t
       JOIN source_textbook_versions v
         ON v.provider = t.provider AND v.external_version_id = t.version_external_id
       WHERE t.provider = ? AND v.version_name = ? AND t.textbook_name = ?
-    `).get(provider, normalizeWhitespace(versionName), normalizeWhitespace(textbookName));
+    `,
+      )
+      .get(provider, normalizeWhitespace(versionName), normalizeWhitespace(textbookName));
     if (!row) return null;
-    const bootstrap = row.bootstrap_chapter_external_id == null
-      ? ''
-      : String(row.bootstrap_chapter_external_id).trim();
+    const bootstrap = row.bootstrap_chapter_external_id == null ? '' : String(row.bootstrap_chapter_external_id).trim();
     if (!isStableExternalId(bootstrap) || !isStableExternalId(row.external_textbook_id)) return null;
     return {
       externalTextbookId: String(row.external_textbook_id),
@@ -409,25 +409,23 @@ function lookupBootstrapChapter(dbPath, textbookId, { provider = PROVIDER, allow
   }
   const db = new DatabaseSync(dbPath, { readOnly: true });
   try {
-    const table = db.prepare(
-      `SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'source_textbooks'`,
-    ).get();
+    const table = db.prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'source_textbooks'`).get();
     if (!table) {
       if (allowMissing) return null;
       throw new Error('采集库缺少 source_textbooks 表。请先运行 npm run sync:zujuan:metadata');
     }
-    const row = db.prepare(
-      `SELECT textbook_name, bootstrap_chapter_external_id
+    const row = db
+      .prepare(
+        `SELECT textbook_name, bootstrap_chapter_external_id
        FROM source_textbooks
        WHERE provider = ? AND external_textbook_id = ?`,
-    ).get(provider, String(textbookId));
+      )
+      .get(provider, String(textbookId));
     if (!row) {
       if (allowMissing) return null;
       throw new Error(`采集库中没有教材 ${textbookId} 的元数据。请先运行 npm run sync:zujuan:metadata`);
     }
-    const bootstrap = row.bootstrap_chapter_external_id == null
-      ? ''
-      : String(row.bootstrap_chapter_external_id).trim();
+    const bootstrap = row.bootstrap_chapter_external_id == null ? '' : String(row.bootstrap_chapter_external_id).trim();
     if (!isStableExternalId(bootstrap)) {
       if (allowMissing) return null;
       throw new Error(
@@ -465,11 +463,7 @@ function buildReport(store, extras = {}) {
 }
 
 function formatReport(report) {
-  const lines = [
-    `版本总数：${report.versionCount}`,
-    `教材总数：${report.textbookCount}`,
-    '按版本：',
-  ];
+  const lines = [`版本总数：${report.versionCount}`, `教材总数：${report.textbookCount}`, '按版本：'];
   if (report.versions.length === 0) {
     lines.push('  （无）');
   } else {
@@ -490,9 +484,7 @@ function formatReport(report) {
     );
   }
   if (report.unseen) {
-    lines.push(
-      `本次未发现候选：版本 ${report.unseen.versions.length}，教材 ${report.unseen.textbooks.length}`,
-    );
+    lines.push(`本次未发现候选：版本 ${report.unseen.versions.length}，教材 ${report.unseen.textbooks.length}`);
   }
   return lines.join('\n');
 }

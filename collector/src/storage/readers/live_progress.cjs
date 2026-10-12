@@ -50,10 +50,7 @@ const {
 } = require('./common.cjs');
 
 function readLiveRunProgress(dbPath, runId, options = {}) {
-  const requestedTextbookId = optionalExternalId(
-    options.textbookExternalId,
-    'textbookExternalId',
-  );
+  const requestedTextbookId = optionalExternalId(options.textbookExternalId, 'textbookExternalId');
   let db = null;
   const unavailable = (message = 'collector 实时进度暂不可用', error = null) => ({
     available: false,
@@ -83,9 +80,7 @@ function readLiveRunProgress(dbPath, runId, options = {}) {
     }
     const where = predicates.join(' AND ');
     const itemColumns = tableColumns(db, 'sync_run_catalog_items');
-    const progressPredicates = [
-      'progress.run_id = ?', 'progress.provider = ?',
-    ];
+    const progressPredicates = ['progress.run_id = ?', 'progress.provider = ?'];
     const progressParameters = [run.id, PROVIDER];
     if (textbookExternalId) {
       progressPredicates.push('progress.textbook_external_id = ?');
@@ -95,19 +90,35 @@ function readLiveRunProgress(dbPath, runId, options = {}) {
     const maxNodes = Math.min(
       MAX_LIVE_TREE_NODES,
       Number.isSafeInteger(Number(options.maxNodes)) && Number(options.maxNodes) > 0
-        ? Number(options.maxNodes) : MAX_LIVE_TREE_NODES,
+        ? Number(options.maxNodes)
+        : MAX_LIVE_TREE_NODES,
     );
-    const catalogCount = Number(db.prepare(`
+    const catalogCount = Number(
+      db
+        .prepare(
+          `
       SELECT COUNT(*) AS n FROM sync_run_catalog_items AS item WHERE ${where}
-    `).get(...parameters).n || 0);
-    const levelCounts = new Map(db.prepare(`
+    `,
+        )
+        .get(...parameters).n || 0,
+    );
+    const levelCounts = new Map(
+      db
+        .prepare(
+          `
       SELECT COALESCE(item.node_level, 0) AS level, COUNT(*) AS n
       FROM sync_run_catalog_items AS item
       WHERE ${where}
       GROUP BY COALESCE(item.node_level, 0)
-    `).all(...parameters).map((row) => [Number(row.level || 0), Number(row.n || 0)]));
+    `,
+        )
+        .all(...parameters)
+        .map((row) => [Number(row.level || 0), Number(row.n || 0)]),
+    );
     const progressColumns = tableColumns(db, 'sync_run_catalog_progress');
-    const progressRows = db.prepare(`
+    const progressRows = db
+      .prepare(
+        `
       SELECT progress.catalog_external_id, progress.expected_total,
              progress.page_capacity, progress.expected_pages,
              progress.last_completed_page, progress.list_seen_count,
@@ -127,72 +138,90 @@ function readLiveRunProgress(dbPath, runId, options = {}) {
              ${progressColumns.has('scan_percent_high_water') ? ', progress.scan_percent_high_water' : ''}
       FROM sync_run_catalog_progress AS progress
       WHERE ${progressWhere}
-    `).all(...progressParameters);
+    `,
+      )
+      .all(...progressParameters);
     // Derive the occurrence counter from the idempotent page snapshot when
     // available.  Progress rows are copied during resume, so trusting their
     // historical counter alone could preserve a pre-fix double count.
-    const pageColumns = tables.has('sync_run_catalog_pages')
-      ? tableColumns(db, 'sync_run_catalog_pages') : new Set();
+    const pageColumns = tables.has('sync_run_catalog_pages') ? tableColumns(db, 'sync_run_catalog_pages') : new Set();
     const pageOccurrencesByCatalog = new Map();
-    if (['run_id', 'provider', 'textbook_external_id', 'catalog_external_id', 'question_count']
-      .every((column) => pageColumns.has(column))) {
-      const pagePredicates = [
-        'page.run_id = ?', 'page.provider = ?',
-      ];
-      const pageParameters = [run.id, PROVIDER];
-      if (textbookExternalId) {
-        pagePredicates.push('page.textbook_external_id = ?');
-        pageParameters.push(textbookExternalId);
-      }
-      const pageRows = db.prepare(`
-        SELECT page.catalog_external_id, COALESCE(SUM(page.question_count), 0) AS n
-        FROM sync_run_catalog_pages AS page
-        WHERE ${pagePredicates.join(' AND ')}
-        GROUP BY page.catalog_external_id
-      `).all(...pageParameters);
-      for (const row of pageRows) {
-        pageOccurrencesByCatalog.set(
-          String(row.catalog_external_id),
-          Math.max(0, Number(row.n || 0)),
-        );
-      }
-    }
-    const uniqueByCatalog = new Map();
-    const catalogLinkColumns = tables.has('sync_run_question_catalogs')
-      ? tableColumns(db, 'sync_run_question_catalogs') : new Set();
-    if (['run_id', 'textbook_external_id', 'catalog_external_id', 'question_external_id']
-      .every((column) => catalogLinkColumns.has(column))) {
-      const linkPredicates = ['link.run_id = ?'];
-      const linkParameters = [run.id];
-      if (textbookExternalId) {
-        linkPredicates.push('link.textbook_external_id = ?');
-        linkParameters.push(textbookExternalId);
-      }
-      const uniqueRows = db.prepare(`
-        SELECT link.catalog_external_id, COUNT(DISTINCT link.question_external_id) AS n
-        FROM sync_run_question_catalogs AS link
-        WHERE ${linkPredicates.join(' AND ')}
-        GROUP BY link.catalog_external_id
-      `).all(...linkParameters);
-      for (const row of uniqueRows) {
-        uniqueByCatalog.set(String(row.catalog_external_id), Math.max(0, Number(row.n || 0)));
-      }
-    }
-    const attemptedByCatalog = new Map();
-    if (['run_id', 'provider', 'textbook_external_id', 'catalog_external_id', 'page_number']
-      .every((column) => pageColumns.has(column))) {
+    if (
+      ['run_id', 'provider', 'textbook_external_id', 'catalog_external_id', 'question_count'].every((column) =>
+        pageColumns.has(column),
+      )
+    ) {
       const pagePredicates = ['page.run_id = ?', 'page.provider = ?'];
       const pageParameters = [run.id, PROVIDER];
       if (textbookExternalId) {
         pagePredicates.push('page.textbook_external_id = ?');
         pageParameters.push(textbookExternalId);
       }
-      const attemptedRows = db.prepare(`
+      const pageRows = db
+        .prepare(
+          `
+        SELECT page.catalog_external_id, COALESCE(SUM(page.question_count), 0) AS n
+        FROM sync_run_catalog_pages AS page
+        WHERE ${pagePredicates.join(' AND ')}
+        GROUP BY page.catalog_external_id
+      `,
+        )
+        .all(...pageParameters);
+      for (const row of pageRows) {
+        pageOccurrencesByCatalog.set(String(row.catalog_external_id), Math.max(0, Number(row.n || 0)));
+      }
+    }
+    const uniqueByCatalog = new Map();
+    const catalogLinkColumns = tables.has('sync_run_question_catalogs')
+      ? tableColumns(db, 'sync_run_question_catalogs')
+      : new Set();
+    if (
+      ['run_id', 'textbook_external_id', 'catalog_external_id', 'question_external_id'].every((column) =>
+        catalogLinkColumns.has(column),
+      )
+    ) {
+      const linkPredicates = ['link.run_id = ?'];
+      const linkParameters = [run.id];
+      if (textbookExternalId) {
+        linkPredicates.push('link.textbook_external_id = ?');
+        linkParameters.push(textbookExternalId);
+      }
+      const uniqueRows = db
+        .prepare(
+          `
+        SELECT link.catalog_external_id, COUNT(DISTINCT link.question_external_id) AS n
+        FROM sync_run_question_catalogs AS link
+        WHERE ${linkPredicates.join(' AND ')}
+        GROUP BY link.catalog_external_id
+      `,
+        )
+        .all(...linkParameters);
+      for (const row of uniqueRows) {
+        uniqueByCatalog.set(String(row.catalog_external_id), Math.max(0, Number(row.n || 0)));
+      }
+    }
+    const attemptedByCatalog = new Map();
+    if (
+      ['run_id', 'provider', 'textbook_external_id', 'catalog_external_id', 'page_number'].every((column) =>
+        pageColumns.has(column),
+      )
+    ) {
+      const pagePredicates = ['page.run_id = ?', 'page.provider = ?'];
+      const pageParameters = [run.id, PROVIDER];
+      if (textbookExternalId) {
+        pagePredicates.push('page.textbook_external_id = ?');
+        pageParameters.push(textbookExternalId);
+      }
+      const attemptedRows = db
+        .prepare(
+          `
         SELECT page.catalog_external_id, COUNT(*) AS n, COALESCE(MAX(page.page_number), 0) AS highest
         FROM sync_run_catalog_pages AS page
         WHERE ${pagePredicates.join(' AND ')}
         GROUP BY page.catalog_external_id
-      `).all(...pageParameters);
+      `,
+        )
+        .all(...pageParameters);
       for (const row of attemptedRows) {
         attemptedByCatalog.set(String(row.catalog_external_id), {
           attemptedPageCount: Math.max(0, Number(row.n || 0)),
@@ -200,46 +229,56 @@ function readLiveRunProgress(dbPath, runId, options = {}) {
         });
       }
     }
-    const progressByCatalog = new Map(progressRows.map((row) => [
-      String(row.catalog_external_id), {
-        expectedTotal: row.expected_total == null ? null : Number(row.expected_total),
-        latestSourceTotal: row.expected_total == null ? null : Number(row.expected_total),
-        maxObservedTotal: row.max_observed_total == null
-          ? (row.expected_total == null ? null : Number(row.expected_total))
-          : Number(row.max_observed_total),
-        pageCapacity: row.page_capacity == null ? null : Number(row.page_capacity),
-        expectedPages: row.expected_pages == null ? null : Number(row.expected_pages),
-        targetPages: row.target_pages == null
-          ? (row.expected_pages == null ? null : Number(row.expected_pages))
-          : Number(row.target_pages),
-        lastCompletedPage: Number(row.last_completed_page || 0),
-        lastContiguousSuccessfulPage: Number(row.last_completed_page || 0),
-        highestAttemptedPage: Number(row.highest_attempted_page
-          || attemptedByCatalog.get(String(row.catalog_external_id))?.highestAttemptedPage
-          || 0),
-        attemptedPageCount: attemptedByCatalog.get(String(row.catalog_external_id))?.attemptedPageCount || 0,
-        // Occurrence count from saved page cards; unique count comes from the
-        // association table and is a different metric.
-        listSeenCount: pageOccurrencesByCatalog.has(String(row.catalog_external_id))
-          ? pageOccurrencesByCatalog.get(String(row.catalog_external_id))
-          : Number(row.list_seen_count || 0),
-        uniqueQuestionCount: uniqueByCatalog.get(String(row.catalog_external_id)) || 0,
-        status: String(row.status || 'running'),
-        scanComplete: Number(row.scan_complete || 0) === 1
-          || ['completed', 'stalled'].includes(String(row.status || '')),
-        dataComplete: Number(row.data_complete || 0) === 1,
-        completionQuality: row.completion_quality || null,
-        pageLimitReached: row.stall_reason === 'page_limit_1000',
-        failedPageCount: Number(row.failed_page_count || 0),
-        duplicatePageCount: Number(row.duplicate_page_count || 0),
-        emptyPageCount: Number(row.empty_page_count || 0),
-        parseErrorCount: Number(row.parse_error_count || 0),
-        assetErrorCount: Number(row.asset_error_count || 0),
-        scanPercentHighWater: row.scan_percent_high_water == null
-          ? null : Number(row.scan_percent_high_water),
-        observedAt: row.observed_at || null,
-      },
-    ]));
+    const progressByCatalog = new Map(
+      progressRows.map((row) => [
+        String(row.catalog_external_id),
+        {
+          expectedTotal: row.expected_total == null ? null : Number(row.expected_total),
+          latestSourceTotal: row.expected_total == null ? null : Number(row.expected_total),
+          maxObservedTotal:
+            row.max_observed_total == null
+              ? row.expected_total == null
+                ? null
+                : Number(row.expected_total)
+              : Number(row.max_observed_total),
+          pageCapacity: row.page_capacity == null ? null : Number(row.page_capacity),
+          expectedPages: row.expected_pages == null ? null : Number(row.expected_pages),
+          targetPages:
+            row.target_pages == null
+              ? row.expected_pages == null
+                ? null
+                : Number(row.expected_pages)
+              : Number(row.target_pages),
+          lastCompletedPage: Number(row.last_completed_page || 0),
+          lastContiguousSuccessfulPage: Number(row.last_completed_page || 0),
+          highestAttemptedPage: Number(
+            row.highest_attempted_page ||
+              attemptedByCatalog.get(String(row.catalog_external_id))?.highestAttemptedPage ||
+              0,
+          ),
+          attemptedPageCount: attemptedByCatalog.get(String(row.catalog_external_id))?.attemptedPageCount || 0,
+          // Occurrence count from saved page cards; unique count comes from the
+          // association table and is a different metric.
+          listSeenCount: pageOccurrencesByCatalog.has(String(row.catalog_external_id))
+            ? pageOccurrencesByCatalog.get(String(row.catalog_external_id))
+            : Number(row.list_seen_count || 0),
+          uniqueQuestionCount: uniqueByCatalog.get(String(row.catalog_external_id)) || 0,
+          status: String(row.status || 'running'),
+          scanComplete:
+            Number(row.scan_complete || 0) === 1 || ['completed', 'stalled'].includes(String(row.status || '')),
+          dataComplete: Number(row.data_complete || 0) === 1,
+          completionQuality: row.completion_quality || null,
+          pageLimitReached: row.stall_reason === 'page_limit_1000',
+          failedPageCount: Number(row.failed_page_count || 0),
+          duplicatePageCount: Number(row.duplicate_page_count || 0),
+          emptyPageCount: Number(row.empty_page_count || 0),
+          parseErrorCount: Number(row.parse_error_count || 0),
+          assetErrorCount: Number(row.asset_error_count || 0),
+          scanPercentHighWater: row.scan_percent_high_water == null ? null : Number(row.scan_percent_high_water),
+          observedAt: row.observed_at || null,
+        },
+      ]),
+    );
 
     // The textbook summary uses the unique question snapshot rows saved for
     // this run/textbook.  This is deliberately a different metric from the
@@ -247,22 +286,31 @@ function readLiveRunProgress(dbPath, runId, options = {}) {
     // contributes to each catalog's `listSeenCount`, but only one
     // `sync_run_question_items` row contributes to the textbook summary.
     const questionItemColumns = tables.has('sync_run_question_items')
-      ? tableColumns(db, 'sync_run_question_items') : new Set();
-    const questionItemsAvailable = Boolean(textbookExternalId)
-      && ['run_id', 'provider', 'textbook_external_id', 'question_external_id']
-        .every((column) => questionItemColumns.has(column));
+      ? tableColumns(db, 'sync_run_question_items')
+      : new Set();
+    const questionItemsAvailable =
+      Boolean(textbookExternalId) &&
+      ['run_id', 'provider', 'textbook_external_id', 'question_external_id'].every((column) =>
+        questionItemColumns.has(column),
+      );
     let uniqueQuestionCount = null;
     if (questionItemsAvailable) {
-      const row = db.prepare(`
+      const row = db
+        .prepare(
+          `
         SELECT COUNT(*) AS n FROM sync_run_question_items AS question
         WHERE question.run_id = ?
           AND question.provider = ?
           AND question.textbook_external_id = ?
-      `).get(run.id, PROVIDER, textbookExternalId);
+      `,
+        )
+        .get(run.id, PROVIDER, textbookExternalId);
       uniqueQuestionCount = Math.max(0, Number(row?.n || 0));
     }
 
-    const rawRows = db.prepare(`
+    const rawRows = db
+      .prepare(
+        `
       SELECT item.textbook_external_id, item.catalog_external_id,
              ${optionalSelect(itemColumns, 'item', 'parent_external_id')},
              ${optionalSelect(itemColumns, 'item', 'node_level')},
@@ -278,28 +326,25 @@ function readLiveRunProgress(dbPath, runId, options = {}) {
                COALESCE(item.node_level, 2147483647) ASC,
                item.catalog_external_id ASC
       LIMIT ?
-    `).all(...parameters, maxNodes + 1);
+    `,
+      )
+      .all(...parameters, maxNodes + 1);
     const truncated = rawRows.length > maxNodes;
     const rows = rawRows.slice(0, maxNodes);
-    const runScanComplete = run.scanComplete === true
-      || (['success', 'completed'].includes(String(run.status || '').toLowerCase())
-        && [...progressByCatalog.values()].length > 0
-        && [...progressByCatalog.values()].every((item) => item.scanComplete));
+    const runScanComplete =
+      run.scanComplete === true ||
+      (['success', 'completed'].includes(String(run.status || '').toLowerCase()) &&
+        [...progressByCatalog.values()].length > 0 &&
+        [...progressByCatalog.values()].every((item) => item.scanComplete));
     const nodes = rows.map((row) => {
       const externalId = String(row.catalog_external_id);
       const progress = progressByCatalog.get(externalId) || null;
-      const occurrenceCount = progress
-        ? Math.max(0, Number(progress.listSeenCount || 0))
-        : 0;
-      const uniqueQuestionCount = progress
-        ? Math.max(0, Number(progress.uniqueQuestionCount || 0))
-        : 0;
-      const latestSourceTotal = progress?.latestSourceTotal == null
-        ? null : Math.max(0, Number(progress.latestSourceTotal));
+      const occurrenceCount = progress ? Math.max(0, Number(progress.listSeenCount || 0)) : 0;
+      const uniqueQuestionCount = progress ? Math.max(0, Number(progress.uniqueQuestionCount || 0)) : 0;
+      const latestSourceTotal =
+        progress?.latestSourceTotal == null ? null : Math.max(0, Number(progress.latestSourceTotal));
       const targetPages = progress?.targetPages == null ? null : Math.max(0, Number(progress.targetPages));
-      const attemptedPages = progress
-        ? Math.max(0, Number(progress.attemptedPageCount || 0))
-        : 0;
+      const attemptedPages = progress ? Math.max(0, Number(progress.attemptedPageCount || 0)) : 0;
       const level = row.node_level == null ? null : Number(row.node_level);
       return {
         nodeKey: `${textbookExternalId || row.textbook_external_id || ''}:${externalId}`,
@@ -339,15 +384,19 @@ function readLiveRunProgress(dbPath, runId, options = {}) {
         parseErrorCount: progress?.parseErrorCount || 0,
         assetErrorCount: progress?.assetErrorCount || 0,
         scanComplete: Boolean(progress?.scanComplete),
-        dataComplete: Boolean(progress && (
-          progress.dataComplete === true
-          || (progress.scanComplete
-            && progress.completionQuality !== 'completed_with_issues'
-            && progress.status !== 'stalled'
-            && !(progress.failedPageCount || progress.duplicatePageCount
-              || progress.parseErrorCount || progress.assetErrorCount)
-          )
-        )),
+        dataComplete: Boolean(
+          progress &&
+          (progress.dataComplete === true ||
+            (progress.scanComplete &&
+              progress.completionQuality !== 'completed_with_issues' &&
+              progress.status !== 'stalled' &&
+              !(
+                progress.failedPageCount ||
+                progress.duplicatePageCount ||
+                progress.parseErrorCount ||
+                progress.assetErrorCount
+              ))),
+        ),
         completionQuality: progress?.completionQuality || null,
         pageLimitReached: progress?.pageLimitReached === true,
         status: progress?.status || 'pending',
@@ -385,10 +434,9 @@ function readLiveRunProgress(dbPath, runId, options = {}) {
     // inferred by summing child catalog totals.  A missing probe therefore
     // keeps the denominator/progress explicitly unknown.
     const expectedTotalRaw = runScope.textbookExpectedTotal;
-    const expectedTotalNumber = expectedTotalRaw == null || expectedTotalRaw === ''
-      ? NaN : Number(expectedTotalRaw);
-    const textbookExpectedTotal = Number.isSafeInteger(expectedTotalNumber)
-      && expectedTotalNumber >= 0 ? expectedTotalNumber : null;
+    const expectedTotalNumber = expectedTotalRaw == null || expectedTotalRaw === '' ? NaN : Number(expectedTotalRaw);
+    const textbookExpectedTotal =
+      Number.isSafeInteger(expectedTotalNumber) && expectedTotalNumber >= 0 ? expectedTotalNumber : null;
     const collectedQuestionCount = uniqueQuestionCount;
     const queriedProgress = [...progressByCatalog.values()];
 
@@ -400,21 +448,29 @@ function readLiveRunProgress(dbPath, runId, options = {}) {
     // with the best single catalog" formula, which hit 99% during the first
     // chapter and then stayed there for the rest of the textbook.
     const pageCapacity = Math.max(1, Number(runScope.pageCapacity) || 10);
-    const selectedLevels = Array.isArray(runScope.catalogLevels) && runScope.catalogLevels.length
-      ? runScope.catalogLevels.map((value) => Number(value)).filter((value) => Number.isFinite(value))
-      : [1, 2, 3];
-    const selectedIds = Array.isArray(runScope.catalogIds) && runScope.catalogIds.length
-      ? new Set(runScope.catalogIds.map((value) => String(value)))
-      : null;
-    const levelByCatalog = new Map(db.prepare(`
+    const selectedLevels =
+      Array.isArray(runScope.catalogLevels) && runScope.catalogLevels.length
+        ? runScope.catalogLevels.map((value) => Number(value)).filter((value) => Number.isFinite(value))
+        : [1, 2, 3];
+    const selectedIds =
+      Array.isArray(runScope.catalogIds) && runScope.catalogIds.length
+        ? new Set(runScope.catalogIds.map((value) => String(value)))
+        : null;
+    const levelByCatalog = new Map(
+      db
+        .prepare(
+          `
       SELECT item.catalog_external_id, item.node_level
       FROM sync_run_catalog_items AS item
       WHERE ${where}
       LIMIT 20000
-    `).all(...parameters).map((row) => [String(row.catalog_external_id), row.node_level == null ? null : Number(row.node_level)]));
-    const isSelected = (catalogId, level) => (
-      selectedIds ? selectedIds.has(String(catalogId)) : selectedLevels.includes(Number(level))
+    `,
+        )
+        .all(...parameters)
+        .map((row) => [String(row.catalog_external_id), row.node_level == null ? null : Number(row.node_level)]),
     );
+    const isSelected = (catalogId, level) =>
+      selectedIds ? selectedIds.has(String(catalogId)) : selectedLevels.includes(Number(level));
     const selectedCountByLevel = new Map();
     for (const [catalogId, level] of levelByCatalog) {
       if (!isSelected(catalogId, level)) continue;
@@ -450,8 +506,10 @@ function readLiveRunProgress(dbPath, runId, options = {}) {
       selectedCatalogCount = scopeSelectedCount;
       const unstarted = Math.max(0, selectedCatalogCount - queriedProgress.length);
       if (unstarted > 0) {
-        if (queriedProgress.length > 0) estimatedRemainingPages = unstarted * (knownTargetPages / queriedProgress.length);
-        else if (textbookExpectedTotal != null) estimatedRemainingPages = Math.ceil(textbookExpectedTotal / pageCapacity);
+        if (queriedProgress.length > 0)
+          estimatedRemainingPages = unstarted * (knownTargetPages / queriedProgress.length);
+        else if (textbookExpectedTotal != null)
+          estimatedRemainingPages = Math.ceil(textbookExpectedTotal / pageCapacity);
         else estimateComplete = false;
       }
     } else {
@@ -461,7 +519,8 @@ function readLiveRunProgress(dbPath, runId, options = {}) {
         if (unstarted === 0) continue;
         let perCatalog = null;
         if (started.count > 0) perCatalog = started.pages / started.count;
-        else if (textbookExpectedTotal != null) perCatalog = Math.ceil(textbookExpectedTotal / pageCapacity) / selectedCount;
+        else if (textbookExpectedTotal != null)
+          perCatalog = Math.ceil(textbookExpectedTotal / pageCapacity) / selectedCount;
         if (perCatalog == null) {
           estimateComplete = false;
           continue;
@@ -473,17 +532,20 @@ function readLiveRunProgress(dbPath, runId, options = {}) {
     // "All started catalogs are complete" is not "the run is complete" while
     // selected catalogs have not started yet.
     const allSelectedStarted = selectedCatalogCount === 0 || queriedProgress.length >= selectedCatalogCount;
-    const scanComplete = runScanComplete
-      || (queriedProgress.length > 0 && allSelectedStarted && queriedProgress.every((item) => item.scanComplete));
-    const dataComplete = run.snapshotComplete === true
-      || run.dataComplete === true
-      || (scanComplete && queriedProgress.every((item) => (
-        item.dataComplete === true
-        || (item.completionQuality !== 'completed_with_issues'
-          && item.status !== 'stalled'
-          && !(item.failedPageCount || item.duplicatePageCount
-            || item.parseErrorCount || item.assetErrorCount))
-      )));
+    const scanComplete =
+      runScanComplete ||
+      (queriedProgress.length > 0 && allSelectedStarted && queriedProgress.every((item) => item.scanComplete));
+    const dataComplete =
+      run.snapshotComplete === true ||
+      run.dataComplete === true ||
+      (scanComplete &&
+        queriedProgress.every(
+          (item) =>
+            item.dataComplete === true ||
+            (item.completionQuality !== 'completed_with_issues' &&
+              item.status !== 'stalled' &&
+              !(item.failedPageCount || item.duplicatePageCount || item.parseErrorCount || item.assetErrorCount)),
+        ));
     const pageLimitReached = [...progressByCatalog.values()].some((item) => item.pageLimitReached === true);
     let totalsKnown;
     let statisticsPending;
@@ -498,9 +560,8 @@ function readLiveRunProgress(dbPath, runId, options = {}) {
       totalsKnown = textbookExpectedTotal != null || knownTargetPages > 0;
       statisticsPending = !questionItemsAvailable && queriedProgress.length === 0;
       totalQuestionCount = textbookExpectedTotal;
-      progressPercent = estimatedTotalPages > 0
-        ? Math.min(99, Math.round((attemptedPages / estimatedTotalPages) * 1000) / 10)
-        : null;
+      progressPercent =
+        estimatedTotalPages > 0 ? Math.min(99, Math.round((attemptedPages / estimatedTotalPages) * 1000) / 10) : null;
     }
     const counts = (level) => Number(levelCounts.get(level) || 0);
     const fetchWindows = [];
@@ -508,7 +569,9 @@ function readLiveRunProgress(dbPath, runId, options = {}) {
       const slotColumns = tableColumns(db, 'sync_progress');
       const slotPredicates = ['slot.run_id = ?'];
       const slotParameters = [run.id];
-      const slotRows = db.prepare(`
+      const slotRows = db
+        .prepare(
+          `
         SELECT slot.worker_id, slot.catalog_external_id, slot.catalog_name, slot.catalog_path,
                slot.current_page, slot.expected_pages, slot.expected_total, slot.updated_at
                ${slotColumns.has('slot_status') ? ', slot.slot_status' : ''}
@@ -518,7 +581,9 @@ function readLiveRunProgress(dbPath, runId, options = {}) {
         FROM sync_progress AS slot
         WHERE ${slotPredicates.join(' AND ')}
         ORDER BY slot.worker_id ASC
-      `).all(...slotParameters);
+      `,
+        )
+        .all(...slotParameters);
       const byCatalog = new Map();
       for (const row of slotRows) {
         const catalogId = row.catalog_external_id == null ? '' : String(row.catalog_external_id);
@@ -538,13 +603,13 @@ function readLiveRunProgress(dbPath, runId, options = {}) {
         const questionCount = row.question_count == null ? null : Number(row.question_count);
         const status = String(row.slot_status || (pageNumber == null ? 'idle' : 'fetching'));
         const sourceTotal = row.expected_total == null ? null : Number(row.expected_total);
-        const line = boundedString(row.message, 500) || (
-          catalogId && pageNumber != null
-            ? `catalog=${catalogId} page=${pageNumber}`
-              + (questionCount == null ? '' : ` questions=${questionCount}`)
-              + (sourceTotal == null ? '' : ` total=${sourceTotal}`)
-            : null
-        );
+        const line =
+          boundedString(row.message, 500) ||
+          (catalogId && pageNumber != null
+            ? `catalog=${catalogId} page=${pageNumber}` +
+              (questionCount == null ? '' : ` questions=${questionCount}`) +
+              (sourceTotal == null ? '' : ` total=${sourceTotal}`)
+            : null);
         window.slots.push({
           slot: Number(row.worker_id || 0),
           pageNumber,
@@ -561,9 +626,7 @@ function readLiveRunProgress(dbPath, runId, options = {}) {
       }
       fetchWindows.push(...byCatalog.values());
     }
-    const currentCatalogIds = new Set(
-      fetchWindows.map((item) => String(item.catalogExternalId || '')).filter(Boolean),
-    );
+    const currentCatalogIds = new Set(fetchWindows.map((item) => String(item.catalogExternalId || '')).filter(Boolean));
     if (currentCatalogIds.size) {
       const markCurrent = (nodes) => {
         for (const node of nodes || []) {
@@ -600,8 +663,10 @@ function readLiveRunProgress(dbPath, runId, options = {}) {
       scanComplete,
       dataComplete,
       completionQuality: scanComplete
-        ? (dataComplete ? 'completed' : 'completed_with_issues')
-        : (run.completionQuality || null),
+        ? dataComplete
+          ? 'completed'
+          : 'completed_with_issues'
+        : run.completionQuality || null,
       pageLimitReached,
       snapshotComplete: run.snapshotComplete === true,
       progressPercent,
@@ -621,7 +686,9 @@ function readLiveRunProgress(dbPath, runId, options = {}) {
       knowledgePointCount: counts(2),
       secondaryKnowledgePointCount: counts(3),
       catalogCount,
-      catalogLevelCounts: Object.fromEntries([...levelCounts.entries()].map(([level, count]) => [String(level), count])),
+      catalogLevelCounts: Object.fromEntries(
+        [...levelCounts.entries()].map(([level, count]) => [String(level), count]),
+      ),
       summaryCatalogIds: [],
       summaryCatalogLevel: null,
       summaryNodeCount: 0,
@@ -637,7 +704,9 @@ function readLiveRunProgress(dbPath, runId, options = {}) {
   } catch (error) {
     return unavailable('collector 实时进度读取失败', error);
   } finally {
-    try { db?.close(); } catch {}
+    try {
+      db?.close();
+    } catch {}
   }
 }
 

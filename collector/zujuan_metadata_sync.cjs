@@ -9,11 +9,7 @@
  * never writes MySQL.
  */
 
-const {
-  DEFAULT_SEED_URL,
-  PROVIDER,
-  BLOCK_TEXT_MARKERS,
-} = require('./src/sources/zujuan/constants.cjs');
+const { DEFAULT_SEED_URL, PROVIDER, BLOCK_TEXT_MARKERS } = require('./src/sources/zujuan/constants.cjs');
 const {
   METADATA_TERMINAL_STATUSES,
   ensureMetadataSnapshotSchema,
@@ -27,9 +23,7 @@ const {
   lookupTextbookByNames,
   pickExactByName,
 } = require('./src/storage/metadata_store.cjs');
-const {
-  StopCrawlError,
-} = require('./src/shared/errors.cjs');
+const { StopCrawlError } = require('./src/shared/errors.cjs');
 const {
   assertDiscoveryIds,
   normalizeIsNew,
@@ -62,27 +56,16 @@ const {
   profileLooksWarm,
   settleSourcePage,
 } = require('./src/sources/zujuan/session.cjs');
-const {
-  buildChapterTextbooksUrl,
-} = require('./src/sources/zujuan/urls.cjs');
-const {
-  isStableExternalId,
-} = require('./src/shared/utils.cjs');
+const { buildChapterTextbooksUrl } = require('./src/sources/zujuan/urls.cjs');
+const { isStableExternalId } = require('./src/shared/utils.cjs');
 const {
   readBootstrapChapter,
   readVersionsFromPage,
   selectVersion,
   waitForTextbookList,
 } = require('./src/jobs/metadata_run.cjs');
-const {
-  main,
-  runCli,
-  parseArgs,
-  usage,
-} = require('./src/cli/metadata_sync_cli.cjs');
-const {
-  decodeHtmlEntities,
-} = require('./src/shared/html.cjs');
+const { main, runCli, parseArgs, usage } = require('./src/cli/metadata_sync_cli.cjs');
+const { decodeHtmlEntities } = require('./src/shared/html.cjs');
 
 module.exports = {
   DEFAULT_SEED_URL,

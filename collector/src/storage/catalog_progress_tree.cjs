@@ -6,12 +6,7 @@
  * legacy collector.  Unique question counts roll up over descendants.
  */
 
-function buildCatalogProgressTree({
-  nodes = [],
-  memberships = [],
-  stats = {},
-  currentByCatalog = {},
-} = {}) {
+function buildCatalogProgressTree({ nodes = [], memberships = [], stats = {}, currentByCatalog = {} } = {}) {
   const questionsByCatalog = new Map();
   for (const row of memberships) {
     const catalogId = String(row.catalogExternalId || '');
@@ -77,9 +72,8 @@ function buildCatalogProgressTree({
     seenRoot.add(id);
     roots.push(buildNode(id));
   }
-  const walkPages = (list, key) => list.reduce((sum, node) => (
-    sum + Number(node[key] || 0) + walkPages(node.children, key)
-  ), 0);
+  const walkPages = (list, key) =>
+    list.reduce((sum, node) => sum + Number(node[key] || 0) + walkPages(node.children, key), 0);
   const pagesDone = walkPages(roots, 'lastCompletedPage');
   const pagesTotal = walkPages(roots, 'expectedPages');
   return {
@@ -87,9 +81,8 @@ function buildCatalogProgressTree({
     catalogCount: nodes.length,
     pagesDone,
     pagesTotal,
-    progressPercent: pagesTotal > 0
-      ? Math.min(100, Math.round((Math.min(pagesDone, pagesTotal) / pagesTotal) * 1000) / 10)
-      : null,
+    progressPercent:
+      pagesTotal > 0 ? Math.min(100, Math.round((Math.min(pagesDone, pagesTotal) / pagesTotal) * 1000) / 10) : null,
     current: Object.values(currentByCatalog),
     catalogs: roots,
   };

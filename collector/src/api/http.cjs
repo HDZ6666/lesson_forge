@@ -28,9 +28,11 @@ function sendJson(response, statusCode, payload) {
   let body = Buffer.from(encoded || '{}');
   if (body.length > MAX_RESPONSE_BYTES) {
     statusCode = 413;
-    body = Buffer.from(JSON.stringify({
-      error: { code: 'response_too_large', message: '响应超过安全大小上限，请缩小分页范围' },
-    }));
+    body = Buffer.from(
+      JSON.stringify({
+        error: { code: 'response_too_large', message: '响应超过安全大小上限，请缩小分页范围' },
+      }),
+    );
   }
   response.writeHead(statusCode, {
     'content-type': 'application/json; charset=utf-8',
@@ -48,8 +50,7 @@ function sendAssetResponse(response, asset) {
     });
     return;
   }
-  const fileDescriptor = Number.isInteger(asset?.fileDescriptor)
-    ? asset.fileDescriptor : null;
+  const fileDescriptor = Number.isInteger(asset?.fileDescriptor) ? asset.fileDescriptor : null;
   let stream;
   if (contentLength === 0 && fileDescriptor != null) {
     try {
@@ -61,7 +62,9 @@ function sendAssetResponse(response, asset) {
       });
       response.end();
     } finally {
-      try { fs.closeSync(fileDescriptor); } catch {}
+      try {
+        fs.closeSync(fileDescriptor);
+      } catch {}
     }
     return;
   }
@@ -72,17 +75,20 @@ function sendAssetResponse(response, asset) {
     // replacement after validation cannot redirect the response.  The path
     // fallback preserves compatibility for direct callers using older asset
     // result objects.
-    stream = fileDescriptor != null
-      ? fs.createReadStream(null, {
-        fd: fileDescriptor,
-        autoClose: true,
-        start: 0,
-        end: contentLength - 1,
-      })
-      : fs.createReadStream(asset.filePath);
+    stream =
+      fileDescriptor != null
+        ? fs.createReadStream(null, {
+            fd: fileDescriptor,
+            autoClose: true,
+            start: 0,
+            end: contentLength - 1,
+          })
+        : fs.createReadStream(asset.filePath);
   } catch {
     if (fileDescriptor != null) {
-      try { fs.closeSync(fileDescriptor); } catch {}
+      try {
+        fs.closeSync(fileDescriptor);
+      } catch {}
     }
     sendJson(response, 404, {
       error: { code: 'asset_not_found', message: '素材文件不存在或不可用' },
@@ -154,7 +160,6 @@ async function readJson(request, maxBytes = MAX_BODY_BYTES) {
     throw new Error('请求体必须是有效 JSON');
   }
 }
-
 
 module.exports = {
   MAX_BODY_BYTES,

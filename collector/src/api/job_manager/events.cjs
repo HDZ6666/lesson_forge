@@ -60,13 +60,16 @@ class EventMethods {
         break;
       case 'progress': {
         if (scope) {
-          if (event.catalogCount != null) job._scriptCatalogCount = Math.max(job._scriptCatalogCount || 0, event.catalogCount);
-          if (event.questionsSeen != null) job._scriptQuestionCount = Math.max(job._scriptQuestionCount || 0, event.questionsSeen);
+          if (event.catalogCount != null)
+            job._scriptCatalogCount = Math.max(job._scriptCatalogCount || 0, event.catalogCount);
+          if (event.questionsSeen != null)
+            job._scriptQuestionCount = Math.max(job._scriptQuestionCount || 0, event.questionsSeen);
           if (event.pagesOk != null) scope.pagesOk = event.pagesOk;
           if (event.questionsSeen != null) scope.questionsSeen = event.questionsSeen;
           if (event.assetsDownloaded != null) scope.assetsDownloaded = event.assetsDownloaded;
           if (event.errors != null) scope.errorCount = event.errors;
-          if (event.catalogCount != null) scope.catalogCount = Math.max(Number(scope.catalogCount || 0), event.catalogCount);
+          if (event.catalogCount != null)
+            scope.catalogCount = Math.max(Number(scope.catalogCount || 0), event.catalogCount);
           if (event.runId && !scope.collectorRunId) {
             scope.collectorRunId = event.runId;
             if (job.scopeItems.length === 1) job.collectorRunId = event.runId;
@@ -153,4 +156,3 @@ class EventMethods {
 }
 
 module.exports = { EventMethods };
-

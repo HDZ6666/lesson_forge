@@ -50,12 +50,7 @@ const { buildChapterTextbooksUrl } = require('../sources/zujuan/urls.cjs');
 const { classifyHtmlProtection } = require('../sources/zujuan/response_classifier.cjs');
 
 const { PoliteGate } = require('../policies/retry.cjs');
-const {
-  MetadataStore,
-  buildReport,
-  formatReport,
-  writeJsonOutput,
-} = require('../storage/metadata_store.cjs');
+const { MetadataStore, buildReport, formatReport, writeJsonOutput } = require('../storage/metadata_store.cjs');
 const { saveRawHtml } = require('../storage/raw_pages.cjs');
 const { captureFailurePage } = require('../storage/failure_pages.cjs');
 const { createProcessEventEmitter } = require('../jobs/events.cjs');
@@ -69,9 +64,8 @@ async function readVersionsFromPage(page, sourceUrl) {
     const root = document.querySelector('#chapter_textbook_version');
     if (!root) return { error: 'missing_version_container' };
     return Array.from(root.querySelectorAll('a')).map((el, index) => ({
-      externalVersionId: el.getAttribute('versionid')
-        || el.getAttribute('data-versionid')
-        || el.getAttribute('data-version-id'),
+      externalVersionId:
+        el.getAttribute('versionid') || el.getAttribute('data-versionid') || el.getAttribute('data-version-id'),
       versionName: (el.textContent || '').replace(/\u00a0/g, ' ').trim(),
       className: el.getAttribute('class') || '',
       selected: el.classList.contains('selected'),
@@ -95,20 +89,22 @@ async function readTextbookState(page) {
     const text = root.textContent || '';
     if (text.includes('加载中err')) return { error: 'textbook_list_error', loading: false, items: [] };
     const loading = text.includes('加载中');
-    const items = Array.from(root.querySelectorAll('a')).map((el, index) => {
-      const href = el.getAttribute('href') || '';
-      const fromHref = href.match(/\/zj(\d+)\b/);
-      return {
-        externalTextbookId: el.getAttribute('chapter-id') || (fromHref ? fromHref[1] : null),
-        textbookName: (el.textContent || '').replace(/\u00a0/g, ' ').trim(),
-        href,
-        qbmid: el.getAttribute('data-qbmid'),
-        selected: el.classList.contains('selected'),
-        className: el.getAttribute('class') || '',
-        sortOrder: index,
-        attributes: Object.fromEntries(Array.from(el.attributes).map((item) => [item.name, item.value])),
-      };
-    }).filter((item) => item.textbookName && !item.textbookName.includes('加载中'));
+    const items = Array.from(root.querySelectorAll('a'))
+      .map((el, index) => {
+        const href = el.getAttribute('href') || '';
+        const fromHref = href.match(/\/zj(\d+)\b/);
+        return {
+          externalTextbookId: el.getAttribute('chapter-id') || (fromHref ? fromHref[1] : null),
+          textbookName: (el.textContent || '').replace(/\u00a0/g, ' ').trim(),
+          href,
+          qbmid: el.getAttribute('data-qbmid'),
+          selected: el.classList.contains('selected'),
+          className: el.getAttribute('class') || '',
+          sortOrder: index,
+          attributes: Object.fromEntries(Array.from(el.attributes).map((item) => [item.name, item.value])),
+        };
+      })
+      .filter((item) => item.textbookName && !item.textbookName.includes('加载中'));
     return { loading, items, error: null };
   });
 }
@@ -154,7 +150,12 @@ async function fetchTextbooksForVersion(page, version, options) {
           'X-Requested-With': 'XMLHttpRequest',
         },
       });
-      return { status: response.status, headers: Object.fromEntries(response.headers), text: await response.text(), error: null };
+      return {
+        status: response.status,
+        headers: Object.fromEntries(response.headers),
+        text: await response.text(),
+        error: null,
+      };
     } catch (error) {
       return { status: 0, text: '', error: String(error && error.message ? error.message : error) };
     }
@@ -177,10 +178,7 @@ async function fetchTextbooksForVersion(page, version, options) {
     allowEmpty: true,
   });
   if (textbooks.length === 0) {
-    throw new StopCrawlError(
-      `版本 ${version.versionName} 的教材列表为空，可能发生接口契约变化。`,
-      'textbook_contract',
-    );
+    throw new StopCrawlError(`版本 ${version.versionName} 的教材列表为空，可能发生接口契约变化。`, 'textbook_contract');
   }
   return textbooks;
 }
@@ -195,9 +193,10 @@ async function readBootstrapChapter(page) {
     const tree = document.querySelector('.tk-tree');
     if (!tree) return { error: 'missing_tree' };
     const first = tree.querySelector('li.tree-node[data-level="1"]');
-    const bootstrap = first?.getAttribute('tree-id')
-      || first?.querySelector(':scope > .tree-node-name[data-tree-id]')?.getAttribute('data-tree-id')
-      || null;
+    const bootstrap =
+      first?.getAttribute('tree-id') ||
+      first?.querySelector(':scope > .tree-node-name[data-tree-id]')?.getAttribute('data-tree-id') ||
+      null;
     return {
       textbookTreeId: tree.getAttribute('tree-id'),
       bootstrapChapterExternalId: bootstrap,
@@ -208,20 +207,22 @@ async function readBootstrapChapter(page) {
 async function runDiscovery(options, dependencies = {}) {
   assertMathSource(options);
   if (!options.acknowledgeSourcePolicy) {
-    throw new Error(
-      '运行前必须传 --acknowledge-source-policy，确认已核对来源站规则、授权范围和内容使用边界。',
-    );
+    throw new Error('运行前必须传 --acknowledge-source-policy，确认已核对来源站规则、授权范围和内容使用边界。');
   }
 
-  const playwright = dependencies.playwright || await loadPlaywright();
+  const playwright = dependencies.playwright || (await loadPlaywright());
   ensureDir(options.dataDir);
   ensureDir(options.profileDir);
   const store = new MetadataStore(options.dbPath);
   options.sourceControl = new SourceControl(options.dbPath);
   options.sourceBudget = new SourceBudget(options.dbPath);
-  options.resourceGuard = new ResourceGuard({ paths: {
-    database: path.dirname(options.dbPath), data: options.dataDir, profile: options.profileDir,
-  } });
+  options.resourceGuard = new ResourceGuard({
+    paths: {
+      database: path.dirname(options.dbPath),
+      data: options.dataDir,
+      profile: options.profileDir,
+    },
+  });
   let releaseLock;
   try {
     releaseLock = acquireLock(`${options.dbPath}.lock`);
@@ -327,22 +328,13 @@ async function runDiscovery(options, dependencies = {}) {
       assertDiscoveryIds([version], textbooks);
       console.log(`[教材] ${version.versionName} 共 ${textbooks.length} 本`);
       if (options.saveRaw) {
-        saveRawHtml(
-          options.dataDir,
-          runId,
-          'version',
-          version.externalVersionId,
-          await page.content(),
-        );
+        saveRawHtml(options.dataDir, runId, 'version', version.externalVersionId, await page.content());
       }
 
       for (const textbook of textbooks) {
         if (signalName) throw new StopCrawlError(`收到 ${signalName}，任务安全停止。`, 'signal');
         if (!textbook.sourceUrl) {
-          throw new StopCrawlError(
-            `教材 ${textbook.textbookName} 缺少可追溯来源地址。`,
-            'textbook_url_missing',
-          );
+          throw new StopCrawlError(`教材 ${textbook.textbookName} 缺少可追溯来源地址。`, 'textbook_url_missing');
         }
         console.log(
           `[教材] ${version.versionName} / ${textbook.textbookName} (${textbook.externalTextbookId}) ${textbook.sourceUrl || textbook.href || ''}`,
@@ -386,13 +378,19 @@ async function runDiscovery(options, dependencies = {}) {
   } catch (error) {
     if (context) await captureFailurePage(context.pages()[0], options, runId, error);
     if (['challenge', 'http_401', 'http_403', 'http_405'].includes(error.code)) {
-      try { options.sourceControl.markManual(error.message); }
-      catch (pauseError) { console.warn(`[暂停记录失败] ${pauseError.message}`); }
+      try {
+        options.sourceControl.markManual(error.message);
+      } catch (pauseError) {
+        console.warn(`[暂停记录失败] ${pauseError.message}`);
+      }
     }
     counters.errors += 1;
-    finalStatus = signalName === 'SIGINT' || signalName === 'SIGTERM'
-      ? 'cancelled'
-      : (error instanceof StopCrawlError ? 'blocked' : 'failed');
+    finalStatus =
+      signalName === 'SIGINT' || signalName === 'SIGTERM'
+        ? 'cancelled'
+        : error instanceof StopCrawlError
+          ? 'blocked'
+          : 'failed';
     finalMessage = error.message;
     events.emit('error', {
       runId,

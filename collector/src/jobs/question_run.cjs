@@ -18,9 +18,7 @@ const path = require('node:path');
 const { QuestionSyncError } = require('../shared/errors.cjs');
 const { ensureDir, sleep } = require('../shared/utils.cjs');
 const { LOCK_SUFFIX, acquireLock: acquireSharedLock } = require('../shared/lock.cjs');
-const {
-  assertAllowedUrl: assertAllowedUrlShared,
-} = require('../shared/url_policy.cjs');
+const { assertAllowedUrl: assertAllowedUrlShared } = require('../shared/url_policy.cjs');
 const { validateQuestionListResumeSourceRun } = require('../storage/resume.cjs');
 const { normalizeDisplayTotal } = require('../sources/zujuan/question_parser.cjs');
 const { normalizeCatalogTree, selectCatalogs } = require('../sources/zujuan/catalog_parser.cjs');
@@ -32,10 +30,12 @@ const { createProcessEventEmitter } = require('../jobs/events.cjs');
 // error class so the API manager and resume rules can classify them.
 const questionSyncErrorFactory = (message, code, cause) => new QuestionSyncError(message, code, cause);
 const assertAllowedUrl = (value, hosts) => assertAllowedUrlShared(value, hosts, questionSyncErrorFactory);
-const acquireLock = (lockPath) => acquireSharedLock(lockPath, {
-  openError: (target, cause) => new QuestionSyncError(`无法创建题库同步锁：${target}`, 'collector_locked', cause),
-  conflictError: (target, cause) => new QuestionSyncError(`已有题库同步正在运行：${target}`, 'collector_locked', cause),
-});
+const acquireLock = (lockPath) =>
+  acquireSharedLock(lockPath, {
+    openError: (target, cause) => new QuestionSyncError(`无法创建题库同步锁：${target}`, 'collector_locked', cause),
+    conflictError: (target, cause) =>
+      new QuestionSyncError(`已有题库同步正在运行：${target}`, 'collector_locked', cause),
+  });
 
 const { buildScope } = require('./question_scope.cjs');
 const { assertMathSource } = require('../sources/registry.cjs');
@@ -65,7 +65,11 @@ async function probeTextbookTotal(page, opts, requestGate) {
     const total = normalizeDisplayTotal(rootProbe?.total);
     if (total == null) {
       console.warn('[统计] 教材根目录 total 不可用，继续采集');
-      return { textbookExpectedTotal: null, textbookExpectedTotalObservedAt: null, summaryStrategy: 'textbook_root_probe_unavailable' };
+      return {
+        textbookExpectedTotal: null,
+        textbookExpectedTotalObservedAt: null,
+        summaryStrategy: 'textbook_root_probe_unavailable',
+      };
     }
     console.log(`[统计] 教材根目录 total=${total}`);
     return {
@@ -75,7 +79,11 @@ async function probeTextbookTotal(page, opts, requestGate) {
     };
   } catch (error) {
     console.warn(`[统计] 教材根目录 total 探针失败，继续采集：${error.message || error}`);
-    return { textbookExpectedTotal: null, textbookExpectedTotalObservedAt: null, summaryStrategy: 'textbook_root_probe_unavailable' };
+    return {
+      textbookExpectedTotal: null,
+      textbookExpectedTotalObservedAt: null,
+      summaryStrategy: 'textbook_root_probe_unavailable',
+    };
   }
 }
 
@@ -93,12 +101,14 @@ function installStopSignal(register, sourceBudget) {
     console.warn(`[停止] 收到 ${stopSignal}，将在当前窗口结算后封存为可续采运行`);
   };
   const handlers = { SIGTERM: () => onStopSignal('SIGTERM'), SIGINT: () => onStopSignal('SIGINT') };
-  const registerStop = register || ((entries) => {
-    for (const [signal, handler] of Object.entries(entries)) process.on(signal, handler);
-    return () => {
-      for (const [signal, handler] of Object.entries(entries)) process.removeListener(signal, handler);
-    };
-  });
+  const registerStop =
+    register ||
+    ((entries) => {
+      for (const [signal, handler] of Object.entries(entries)) process.on(signal, handler);
+      return () => {
+        for (const [signal, handler] of Object.entries(entries)) process.removeListener(signal, handler);
+      };
+    });
   const unregister = registerStop(handlers) || (() => {});
   const assertNotStopped = () => {
     sourceBudget.assertRunning();
@@ -124,9 +134,14 @@ async function runSync(options, dependencies = {}) {
   const store = dependencies.store || new QuestionSyncStore(opts.dbPath, { dataDir: opts.dataDir });
   opts.sourceControl = new SourceControl(opts.dbPath);
   opts.sourceBudget = new SourceBudget(opts.dbPath, dependencies.sourceBudgetOptions);
-  opts.resourceGuard = new ResourceGuard({ ...dependencies.resourceGuardOptions, paths: {
-    database: path.dirname(opts.dbPath), data: opts.dataDir, profile: opts.profileDir,
-  } });
+  opts.resourceGuard = new ResourceGuard({
+    ...dependencies.resourceGuardOptions,
+    paths: {
+      database: path.dirname(opts.dbPath),
+      data: opts.dataDir,
+      profile: opts.profileDir,
+    },
+  });
   const release = acquireLock(`${opts.dbPath}${LOCK_SUFFIX}`);
   const initialScope = buildScope(opts);
   let runId;
@@ -143,19 +158,20 @@ async function runSync(options, dependencies = {}) {
   const requestGate = createRequestGate(opts.delayMin, opts.delayMax);
   let scope = initialScope;
   const events = dependencies.events || createProcessEventEmitter({ stdout: opts.eventsStdout === true });
-  const emitProgress = (state, pageNumber, resultType) => events.emit('progress', {
-    runId,
-    catalogCount: selectedCatalogs.length,
-    catalogsDone: progress.catalogsDone,
-    pagesOk: counters.pagesOk,
-    questionsSeen: counters.questionsSeen,
-    assetsDownloaded: counters.assetsDownloaded,
-    errors: counters.errors,
-    catalogExternalId: state?.catalog?.externalId,
-    pageNumber,
-    resultType,
-    sourceTotal: state?.expectedTotal,
-  });
+  const emitProgress = (state, pageNumber, resultType) =>
+    events.emit('progress', {
+      runId,
+      catalogCount: selectedCatalogs.length,
+      catalogsDone: progress.catalogsDone,
+      pagesOk: counters.pagesOk,
+      questionsSeen: counters.questionsSeen,
+      assetsDownloaded: counters.assetsDownloaded,
+      errors: counters.errors,
+      catalogExternalId: state?.catalog?.externalId,
+      pageNumber,
+      resultType,
+      sourceTotal: state?.expectedTotal,
+    });
   opts.onVerificationWait = (info) => events.emit('verification_wait', { runId, ...info });
 
   const { assertNotStopped, unregister: unregisterStop } = installStopSignal(
@@ -207,18 +223,22 @@ async function runSync(options, dependencies = {}) {
     opts.sourceBudget.startRun(`content:${runId}`, 'content');
     opts.sourceBudget.startTiming();
     await session.open();
-    const rawTree = dependencies.catalogTree || await fetchCatalogTree(session.page, opts);
+    const rawTree = dependencies.catalogTree || (await fetchCatalogTree(session.page, opts));
     const tree = normalizeCatalogTree(rawTree, opts);
     const eligibleCatalogs = selectCatalogs(tree, { ...opts, maxCatalogs: 0 });
-    selectedCatalogs = opts.maxCatalogs > 0
-      ? eligibleCatalogs.slice(0, opts.maxCatalogs)
-      : eligibleCatalogs;
+    selectedCatalogs = opts.maxCatalogs > 0 ? eligibleCatalogs.slice(0, opts.maxCatalogs) : eligibleCatalogs;
     if (selectedCatalogs.length === 0) throw new QuestionSyncError('未选择任何目录。', 'catalog_not_found');
     scope = buildScope(opts, eligibleCatalogs.length, selectedCatalogs.length);
     store.updateRunScope(runId, scope);
     store.saveCatalogTree(runId, opts.textbookId, tree.nodes);
     console.log(`[目录] 全部节点 ${tree.nodes.length}，本次目录 ${selectedCatalogs.length}`);
-    events.emit('progress', { runId, catalogCount: selectedCatalogs.length, catalogsDone: 0, pagesOk: 0, questionsSeen: 0 });
+    events.emit('progress', {
+      runId,
+      catalogCount: selectedCatalogs.length,
+      catalogsDone: 0,
+      pagesOk: 0,
+      questionsSeen: 0,
+    });
 
     // 2 probe.  A bounded `--limit` run intentionally skips this extra
     // request: the limit contract is that only complete real API pages are

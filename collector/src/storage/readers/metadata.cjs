@@ -54,25 +54,31 @@ function resolveMetadataRun(db, metadataRunId = null) {
   if (!tables.has('source_metadata_runs')) return null;
   const columns = tableColumns(db, 'source_metadata_runs');
   const hasProvider = columns.has('provider');
-  const lock = columns.has('snapshot_locked_at')
-    ? ', snapshot_locked_at AS snapshotLockedAt'
-    : '';
+  const lock = columns.has('snapshot_locked_at') ? ', snapshot_locked_at AS snapshotLockedAt' : '';
   const selected = hasProvider
     ? `id, provider, started_at, finished_at, status, version_count, textbook_count${lock}`
     : `id, started_at, finished_at, status, version_count, textbook_count${lock}`;
   let run;
   if (metadataRunId == null) {
     run = hasProvider
-      ? db.prepare(`
+      ? db
+          .prepare(
+            `
           SELECT ${selected} FROM source_metadata_runs
           WHERE provider = ? AND status = 'success' AND finished_at IS NOT NULL
           ORDER BY id DESC LIMIT 1
-        `).get(PROVIDER)
-      : db.prepare(`
+        `,
+          )
+          .get(PROVIDER)
+      : db
+          .prepare(
+            `
           SELECT ${selected} FROM source_metadata_runs
           WHERE status = 'success' AND finished_at IS NOT NULL
           ORDER BY id DESC LIMIT 1
-        `).get();
+        `,
+          )
+          .get();
   } else {
     run = db.prepare(`SELECT ${selected} FROM source_metadata_runs WHERE id = ?`).get(Number(metadataRunId));
   }
@@ -90,11 +96,11 @@ function resolveMetadataRun(db, metadataRunId = null) {
   return { ...run, id: Number(run.id) };
 }
 
-function readCandidateRowsFromDb(db, entityType, {
-  provider = null,
-  textbookExternalId = null,
-  timeWindow = null,
-} = {}) {
+function readCandidateRowsFromDb(
+  db,
+  entityType,
+  { provider = null, textbookExternalId = null, timeWindow = null } = {},
+) {
   const entity = ENTITIES[entityType];
   if (!entity) throw new Error('不支持的同步实体类型');
   const tables = tableNames(db);
@@ -112,11 +118,11 @@ function readCandidateRowsFromDb(db, entityType, {
   }
   const selected = entity.columns
     .filter((column) => columns.has(column))
-    .map((column) => (
+    .map((column) =>
       entityType === 'question' && column === 'plain_text'
         ? 'substr("plain_text", 1, 360) AS "plain_text"'
-        : `"${column}"`
-    ));
+        : `"${column}"`,
+    );
   const predicates = [];
   const parameters = [];
   if (provider) {
@@ -173,8 +179,15 @@ function readMetadataRunRowsFromDb(db, entityType, run, { provider = PROVIDER } 
       table: 'source_metadata_run_versions',
       idColumn: 'external_version_id',
       columns: [
-        'provider', 'external_version_id', 'version_name', 'source_url', 'is_new',
-        'sort_order', 'status', 'raw_json', 'captured_at',
+        'provider',
+        'external_version_id',
+        'version_name',
+        'source_url',
+        'is_new',
+        'sort_order',
+        'status',
+        'raw_json',
+        'captured_at',
       ],
       expectedCount: Number(run?.version_count || 0),
     },
@@ -182,9 +195,18 @@ function readMetadataRunRowsFromDb(db, entityType, run, { provider = PROVIDER } 
       table: 'source_metadata_run_textbooks',
       idColumn: 'external_textbook_id',
       columns: [
-        'provider', 'external_textbook_id', 'version_external_id', 'textbook_name',
-        'grade', 'volume', 'source_url', 'sort_order', 'status',
-        'bootstrap_chapter_external_id', 'raw_json', 'captured_at',
+        'provider',
+        'external_textbook_id',
+        'version_external_id',
+        'textbook_name',
+        'grade',
+        'volume',
+        'source_url',
+        'sort_order',
+        'status',
+        'bootstrap_chapter_external_id',
+        'raw_json',
+        'captured_at',
       ],
       expectedCount: Number(run?.textbook_count || 0),
     },
@@ -193,19 +215,21 @@ function readMetadataRunRowsFromDb(db, entityType, run, { provider = PROVIDER } 
   const columns = tableColumns(db, definition.table);
   const required = ['run_id', 'provider', definition.idColumn];
   if (required.some((column) => !columns.has(column))) return null;
-  const selected = definition.columns
-    .filter((column) => columns.has(column))
-    .map((column) => `"${column}"`);
+  const selected = definition.columns.filter((column) => columns.has(column)).map((column) => `"${column}"`);
   if (columns.has('captured_at')) {
     selected.push('"captured_at" AS "first_seen_at"', '"captured_at" AS "last_seen_at"');
   }
-  const rows = db.prepare(`
+  const rows = db
+    .prepare(
+      `
     SELECT ${selected.join(', ')}
     FROM "${definition.table}"
     WHERE run_id = ? AND provider = ?
     ORDER BY sort_order ASC, "${definition.idColumn}" ASC
     LIMIT ${MAX_CANDIDATE_ROWS}
-  `).all(Number(run.id), String(provider || PROVIDER));
+  `,
+    )
+    .all(Number(run.id), String(provider || PROVIDER));
   // Databases created before immutable metadata snapshots existed are
   // backfilled on collector startup.  If a caller opens such a database
   // directly and the backfill has not run yet, fall back to the legacy time
@@ -226,7 +250,8 @@ function readCandidates(dbPath, entityType, options = {}) {
     if (entityType === 'version' || entityType === 'textbook') {
       const tables = tableNames(db);
       if (!tables.has('source_metadata_runs')) {
-        if (options.metadataRunId != null) throw new Error('采集库缺少 source_metadata_runs 表，不能验证 metadataRunId');
+        if (options.metadataRunId != null)
+          throw new Error('采集库缺少 source_metadata_runs 表，不能验证 metadataRunId');
         return { ...readCandidateRowsFromDb(db, entityType, options), run: null };
       }
       const run = resolveMetadataRun(db, options.metadataRunId ?? null);
@@ -273,10 +298,10 @@ function readMetadataSnapshot(dbPath, metadataRunId = null) {
       };
     }
     const options = { provider: PROVIDER, timeWindow: [run.started_at, run.finished_at] };
-    const versions = readMetadataRunRowsFromDb(db, 'version', run, options)
-      || readCandidateRowsFromDb(db, 'version', options);
-    const textbooks = readMetadataRunRowsFromDb(db, 'textbook', run, options)
-      || readCandidateRowsFromDb(db, 'textbook', options);
+    const versions =
+      readMetadataRunRowsFromDb(db, 'version', run, options) || readCandidateRowsFromDb(db, 'version', options);
+    const textbooks =
+      readMetadataRunRowsFromDb(db, 'textbook', run, options) || readCandidateRowsFromDb(db, 'textbook', options);
     return {
       available: versions.available && textbooks.available,
       message: [versions.message, textbooks.message].filter(Boolean).join('；'),
@@ -310,7 +335,9 @@ function validateMetadataSelection(dbPath, metadataRunId, selectedIds) {
       rows = snapshot.rows.filter((row) => String(row.status ?? '0') !== '1');
     } else {
       if (!tables.has('source_textbooks')) throw new Error('collector SQLite 缺少 source_textbooks 表');
-      rows = db.prepare(`
+      rows = db
+        .prepare(
+          `
         SELECT provider, external_textbook_id, textbook_name,
                version_external_id, bootstrap_chapter_external_id
         FROM source_textbooks
@@ -318,11 +345,14 @@ function validateMetadataSelection(dbPath, metadataRunId, selectedIds) {
           AND COALESCE(status, '0') <> '1'
           AND last_seen_at >= ? AND last_seen_at <= ?
         ORDER BY version_external_id ASC, sort_order ASC, external_textbook_id ASC
-      `).all(PROVIDER, run.started_at, run.finished_at);
+      `,
+        )
+        .all(PROVIDER, run.started_at, run.finished_at);
     }
     const byId = new Map(rows.map((row) => [String(row.external_textbook_id || '').trim(), row]));
     const unknown = requested.filter((value) => !byId.has(value));
-    if (unknown.length) throw new Error(`教材不属于元数据运行 ${metadataRunId} 的快照：${unknown.slice(0, 5).join(', ')}`);
+    if (unknown.length)
+      throw new Error(`教材不属于元数据运行 ${metadataRunId} 的快照：${unknown.slice(0, 5).join(', ')}`);
     const textbooks = requested.map((value) => {
       const row = byId.get(value);
       const bootstrap = String(row.bootstrap_chapter_external_id || '').trim();

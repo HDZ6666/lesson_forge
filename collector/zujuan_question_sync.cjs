@@ -10,9 +10,7 @@
  * formal database or service code.
  */
 
-const {
-  ALLOWED_ASSET_HOSTS,
-} = require('./src/shared/url_policy.cjs');
+const { ALLOWED_ASSET_HOSTS } = require('./src/shared/url_policy.cjs');
 const {
   DEFAULT_API_PATH,
   DEFAULT_BANK_ID,
@@ -30,27 +28,16 @@ const {
   PROTECTION_MARKERS,
   SITE_PAGE_LIMIT,
 } = require('./src/sources/zujuan/constants.cjs');
-const {
-  QuestionSyncError,
-  VerificationRequiredError,
-} = require('./src/shared/errors.cjs');
-const {
-  QuestionSyncStore,
-} = require('./src/storage/question_store/index.cjs');
+const { QuestionSyncError, VerificationRequiredError } = require('./src/shared/errors.cjs');
+const { QuestionSyncStore } = require('./src/storage/question_store/index.cjs');
 const {
   buildQuestionListBody,
   buildQuestionListRequest,
   responseStatus,
   serializeFormBody,
 } = require('./src/sources/zujuan/request.cjs');
-const {
-  buildScope,
-  runSync,
-} = require('./src/jobs/question_run.cjs');
-const {
-  catalogTreeUrl,
-  initialTextbookUrl,
-} = require('./src/sources/zujuan/urls.cjs');
+const { buildScope, runSync } = require('./src/jobs/question_run.cjs');
+const { catalogTreeUrl, initialTextbookUrl } = require('./src/sources/zujuan/urls.cjs');
 const {
   classifyAsset,
   finalizeQuestion,
@@ -76,13 +63,8 @@ const {
   launchFreshCollectorSession,
   waitForVerification,
 } = require('./src/sources/zujuan/session.cjs');
-const {
-  decodeHtmlEntities,
-  stripHtml,
-} = require('./src/shared/html.cjs');
-const {
-  downloadAsset,
-} = require('./src/assets/download.cjs');
+const { decodeHtmlEntities, stripHtml } = require('./src/shared/html.cjs');
+const { downloadAsset } = require('./src/assets/download.cjs');
 const {
   fetchCatalogTree,
   listWindow,
@@ -95,26 +77,11 @@ const {
   growTargetPages,
   validatePageResult,
 } = require('./src/policies/pagination.cjs');
-const {
-  normalizeCatalogTree,
-  selectCatalogs,
-} = require('./src/sources/zujuan/catalog_parser.cjs');
-const {
-  normalizeWhitespace,
-} = require('./src/shared/utils.cjs');
-const {
-  parseArgs,
-  usage,
-  runCli,
-} = require('./src/cli/question_sync_cli.cjs');
-const {
-  retryAfterMs,
-  retryDelay,
-  createRequestGate,
-} = require('./src/policies/retry.cjs');
-const {
-  validateQuestionListResumeSourceRun,
-} = require('./src/storage/resume.cjs');
+const { normalizeCatalogTree, selectCatalogs } = require('./src/sources/zujuan/catalog_parser.cjs');
+const { normalizeWhitespace } = require('./src/shared/utils.cjs');
+const { parseArgs, usage, runCli } = require('./src/cli/question_sync_cli.cjs');
+const { retryAfterMs, retryDelay, createRequestGate } = require('./src/policies/retry.cjs');
+const { validateQuestionListResumeSourceRun } = require('./src/storage/resume.cjs');
 
 module.exports = {
   ALLOWED_ASSET_HOSTS,

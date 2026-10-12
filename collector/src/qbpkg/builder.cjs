@@ -9,11 +9,7 @@ const {
   SNAPSHOT_TABLES,
   createSnapshotSchema,
 } = require('./schema.cjs');
-const {
-  assetKey,
-  checkHtml,
-  normalizeHtml,
-} = require('./normalize.cjs');
+const { assetKey, checkHtml, normalizeHtml } = require('./normalize.cjs');
 const {
   ensureDir,
   extractZip,
@@ -60,9 +56,7 @@ function check(report, name, pass, details = undefined) {
 }
 
 function tableExists(db, table) {
-  return Boolean(db.prepare(
-    `SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?`,
-  ).get(table));
+  return Boolean(db.prepare(`SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?`).get(table));
 }
 
 function readRows(db, table, report, { required = true } = {}) {
@@ -80,7 +74,12 @@ function readRows(db, table, report, { required = true } = {}) {
 
 function columnNames(db, table) {
   if (!tableExists(db, table)) return new Set();
-  return new Set(db.prepare(`PRAGMA table_info("${table.replaceAll('"', '""')}")`).all().map((r) => r.name));
+  return new Set(
+    db
+      .prepare(`PRAGMA table_info("${table.replaceAll('"', '""')}")`)
+      .all()
+      .map((r) => r.name),
+  );
 }
 
 function getColumn(row, columns, ...names) {
@@ -123,7 +122,9 @@ function duplicateValues(rows, keyFn) {
 function getDatasetMetadata(options, report) {
   let metadata = options.metadata || options.datasetMetadata || options.dataset || {};
   if (typeof metadata === 'string') {
-    try { metadata = JSON.parse(metadata); } catch (error) {
+    try {
+      metadata = JSON.parse(metadata);
+    } catch (error) {
       block(report, 'metadata_invalid', `dataset metadata 不是合法 JSON：${error.message}`);
       metadata = {};
     }
@@ -143,8 +144,10 @@ function getDatasetMetadata(options, report) {
   const cleanTextbook = nonEmpty(textbookName) ? String(textbookName) : '';
   const versionExternalId = metadata.versionExternalId ?? metadata.version_external_id ?? metadata.versionId;
   const textbookExternalId = metadata.textbookExternalId ?? metadata.textbook_external_id ?? metadata.textbookId;
-  if (!nonEmpty(versionExternalId)) block(report, 'metadata_missing_version_external_id', 'dataset metadata 缺少 versionExternalId');
-  if (!nonEmpty(textbookExternalId)) block(report, 'metadata_missing_textbook_external_id', 'dataset metadata 缺少 textbookExternalId');
+  if (!nonEmpty(versionExternalId))
+    block(report, 'metadata_missing_version_external_id', 'dataset metadata 缺少 versionExternalId');
+  if (!nonEmpty(textbookExternalId))
+    block(report, 'metadata_missing_textbook_external_id', 'dataset metadata 缺少 textbookExternalId');
   return {
     ...metadata,
     provider: cleanProvider,
@@ -170,14 +173,28 @@ function normalizeEvidence(options, report) {
     block(report, 'range_evidence_missing', '构建必须提供同步范围/完成证据');
     return null;
   }
-  const scope = evidence.scope ?? evidence.range ?? evidence.syncScope ?? evidence.expectedScope
-    ?? evidence.coverage ?? evidence.catalogs ?? evidence.chapters;
-  const complete = evidence.completed === true || evidence.complete === true || evidence.finished === true
-    || evidence.status === 'success' || evidence.status === 'completed';
-  const emptyScope = scope != null && typeof scope === 'object' && !Array.isArray(scope)
-    && Object.keys(scope).length === 0;
-  if (scope == null || (typeof scope === 'string' && scope.trim() === '')
-      || (Array.isArray(scope) && scope.length === 0) || emptyScope) {
+  const scope =
+    evidence.scope ??
+    evidence.range ??
+    evidence.syncScope ??
+    evidence.expectedScope ??
+    evidence.coverage ??
+    evidence.catalogs ??
+    evidence.chapters;
+  const complete =
+    evidence.completed === true ||
+    evidence.complete === true ||
+    evidence.finished === true ||
+    evidence.status === 'success' ||
+    evidence.status === 'completed';
+  const emptyScope =
+    scope != null && typeof scope === 'object' && !Array.isArray(scope) && Object.keys(scope).length === 0;
+  if (
+    scope == null ||
+    (typeof scope === 'string' && scope.trim() === '') ||
+    (Array.isArray(scope) && scope.length === 0) ||
+    emptyScope
+  ) {
     block(report, 'range_scope_missing', '完成证据缺少明确同步范围');
   }
   if (!complete) block(report, 'range_completion_missing', '同步范围证据未声明已完成');
@@ -186,28 +203,39 @@ function normalizeEvidence(options, report) {
 
 function explicitPublicSolution(row, raw, columns, options = {}) {
   const loginRequired = raw.loginRequired ?? raw.login_required;
-  if (loginRequired === true || ['1', 'true', 'yes', 'y', 'on'].includes(String(loginRequired).trim().toLowerCase())) return false;
+  if (loginRequired === true || ['1', 'true', 'yes', 'y', 'on'].includes(String(loginRequired).trim().toLowerCase()))
+    return false;
   // Collector runs now persist a stable answer status.  A restrictive status
   // must win over a broad build option so an accidentally copied/private
   // answer can never enter a package.  Keep the old explicit evidence and
   // build-option paths for legacy databases that have no status column.
   const status = String(
-    getColumn(row, columns, 'answer_status', 'answerStatus')
-      ?? raw.answerStatus
-      ?? raw.answer_status
-      ?? '',
-  ).trim().toLowerCase();
+    getColumn(row, columns, 'answer_status', 'answerStatus') ?? raw.answerStatus ?? raw.answer_status ?? '',
+  )
+    .trim()
+    .toLowerCase();
   if (['not_collected', 'not_visible', 'login_required', 'restricted', 'not_provided'].includes(status)) {
     return false;
   }
-  if (['public_captured', 'public-captured', 'public', 'available', 'published', 'visible', 'open'].includes(status)) return true;
+  if (['public_captured', 'public-captured', 'public', 'available', 'published', 'visible', 'open'].includes(status))
+    return true;
   const marker = getColumn(row, columns, 'solution_public', 'answer_public', 'public_solution');
-  return marker === 1 || marker === true || marker === '1' || marker === 'true'
-    || raw.solutionPublic === true || raw.solution_public === true || raw.publicSolution === true
-    || raw.includeVisibleSolutions === true || raw.solutionEvidence === 'public'
-    || raw.answerStatus === 'public' || raw.answer_status === 'public'
-    || options.includeVisibleSolutions === true || options.publicSolutions === true
-    || options.allowPublicSolutions === true;
+  return (
+    marker === 1 ||
+    marker === true ||
+    marker === '1' ||
+    marker === 'true' ||
+    raw.solutionPublic === true ||
+    raw.solution_public === true ||
+    raw.publicSolution === true ||
+    raw.includeVisibleSolutions === true ||
+    raw.solutionEvidence === 'public' ||
+    raw.answerStatus === 'public' ||
+    raw.answer_status === 'public' ||
+    options.includeVisibleSolutions === true ||
+    options.publicSolutions === true ||
+    options.allowPublicSolutions === true
+  );
 }
 
 function explicitField(row, raw, columns, columnNamesToTry, rawNames) {
@@ -229,9 +257,15 @@ function resolveAssetFile(localPath, sourceDbPath, options) {
     candidates.push(path.resolve(process.cwd(), raw));
     if (options.projectRoot) candidates.push(path.resolve(options.projectRoot, raw));
   }
-  return candidates.find((candidate) => {
-    try { return fs.statSync(candidate).isFile(); } catch { return false; }
-  }) || null;
+  return (
+    candidates.find((candidate) => {
+      try {
+        return fs.statSync(candidate).isFile();
+      } catch {
+        return false;
+      }
+    }) || null
+  );
 }
 
 function fileExtension(sourceUrl, localPath) {
@@ -242,8 +276,9 @@ function fileExtension(sourceUrl, localPath) {
 
 function buildSnapshot({ sourceDbPath, snapshotPath, metadata, options, report }) {
   let source;
-  try { source = new DatabaseSync(sourceDbPath, { readOnly: true }); }
-  catch (error) {
+  try {
+    source = new DatabaseSync(sourceDbPath, { readOnly: true });
+  } catch (error) {
     block(report, 'source_open_failed', `无法打开采集库：${error.message}`);
     return { counts: {}, assets: [], questions: [], catalogs: [], chapterCounts: {} };
   }
@@ -269,8 +304,12 @@ function buildSnapshot({ sourceDbPath, snapshotPath, metadata, options, report }
     const key = `${row.provider || provider}\0${id}`;
     if (!id) block(report, 'catalog_external_id_missing', '目录节点缺少 external_id');
     if (nodeMap.has(key)) block(report, 'duplicate_catalog_external_id', `目录 external_id 重复：${key}`);
-    else { nodeMap.set(key, row); uniqueNodes.push(row); }
-    if (row.provider != null && String(row.provider) !== provider) block(report, 'provider_mismatch', `目录 provider 与 metadata 不一致：${row.provider}`);
+    else {
+      nodeMap.set(key, row);
+      uniqueNodes.push(row);
+    }
+    if (row.provider != null && String(row.provider) !== provider)
+      block(report, 'provider_mismatch', `目录 provider 与 metadata 不一致：${row.provider}`);
   }
   const qMap = new Map();
   const parsedRaw = new Map();
@@ -280,19 +319,39 @@ function buildSnapshot({ sourceDbPath, snapshotPath, metadata, options, report }
     const key = `${row.provider || provider}\0${id}`;
     if (!id) block(report, 'question_external_id_missing', '题目缺少 external_id');
     if (qMap.has(key)) block(report, 'duplicate_question_external_id', `题目 external_id 重复：${key}`);
-    else { qMap.set(key, row); uniqueQuestionRows.push(row); }
-    if (row.provider != null && String(row.provider) !== provider) block(report, 'provider_mismatch', `题目 provider 与 metadata 不一致：${row.provider}`);
+    else {
+      qMap.set(key, row);
+      uniqueQuestionRows.push(row);
+    }
+    if (row.provider != null && String(row.provider) !== provider)
+      block(report, 'provider_mismatch', `题目 provider 与 metadata 不一致：${row.provider}`);
     parsedRaw.set(key, parseRawJson(row.raw_json, report, id));
   }
-  const qIds = new Set([...qMap.keys()].filter((key) => key.startsWith(`${provider}\0`)).map((key) => key.slice(provider.length + 1)));
-  const nodeIds = new Set([...nodeMap.keys()].filter((key) => key.startsWith(`${provider}\0`)).map((key) => key.slice(provider.length + 1)));
-  const duplicateMemberships = duplicateValues(memberships, (row) => [row.provider, row.question_external_id, row.catalog_external_id, row.evidence_type, row.query_fingerprint].join('\0'));
+  const qIds = new Set(
+    [...qMap.keys()].filter((key) => key.startsWith(`${provider}\0`)).map((key) => key.slice(provider.length + 1)),
+  );
+  const nodeIds = new Set(
+    [...nodeMap.keys()].filter((key) => key.startsWith(`${provider}\0`)).map((key) => key.slice(provider.length + 1)),
+  );
+  const duplicateMemberships = duplicateValues(memberships, (row) =>
+    [row.provider, row.question_external_id, row.catalog_external_id, row.evidence_type, row.query_fingerprint].join(
+      '\0',
+    ),
+  );
   for (const key of duplicateMemberships) block(report, 'duplicate_catalog_relation', `目录关系重复：${key}`);
-  const duplicateKnowledge = duplicateValues(knowledge, (row) => [row.provider, row.question_external_id, row.knowledge_external_id, row.knowledge_kind].join('\0'));
+  const duplicateKnowledge = duplicateValues(knowledge, (row) =>
+    [row.provider, row.question_external_id, row.knowledge_external_id, row.knowledge_kind].join('\0'),
+  );
   for (const key of duplicateKnowledge) block(report, 'duplicate_knowledge_relation', `知识点关系重复：${key}`);
-  const duplicateFacets = duplicateValues(facets, (row) => [row.provider, row.question_external_id, row.dimension, row.value, row.evidence_type, row.query_fingerprint].join('\0'));
+  const duplicateFacets = duplicateValues(facets, (row) =>
+    [row.provider, row.question_external_id, row.dimension, row.value, row.evidence_type, row.query_fingerprint].join(
+      '\0',
+    ),
+  );
   for (const key of duplicateFacets) block(report, 'duplicate_facet_relation', `标签关系重复：${key}`);
-  const duplicateAssets = duplicateValues(assets, (row) => [row.provider, row.question_external_id, row.source_url].join('\0'));
+  const duplicateAssets = duplicateValues(assets, (row) =>
+    [row.provider, row.question_external_id, row.source_url].join('\0'),
+  );
   for (const key of duplicateAssets) block(report, 'duplicate_asset_relation', `素材关系重复：${key}`);
 
   const sourceUrlTypes = new Map();
@@ -402,7 +461,8 @@ function buildSnapshot({ sourceDbPath, snapshotPath, metadata, options, report }
     const sourceHtml = getColumn(row, questionColumns, 'content_html', 'contentHtml');
     const normalized = normalizeHtml(sourceHtml, byUrl);
     if (!normalized.valid) block(report, 'invalid_html', `题目 ${qid} 的 HTML 非法`, normalized.errors);
-    if (normalized.missingAssets.length > 0) block(report, 'asset_key_missing', `题目 ${qid} 的 HTML 图片没有对应素材`, normalized.missingAssets);
+    if (normalized.missingAssets.length > 0)
+      block(report, 'asset_key_missing', `题目 ${qid} 的 HTML 图片没有对应素材`, normalized.missingAssets);
     const publicSolution = explicitPublicSolution(row, raw, questionColumns, options);
     const sourceSolution = getColumn(row, questionColumns, 'solution_html', 'solutionHtml');
     const sourceAnalysis = getColumn(row, questionColumns, 'analysis_html', 'analysisHtml');
@@ -410,23 +470,34 @@ function buildSnapshot({ sourceDbPath, snapshotPath, metadata, options, report }
     const rawSolution = raw.solutionHtml ?? raw.solution_html;
     const rawAnalysis = raw.analysisHtml ?? raw.analysis_html;
     const solution = publicSolution
-      ? (nonEmpty(sourceSolution) ? sourceSolution
-        : (nonEmpty(sourceAnalysis) ? sourceAnalysis
-          : (nonEmpty(rawSolution) ? rawSolution : rawAnalysis)))
+      ? nonEmpty(sourceSolution)
+        ? sourceSolution
+        : nonEmpty(sourceAnalysis)
+          ? sourceAnalysis
+          : nonEmpty(rawSolution)
+            ? rawSolution
+            : rawAnalysis
       : null;
     const answer = publicSolution
-      ? (nonEmpty(sourceAnswer)
+      ? nonEmpty(sourceAnswer)
         ? sourceAnswer
-        : (nonEmpty(raw.answerHtml ?? raw.answer_html) ? raw.answerHtml ?? raw.answer_html : null))
+        : nonEmpty(raw.answerHtml ?? raw.answer_html)
+          ? (raw.answerHtml ?? raw.answer_html)
+          : null
       : null;
     const normalizedSolution = solution == null ? null : normalizeHtml(String(solution), byUrl);
     const normalizedAnswer = answer == null ? null : normalizeHtml(String(answer), byUrl);
-    for (const [label, normalizedValue] of [['solution', normalizedSolution], ['answer', normalizedAnswer]]) {
-      if (normalizedValue && !normalizedValue.valid) block(report, 'invalid_html', `题目 ${qid} 的${label} HTML 非法`, normalizedValue.errors);
-      if (normalizedValue && normalizedValue.missingAssets.length > 0) block(report, 'asset_key_missing', `题目 ${qid} 的${label}图片没有对应素材`, normalizedValue.missingAssets);
+    for (const [label, normalizedValue] of [
+      ['solution', normalizedSolution],
+      ['answer', normalizedAnswer],
+    ]) {
+      if (normalizedValue && !normalizedValue.valid)
+        block(report, 'invalid_html', `题目 ${qid} 的${label} HTML 非法`, normalizedValue.errors);
+      if (normalizedValue && normalizedValue.missingAssets.length > 0)
+        block(report, 'asset_key_missing', `题目 ${qid} 的${label}图片没有对应素材`, normalizedValue.missingAssets);
     }
-    const answerStatus = publicSolution && (nonEmpty(solution) || nonEmpty(answer))
-      ? 'public_captured' : 'not_collected';
+    const answerStatus =
+      publicSolution && (nonEmpty(solution) || nonEmpty(answer)) ? 'public_captured' : 'not_collected';
     const q = {
       provider,
       externalId: qid,
@@ -478,7 +549,8 @@ function buildSnapshot({ sourceDbPath, snapshotPath, metadata, options, report }
     const cid = String(row.catalog_external_id ?? '');
     if (!qIds.has(qid)) block(report, 'orphan_catalog_relation', `目录关系引用不存在题目：${qid}`);
     if (!nodeIds.has(cid)) block(report, 'orphan_catalog_relation', `目录关系引用不存在目录：${cid}`);
-    if (row.provider != null && String(row.provider) !== provider) block(report, 'provider_mismatch', `目录关系 provider 与 metadata 不一致：${row.provider}`);
+    if (row.provider != null && String(row.provider) !== provider)
+      block(report, 'provider_mismatch', `目录关系 provider 与 metadata 不一致：${row.provider}`);
     const mapped = {
       provider,
       questionExternalId: qid,
@@ -488,7 +560,14 @@ function buildSnapshot({ sourceDbPath, snapshotPath, metadata, options, report }
       queryFingerprint: getColumn(row, membershipColumns, 'query_fingerprint', 'queryFingerprint') || '',
       observedAt: getColumn(row, membershipColumns, 'observed_at', 'observedAt'),
     };
-    const relationKey = [mapped.provider, mapped.questionExternalId, mapped.catalogExternalId, mapped.relationType, mapped.evidenceType, mapped.queryFingerprint].join('\0');
+    const relationKey = [
+      mapped.provider,
+      mapped.questionExternalId,
+      mapped.catalogExternalId,
+      mapped.relationType,
+      mapped.evidenceType,
+      mapped.queryFingerprint,
+    ].join('\0');
     if (!uniqueMemberships.has(relationKey)) {
       uniqueMemberships.set(relationKey, true);
       qCatalogOut.push(mapped);
@@ -499,7 +578,8 @@ function buildSnapshot({ sourceDbPath, snapshotPath, metadata, options, report }
   for (const row of knowledge) {
     const qid = String(row.question_external_id ?? '');
     if (!qIds.has(qid)) block(report, 'orphan_knowledge_relation', `知识点关系引用不存在题目：${qid}`);
-    if (!nonEmpty(row.knowledge_external_id) || !nonEmpty(row.name)) block(report, 'knowledge_field_missing', `题目 ${qid} 的知识点字段缺失`);
+    if (!nonEmpty(row.knowledge_external_id) || !nonEmpty(row.name))
+      block(report, 'knowledge_field_missing', `题目 ${qid} 的知识点字段缺失`);
     const mapped = {
       provider,
       questionExternalId: qid,
@@ -511,13 +591,26 @@ function buildSnapshot({ sourceDbPath, snapshotPath, metadata, options, report }
       queryFingerprint: '',
       observedAt: row.observed_at || null,
     };
-    const relationKey = [mapped.provider, mapped.questionExternalId, mapped.dimension, mapped.tagExternalId, mapped.tagValue, mapped.relationType, mapped.evidenceType, mapped.queryFingerprint].join('\0');
-    if (!uniqueTags.has(relationKey)) { uniqueTags.set(relationKey, true); tagOut.push(mapped); }
+    const relationKey = [
+      mapped.provider,
+      mapped.questionExternalId,
+      mapped.dimension,
+      mapped.tagExternalId,
+      mapped.tagValue,
+      mapped.relationType,
+      mapped.evidenceType,
+      mapped.queryFingerprint,
+    ].join('\0');
+    if (!uniqueTags.has(relationKey)) {
+      uniqueTags.set(relationKey, true);
+      tagOut.push(mapped);
+    }
   }
   for (const row of facets) {
     const qid = String(row.question_external_id ?? '');
     if (!qIds.has(qid)) block(report, 'orphan_facet_relation', `标签关系引用不存在题目：${qid}`);
-    if (!nonEmpty(row.dimension) || !nonEmpty(row.value)) block(report, 'facet_field_missing', `题目 ${qid} 的 facet 字段缺失`);
+    if (!nonEmpty(row.dimension) || !nonEmpty(row.value))
+      block(report, 'facet_field_missing', `题目 ${qid} 的 facet 字段缺失`);
     const mapped = {
       provider,
       questionExternalId: qid,
@@ -529,36 +622,165 @@ function buildSnapshot({ sourceDbPath, snapshotPath, metadata, options, report }
       queryFingerprint: getColumn(row, facetColumns, 'query_fingerprint', 'queryFingerprint') || '',
       observedAt: row.observed_at || null,
     };
-    const relationKey = [mapped.provider, mapped.questionExternalId, mapped.dimension, mapped.tagExternalId, mapped.tagValue, mapped.relationType, mapped.evidenceType, mapped.queryFingerprint].join('\0');
-    if (!uniqueTags.has(relationKey)) { uniqueTags.set(relationKey, true); tagOut.push(mapped); }
+    const relationKey = [
+      mapped.provider,
+      mapped.questionExternalId,
+      mapped.dimension,
+      mapped.tagExternalId,
+      mapped.tagValue,
+      mapped.relationType,
+      mapped.evidenceType,
+      mapped.queryFingerprint,
+    ].join('\0');
+    if (!uniqueTags.has(relationKey)) {
+      uniqueTags.set(relationKey, true);
+      tagOut.push(mapped);
+    }
   }
 
   const db = new DatabaseSync(snapshotPath);
   try {
     createSnapshotSchema(db);
-    const insertVersion = db.prepare(`INSERT INTO qb_textbook_version (provider, external_id, version_name, subject, grade, edition, source_url, metadata_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`);
-    const insertTextbook = db.prepare(`INSERT INTO qb_textbook (provider, external_id, version_external_id, textbook_name, subject, grade, edition, volume, source_url, metadata_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
-    const insertCatalog = db.prepare(`INSERT INTO qb_catalog_node (provider, external_id, textbook_external_id, parent_external_id, node_level, node_type, name, source_path, active, metadata_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
-    const insertQuestion = db.prepare(`INSERT INTO qb_question (provider, external_id, textbook_version_external_id, textbook_external_id, detail_url, source_short, source_title, source_url, source_original_json, question_type, question_type_id, difficulty_label, difficulty_code, ease_coefficient, content_html, plain_text, content_hash, subquestion_count, child_count, has_image, has_formula, has_table, is_new, assemble_count, reference_count, year, region, exam_type, answer_html, solution_html, answer_status, first_seen_at, last_seen_at, active) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
-    const insertQCatalog = db.prepare(`INSERT INTO qb_question_catalog (provider, question_external_id, catalog_external_id, relation_type, evidence_type, query_fingerprint, observed_at) VALUES (?, ?, ?, ?, ?, ?, ?)`);
-    const insertTag = db.prepare(`INSERT INTO qb_question_tag (provider, question_external_id, dimension, tag_external_id, tag_value, relation_type, evidence_type, query_fingerprint, observed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`);
-    const insertAsset = db.prepare(`INSERT INTO qb_question_asset (provider, question_external_id, asset_key, asset_type, source_url, content_sha256, storage_path, mime_type, byte_size, observed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+    const insertVersion = db.prepare(
+      `INSERT INTO qb_textbook_version (provider, external_id, version_name, subject, grade, edition, source_url, metadata_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    const insertTextbook = db.prepare(
+      `INSERT INTO qb_textbook (provider, external_id, version_external_id, textbook_name, subject, grade, edition, volume, source_url, metadata_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    const insertCatalog = db.prepare(
+      `INSERT INTO qb_catalog_node (provider, external_id, textbook_external_id, parent_external_id, node_level, node_type, name, source_path, active, metadata_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    const insertQuestion = db.prepare(
+      `INSERT INTO qb_question (provider, external_id, textbook_version_external_id, textbook_external_id, detail_url, source_short, source_title, source_url, source_original_json, question_type, question_type_id, difficulty_label, difficulty_code, ease_coefficient, content_html, plain_text, content_hash, subquestion_count, child_count, has_image, has_formula, has_table, is_new, assemble_count, reference_count, year, region, exam_type, answer_html, solution_html, answer_status, first_seen_at, last_seen_at, active) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    const insertQCatalog = db.prepare(
+      `INSERT INTO qb_question_catalog (provider, question_external_id, catalog_external_id, relation_type, evidence_type, query_fingerprint, observed_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    );
+    const insertTag = db.prepare(
+      `INSERT INTO qb_question_tag (provider, question_external_id, dimension, tag_external_id, tag_value, relation_type, evidence_type, query_fingerprint, observed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    const insertAsset = db.prepare(
+      `INSERT INTO qb_question_asset (provider, question_external_id, asset_key, asset_type, source_url, content_sha256, storage_path, mime_type, byte_size, observed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
     db.exec('BEGIN IMMEDIATE;');
     try {
-      insertVersion.run(provider, metadata.versionExternalId, metadata.versionName, metadata.subject || null, metadata.grade || null, metadata.edition || null, metadata.versionSourceUrl || metadata.sourceUrl || null, stableStringify(metadata));
-      insertTextbook.run(provider, metadata.textbookExternalId, metadata.versionExternalId, metadata.textbookName, metadata.subject || null, metadata.grade || null, metadata.edition || null, metadata.volume || null, metadata.textbookSourceUrl || metadata.sourceUrl || null, stableStringify(metadata));
-      for (const row of [...catalogRows].sort((a, b) => a.externalId.localeCompare(b.externalId))) insertCatalog.run(provider, row.externalId, row.textbookExternalId, row.parentExternalId, row.nodeLevel, row.nodeType, row.name, row.sourcePath, row.active, row.metadataJson);
-      for (const q of [...qOut].sort((a, b) => a.externalId.localeCompare(b.externalId))) insertQuestion.run(q.provider, q.externalId, q.textbookVersionExternalId, q.textbookExternalId, q.detailUrl, q.sourceShort, q.sourceTitle, q.sourceUrl, q.sourceOriginalJson, q.questionType, q.questionTypeId, q.difficultyLabel, q.difficultyCode, q.easeCoefficient, q.contentHtml, q.plainText, q.contentHash, q.subquestionCount, q.childCount, q.hasImage, q.hasFormula, q.hasTable, q.isNew, q.assembleCount, null, q.year, q.region, q.examType, q.answerHtml, q.solutionHtml, q.answerStatus, q.firstSeenAt, q.lastSeenAt, q.active);
-      for (const row of [...qCatalogOut].sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)))) insertQCatalog.run(row.provider, row.questionExternalId, row.catalogExternalId, row.relationType, row.evidenceType, row.queryFingerprint, row.observedAt);
-      for (const row of [...tagOut].sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)))) insertTag.run(row.provider, row.questionExternalId, row.dimension, row.tagExternalId, row.tagValue, row.relationType, row.evidenceType, row.queryFingerprint, row.observedAt);
-      for (const row of [...assetRows].sort((a, b) => `${a.questionId}\0${a.assetKey}`.localeCompare(`${b.questionId}\0${b.assetKey}`))) {
+      insertVersion.run(
+        provider,
+        metadata.versionExternalId,
+        metadata.versionName,
+        metadata.subject || null,
+        metadata.grade || null,
+        metadata.edition || null,
+        metadata.versionSourceUrl || metadata.sourceUrl || null,
+        stableStringify(metadata),
+      );
+      insertTextbook.run(
+        provider,
+        metadata.textbookExternalId,
+        metadata.versionExternalId,
+        metadata.textbookName,
+        metadata.subject || null,
+        metadata.grade || null,
+        metadata.edition || null,
+        metadata.volume || null,
+        metadata.textbookSourceUrl || metadata.sourceUrl || null,
+        stableStringify(metadata),
+      );
+      for (const row of [...catalogRows].sort((a, b) => a.externalId.localeCompare(b.externalId)))
+        insertCatalog.run(
+          provider,
+          row.externalId,
+          row.textbookExternalId,
+          row.parentExternalId,
+          row.nodeLevel,
+          row.nodeType,
+          row.name,
+          row.sourcePath,
+          row.active,
+          row.metadataJson,
+        );
+      for (const q of [...qOut].sort((a, b) => a.externalId.localeCompare(b.externalId)))
+        insertQuestion.run(
+          q.provider,
+          q.externalId,
+          q.textbookVersionExternalId,
+          q.textbookExternalId,
+          q.detailUrl,
+          q.sourceShort,
+          q.sourceTitle,
+          q.sourceUrl,
+          q.sourceOriginalJson,
+          q.questionType,
+          q.questionTypeId,
+          q.difficultyLabel,
+          q.difficultyCode,
+          q.easeCoefficient,
+          q.contentHtml,
+          q.plainText,
+          q.contentHash,
+          q.subquestionCount,
+          q.childCount,
+          q.hasImage,
+          q.hasFormula,
+          q.hasTable,
+          q.isNew,
+          q.assembleCount,
+          null,
+          q.year,
+          q.region,
+          q.examType,
+          q.answerHtml,
+          q.solutionHtml,
+          q.answerStatus,
+          q.firstSeenAt,
+          q.lastSeenAt,
+          q.active,
+        );
+      for (const row of [...qCatalogOut].sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))))
+        insertQCatalog.run(
+          row.provider,
+          row.questionExternalId,
+          row.catalogExternalId,
+          row.relationType,
+          row.evidenceType,
+          row.queryFingerprint,
+          row.observedAt,
+        );
+      for (const row of [...tagOut].sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))))
+        insertTag.run(
+          row.provider,
+          row.questionExternalId,
+          row.dimension,
+          row.tagExternalId,
+          row.tagValue,
+          row.relationType,
+          row.evidenceType,
+          row.queryFingerprint,
+          row.observedAt,
+        );
+      for (const row of [...assetRows].sort((a, b) =>
+        `${a.questionId}\0${a.assetKey}`.localeCompare(`${b.questionId}\0${b.assetKey}`),
+      )) {
         let storagePath = null;
         if (row.sourcePath && row.contentSha256) storagePath = `assets/${row.contentSha256}${row.extension}`;
-        insertAsset.run(row.provider, row.questionId, row.assetKey, row.assetType, row.sourceUrl, row.contentSha256 || null, storagePath, row.mimeType || null, row.byteSize == null ? null : Number(row.byteSize), row.observedAt);
+        insertAsset.run(
+          row.provider,
+          row.questionId,
+          row.assetKey,
+          row.assetType,
+          row.sourceUrl,
+          row.contentSha256 || null,
+          storagePath,
+          row.mimeType || null,
+          row.byteSize == null ? null : Number(row.byteSize),
+          row.observedAt,
+        );
       }
       db.exec('COMMIT;');
     } catch (error) {
-      try { db.exec('ROLLBACK;'); } catch {}
+      try {
+        db.exec('ROLLBACK;');
+      } catch {}
       throw error;
     }
     db.exec('VACUUM;');
@@ -569,11 +791,23 @@ function buildSnapshot({ sourceDbPath, snapshotPath, metadata, options, report }
   const counts = {};
   const snapshotRead = new DatabaseSync(snapshotPath, { readOnly: true });
   try {
-    for (const table of SNAPSHOT_TABLES) counts[table] = Number(snapshotRead.prepare(`SELECT COUNT(*) AS n FROM "${table}"`).get().n);
-    const chapterRows = snapshotRead.prepare(`SELECT c.external_id, c.name, COUNT(DISTINCT qc.question_external_id) AS question_count FROM qb_catalog_node c LEFT JOIN qb_question_catalog qc ON qc.provider = c.provider AND qc.catalog_external_id = c.external_id WHERE c.node_level = 1 GROUP BY c.provider, c.external_id, c.name ORDER BY c.external_id`).all();
-    const chapterCounts = Object.fromEntries(chapterRows.map((row) => [String(row.external_id), { name: row.name, questionCount: Number(row.question_count) }]));
+    for (const table of SNAPSHOT_TABLES)
+      counts[table] = Number(snapshotRead.prepare(`SELECT COUNT(*) AS n FROM "${table}"`).get().n);
+    const chapterRows = snapshotRead
+      .prepare(
+        `SELECT c.external_id, c.name, COUNT(DISTINCT qc.question_external_id) AS question_count FROM qb_catalog_node c LEFT JOIN qb_question_catalog qc ON qc.provider = c.provider AND qc.catalog_external_id = c.external_id WHERE c.node_level = 1 GROUP BY c.provider, c.external_id, c.name ORDER BY c.external_id`,
+      )
+      .all();
+    const chapterCounts = Object.fromEntries(
+      chapterRows.map((row) => [
+        String(row.external_id),
+        { name: row.name, questionCount: Number(row.question_count) },
+      ]),
+    );
     return { counts, assets: assetRows, questions: qOut, catalogs: catalogRows, chapterCounts };
-  } finally { snapshotRead.close(); }
+  } finally {
+    snapshotRead.close();
+  }
 }
 
 function copyAssetFiles(assetRows, stageDir, report) {
@@ -582,7 +816,8 @@ function copyAssetFiles(assetRows, stageDir, report) {
     const target = path.join(stageDir, 'assets', `${row.contentSha256}${row.extension}`);
     ensureDir(path.dirname(target));
     if (!fs.existsSync(target)) fs.copyFileSync(row.sourcePath, target);
-    else if (sha256File(target) !== row.contentSha256) block(report, 'asset_package_content_conflict', `包内素材冲突：${row.contentSha256}`);
+    else if (sha256File(target) !== row.contentSha256)
+      block(report, 'asset_package_content_conflict', `包内素材冲突：${row.contentSha256}`);
   }
 }
 
@@ -608,10 +843,23 @@ function readPreviousSnapshot(previousPath, workDir, report) {
       cleanup = true;
     }
     const db = new DatabaseSync(snapshotPath, { readOnly: true });
-    const rows = db.prepare(`SELECT provider, external_id, content_hash, active FROM qb_question ORDER BY provider, external_id`).all();
-    const chapters = db.prepare(`SELECT c.external_id, c.name, COUNT(DISTINCT qc.question_external_id) AS question_count FROM qb_catalog_node c LEFT JOIN qb_question_catalog qc ON qc.provider = c.provider AND qc.catalog_external_id = c.external_id WHERE c.node_level = 1 GROUP BY c.provider, c.external_id, c.name`).all();
+    const rows = db
+      .prepare(`SELECT provider, external_id, content_hash, active FROM qb_question ORDER BY provider, external_id`)
+      .all();
+    const chapters = db
+      .prepare(
+        `SELECT c.external_id, c.name, COUNT(DISTINCT qc.question_external_id) AS question_count FROM qb_catalog_node c LEFT JOIN qb_question_catalog qc ON qc.provider = c.provider AND qc.catalog_external_id = c.external_id WHERE c.node_level = 1 GROUP BY c.provider, c.external_id, c.name`,
+      )
+      .all();
     db.close();
-    return { questions: rows, chapters: chapters.map((row) => ({ id: String(row.external_id), name: row.name, questionCount: Number(row.question_count) })) };
+    return {
+      questions: rows,
+      chapters: chapters.map((row) => ({
+        id: String(row.external_id),
+        name: row.name,
+        questionCount: Number(row.question_count),
+      })),
+    };
   } catch (error) {
     block(report, 'previous_invalid', `上一包/快照无法读取：${error.message}`);
     return null;
@@ -630,7 +878,13 @@ function makeDiff(previous, current, report) {
       deactivated: [],
       counts: { added: current.questions.length, modified: 0, deactivated: 0 },
       questionCounts: { previous: 0, current: current.questions.length, delta: current.questions.length },
-      chapterChanges: Object.entries(current.chapterCounts).map(([id, item]) => ({ id, name: item.name, previous: 0, current: item.questionCount, delta: item.questionCount })),
+      chapterChanges: Object.entries(current.chapterCounts).map(([id, item]) => ({
+        id,
+        name: item.name,
+        previous: 0,
+        current: item.questionCount,
+        delta: item.questionCount,
+      })),
     };
   }
   const oldMap = new Map(previous.questions.map((q) => [`${q.provider}\0${q.external_id}`, q]));
@@ -645,18 +899,33 @@ function makeDiff(previous, current, report) {
   for (const [key, q] of oldMap) if (!currentMap.has(key) || q.active === 0) deactivated.push(q.external_id);
   const oldChapters = new Map(previous.chapters.map((c) => [c.id, c]));
   const chapterIds = new Set([...oldChapters.keys(), ...Object.keys(current.chapterCounts)]);
-  const chapterChanges = [...chapterIds].sort().map((id) => {
-    const old = oldChapters.get(id); const currentItem = current.chapterCounts[id];
-    const previousCount = old?.questionCount || 0; const currentCount = currentItem?.questionCount || 0;
-    return { id, name: currentItem?.name || old?.name || null, previous: previousCount, current: currentCount, delta: currentCount - previousCount };
-  }).filter((item) => item.delta !== 0);
+  const chapterChanges = [...chapterIds]
+    .sort()
+    .map((id) => {
+      const old = oldChapters.get(id);
+      const currentItem = current.chapterCounts[id];
+      const previousCount = old?.questionCount || 0;
+      const currentCount = currentItem?.questionCount || 0;
+      return {
+        id,
+        name: currentItem?.name || old?.name || null,
+        previous: previousCount,
+        current: currentCount,
+        delta: currentCount - previousCount,
+      };
+    })
+    .filter((item) => item.delta !== 0);
   return {
     baseline: false,
     added: added.sort(),
     modified: modified.sort(),
     deactivated: deactivated.sort(),
     counts: { added: added.length, modified: modified.length, deactivated: deactivated.length },
-    questionCounts: { previous: previous.questions.length, current: current.questions.length, delta: current.questions.length - previous.questions.length },
+    questionCounts: {
+      previous: previous.questions.length,
+      current: current.questions.length,
+      delta: current.questions.length - previous.questions.length,
+    },
     chapterChanges,
   };
 }
@@ -676,11 +945,15 @@ function enforceDecreaseThreshold(diff, options, report) {
   }
   const chapterDrops = diff.chapterChanges.filter((item) => item.delta < -numeric);
   if (chapterDrops.length > 0) block(report, 'decrease_threshold_exceeded', '章节题目数量下降超过阈值', chapterDrops);
-  if (options.blockOnDeactivation && diff.deactivated.length > 0) block(report, 'deactivated_questions', '发现停用题目且配置要求阻断', diff.deactivated);
+  if (options.blockOnDeactivation && diff.deactivated.length > 0)
+    block(report, 'deactivated_questions', '发现停用题目且配置要求阻断', diff.deactivated);
 }
 
 function writeChecksums(stageDir, names) {
-  const lines = names.filter((name) => name !== 'checksums.sha256').sort().map((name) => `${sha256File(path.join(stageDir, name))}  ${name}`);
+  const lines = names
+    .filter((name) => name !== 'checksums.sha256')
+    .sort()
+    .map((name) => `${sha256File(path.join(stageDir, name))}  ${name}`);
   fs.writeFileSync(path.join(stageDir, 'checksums.sha256'), `${lines.join('\n')}\n`);
 }
 
@@ -689,7 +962,9 @@ function buildManifest(metadata, options, snapshotInfo, snapshotSha) {
   return {
     formatVersion: PACKAGE_FORMAT_VERSION,
     schemaVersion: SNAPSHOT_SCHEMA_VERSION,
-    batchNo: String(options.batchNo || `batch-${sha256(`${metadata.provider}\0${createdAt}\0${metadata.versionName}`).slice(0, 16)}`),
+    batchNo: String(
+      options.batchNo || `batch-${sha256(`${metadata.provider}\0${createdAt}\0${metadata.versionName}`).slice(0, 16)}`,
+    ),
     createdAt,
     sourceProvider: metadata.provider,
     fullSnapshot: true,
@@ -703,7 +978,8 @@ function buildPackage(options = {}) {
   const outputPath = path.resolve(options.output || options.out || options.packagePath || 'qbpkg-output.qbpkg');
   const sourceDbPath = path.resolve(options.db || options.sourceDb || options.source || 'data/zujuan.sqlite3');
   const report = reportTemplate();
-  if (options.fullSnapshot !== true && options.fullSnapshot !== 'true') block(report, 'full_snapshot_required', '构建必须显式声明 full-snapshot');
+  if (options.fullSnapshot !== true && options.fullSnapshot !== 'true')
+    block(report, 'full_snapshot_required', '构建必须显式声明 full-snapshot');
   const metadata = getDatasetMetadata(options, report);
   const evidence = normalizeEvidence(options, report);
   const parentDir = path.dirname(outputPath);
@@ -736,12 +1012,28 @@ function buildPackage(options = {}) {
     fs.writeFileSync(path.join(workDir, 'diff-report.json'), stableStringify(diff));
     copyAssetFiles(snapshotInfo.assets, workDir, report);
     check(report, 'full_snapshot_declared', options.fullSnapshot === true || options.fullSnapshot === 'true');
-    check(report, 'range_evidence_complete', Boolean(evidence && (evidence.completed === true || evidence.complete === true || evidence.finished === true || evidence.status === 'success' || evidence.status === 'completed')));
-    check(report, 'snapshot_tables', snapshotInfo.counts && SNAPSHOT_TABLES.every((table) => table in snapshotInfo.counts));
+    check(
+      report,
+      'range_evidence_complete',
+      Boolean(
+        evidence &&
+        (evidence.completed === true ||
+          evidence.complete === true ||
+          evidence.finished === true ||
+          evidence.status === 'success' ||
+          evidence.status === 'completed'),
+      ),
+    );
+    check(
+      report,
+      'snapshot_tables',
+      snapshotInfo.counts && SNAPSHOT_TABLES.every((table) => table in snapshotInfo.counts),
+    );
     report.pass = report.blocking.length === 0;
     fs.writeFileSync(path.join(workDir, 'validation.json'), stableStringify(report));
     if (!report.pass) throw new QbPkgValidationError('qbpkg 构建验证阻断', report);
-    const packageNames = fs.readdirSync(workDir, { withFileTypes: true })
+    const packageNames = fs
+      .readdirSync(workDir, { withFileTypes: true })
       .filter((entry) => entry.isFile() && entry.name !== 'checksums.sha256')
       .map((entry) => entry.name)
       .concat(fs.existsSync(path.join(workDir, 'assets')) ? [] : []);
@@ -751,7 +1043,8 @@ function buildPackage(options = {}) {
       if (!fs.existsSync(full)) return;
       for (const entry of fs.readdirSync(full, { withFileTypes: true })) {
         const child = path.posix.join(relative, entry.name);
-        if (entry.isDirectory()) collect(child); else assetNames.push(child);
+        if (entry.isDirectory()) collect(child);
+        else assetNames.push(child);
       }
     };
     collect('assets');

@@ -27,8 +27,17 @@ function orphanRunIsResumable(dbPath, runId) {
 function looksBlocked(lines) {
   const text = lines.join('\n').toLowerCase();
   return [
-    '验证码', '安全验证', '异常访问', '访问过于频繁', 'robots', '熔断', '契约',
-    '授权范围', 'http 401', 'http 403', '收到 sig',
+    '验证码',
+    '安全验证',
+    '异常访问',
+    '访问过于频繁',
+    'robots',
+    '熔断',
+    '契约',
+    '授权范围',
+    'http 401',
+    'http 403',
+    '收到 sig',
   ].some((marker) => text.includes(marker));
 }
 
@@ -50,7 +59,9 @@ function sealOrphanContentRun(dbPath, runId, status, message = null) {
     db = new DatabaseSync(path.resolve(dbPath));
     db.exec('PRAGMA busy_timeout = 5000;');
     const now = new Date().toISOString();
-    const result = db.prepare(`
+    const result = db
+      .prepare(
+        `
       UPDATE sync_runs
       SET finished_at = COALESCE(finished_at, ?),
           status = ?,
@@ -63,23 +74,27 @@ function sealOrphanContentRun(dbPath, runId, status, message = null) {
           snapshot_complete = 0,
           snapshot_locked_at = COALESCE(snapshot_locked_at, ?)
       WHERE id = ? AND status = 'running' AND snapshot_locked_at IS NULL
-    `).run(
-      now,
-      terminalStatus,
-      message ? String(message).slice(0, 4000) : null,
-      parsedRunId,
-      parsedRunId,
-      parsedRunId,
-      parsedRunId,
-      parsedRunId,
-      now,
-      parsedRunId,
-    );
+    `,
+      )
+      .run(
+        now,
+        terminalStatus,
+        message ? String(message).slice(0, 4000) : null,
+        parsedRunId,
+        parsedRunId,
+        parsedRunId,
+        parsedRunId,
+        parsedRunId,
+        now,
+        parsedRunId,
+      );
     return Number(result?.changes || 0) > 0;
   } catch {
     return false;
   } finally {
-    try { db?.close(); } catch {}
+    try {
+      db?.close();
+    } catch {}
   }
 }
 
@@ -107,19 +122,25 @@ function sealOrphanMetadataRun(dbPath, runId, status, message = null) {
     db = new DatabaseSync(path.resolve(dbPath));
     db.exec('PRAGMA busy_timeout = 5000;');
     const now = new Date().toISOString();
-    const result = db.prepare(`
+    const result = db
+      .prepare(
+        `
       UPDATE source_metadata_runs
       SET finished_at = COALESCE(finished_at, ?),
           status = ?,
           message = COALESCE(message, ?),
           snapshot_locked_at = COALESCE(snapshot_locked_at, ?)
       WHERE id = ? AND status = 'running' AND snapshot_locked_at IS NULL
-    `).run(now, terminalStatus, message ? String(message).slice(0, 4000) : null, now, parsedRunId);
+    `,
+      )
+      .run(now, terminalStatus, message ? String(message).slice(0, 4000) : null, now, parsedRunId);
     return Number(result?.changes || 0) > 0;
   } catch {
     return false;
   } finally {
-    try { db?.close(); } catch {}
+    try {
+      db?.close();
+    } catch {}
   }
 }
 

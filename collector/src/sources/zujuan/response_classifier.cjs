@@ -23,9 +23,10 @@ function isProtectionText(value) {
 }
 
 function looksLikeHtml(value) {
-  const text = String(value || '').trim().toLowerCase();
-  return /^<!doctype\s+html|^<html\b|<body\b|<script\b/.test(text)
-    || isProtectionText(text);
+  const text = String(value || '')
+    .trim()
+    .toLowerCase();
+  return /^<!doctype\s+html|^<html\b|<body\b|<script\b/.test(text) || isProtectionText(text);
 }
 
 /**

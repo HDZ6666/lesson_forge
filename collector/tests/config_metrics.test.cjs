@@ -17,7 +17,10 @@ test('config registry defaults agree with the consuming modules', () => {
   const questionRun = source('src/jobs/question/browser_session.cjs');
   assert.match(questionRun, new RegExp(`DEFAULT_BROWSER_RECYCLE_PAGES = ${values.COLLECTOR_BROWSER_RECYCLE_PAGES};`));
   assert.match(questionRun, new RegExp(`DEFAULT_BROWSER_RECYCLE_MB = ${values.COLLECTOR_BROWSER_RECYCLE_MB};`));
-  assert.match(questionRun, new RegExp(`MIN_PAGES_BETWEEN_PRESSURE_RECYCLES = ${values.COLLECTOR_BROWSER_PRESSURE_MIN_PAGES};`));
+  assert.match(
+    questionRun,
+    new RegExp(`MIN_PAGES_BETWEEN_PRESSURE_RECYCLES = ${values.COLLECTOR_BROWSER_PRESSURE_MIN_PAGES};`),
+  );
   const { PERSIST_INTERVAL_MS } = require('../src/api/job_manager/constants.cjs');
   assert.equal(values.COLLECTOR_PERSIST_INTERVAL_MS, PERSIST_INTERVAL_MS);
 });
@@ -73,18 +76,38 @@ test('described config hides the token and, for HTTP, host paths', () => {
 
 test('metrics render the active job, pressure and counters in Prometheus format', () => {
   const job = {
-    id: 'j1', runType: 'content', status: 'running', createdAt: '2026-10-12T00:00:00Z', progressPercent: 42.5,
-    childRssMb: 300, childRssPeakMb: 350, childBrowserRssMb: 900, childBrowserRssPeakMb: 1100, browserRecycleCount: 2,
-    scopeItems: [{ pagesOk: 10, questionsSeen: 100, errorCount: 1 }, { pagesOk: 5, questionsSeen: 50, errorCount: 0 }],
+    id: 'j1',
+    runType: 'content',
+    status: 'running',
+    createdAt: '2026-10-12T00:00:00Z',
+    progressPercent: 42.5,
+    childRssMb: 300,
+    childRssPeakMb: 350,
+    childBrowserRssMb: 900,
+    childBrowserRssPeakMb: 1100,
+    browserRecycleCount: 2,
+    scopeItems: [
+      { pagesOk: 10, questionsSeen: 100, errorCount: 1 },
+      { pagesOk: 5, questionsSeen: 50, errorCount: 0 },
+    ],
   };
   const manager = {
     activeJobId: 'j1',
     jobs: new Map([['j1', job]]),
-    metrics: { startedAt: Date.now() - 5000, browserRecycles: 3, jobsFinished: { completed: 2, interrupted: 1 }, jobErrors: { resource_pressure: 1 } },
+    metrics: {
+      startedAt: Date.now() - 5000,
+      browserRecycles: 3,
+      jobsFinished: { completed: 2, interrupted: 1 },
+      jobErrors: { resource_pressure: 1 },
+    },
     persistStats: { writes: 7, failures: 0 },
     resourceGuard: { status: () => ({ memoryMiB: 700, pressure: 'soft', disks: [{ kind: 'data', freeMiB: 9000 }] }) },
     sourceControl: { status: () => ({ paused: false, manualRequired: false }) },
-    sourceBudget: { status: () => { throw new Error('locked'); } },
+    sourceBudget: {
+      status: () => {
+        throw new Error('locked');
+      },
+    },
   };
   const text = renderMetrics({ manager });
   assert.match(text, /^collector_up 1$/m);

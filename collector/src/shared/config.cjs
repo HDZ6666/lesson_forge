@@ -21,39 +21,192 @@ const SETTINGS = [
   // API process
   { name: 'COLLECTOR_API_HOST', kind: 'string', fallback: '127.0.0.1', scope: 'api', doc: 'HTTP 监听地址' },
   { name: 'COLLECTOR_API_PORT', kind: 'int', fallback: 9110, min: 1, max: 65535, scope: 'api', doc: 'HTTP 端口' },
-  { name: 'COLLECTOR_API_TOKEN', kind: 'string', fallback: '', secret: true, scope: 'api', doc: 'Bearer 认证令牌；非本机监听时必填' },
+  {
+    name: 'COLLECTOR_API_TOKEN',
+    kind: 'string',
+    fallback: '',
+    secret: true,
+    scope: 'api',
+    doc: 'Bearer 认证令牌；非本机监听时必填',
+  },
   { name: 'COLLECTOR_DB', kind: 'path', fallback: null, scope: 'api', doc: '采集 SQLite 路径' },
   { name: 'COLLECTOR_DATA_DIR', kind: 'path', fallback: null, scope: 'api', doc: '素材与原始页目录' },
   { name: 'COLLECTOR_PROFILE_DIR', kind: 'path', fallback: null, scope: 'api', doc: 'Chrome 持久化 profile 目录' },
   { name: 'COLLECTOR_NODE_BIN', kind: 'path', fallback: null, scope: 'api', doc: '启动采集子进程的 node' },
   { name: 'COLLECTOR_HEADFUL', kind: 'bool', fallback: true, scope: 'api', doc: '有头 Chrome' },
-  { name: 'COLLECTOR_JOB_TIMEOUT_MS', kind: 'int', fallback: 24 * 60 * 60 * 1000, min: 1, scope: 'api', doc: '单个任务总时限' },
-  { name: 'COLLECTOR_STALL_TIMEOUT_MS', kind: 'int', fallback: 20 * 60 * 1000, min: 1, scope: 'api', doc: '无心跳判定卡死' },
-  { name: 'COLLECTOR_CHILD_MAX_RSS_MB', kind: 'int', fallback: 0, min: 0, scope: 'api', doc: '子进程 RSS 上限，0 关闭' },
-  { name: 'COLLECTOR_PERSIST_INTERVAL_MS', kind: 'int', fallback: 5000, min: 1, scope: 'api', doc: '任务进度落库合并间隔' },
-  { name: 'COLLECTOR_READER_THREADS', kind: 'int', fallback: 2, min: 0, max: 8, scope: 'api', doc: 'API 读取线程数，0 为主线程读取' },
-  { name: 'COLLECTOR_READER_TIMEOUT_MS', kind: 'int', fallback: 30000, min: 1000, max: 600000, scope: 'api', doc: '单次读取时限，超时返回 504' },
+  {
+    name: 'COLLECTOR_JOB_TIMEOUT_MS',
+    kind: 'int',
+    fallback: 24 * 60 * 60 * 1000,
+    min: 1,
+    scope: 'api',
+    doc: '单个任务总时限',
+  },
+  {
+    name: 'COLLECTOR_STALL_TIMEOUT_MS',
+    kind: 'int',
+    fallback: 20 * 60 * 1000,
+    min: 1,
+    scope: 'api',
+    doc: '无心跳判定卡死',
+  },
+  {
+    name: 'COLLECTOR_CHILD_MAX_RSS_MB',
+    kind: 'int',
+    fallback: 0,
+    min: 0,
+    scope: 'api',
+    doc: '子进程 RSS 上限，0 关闭',
+  },
+  {
+    name: 'COLLECTOR_PERSIST_INTERVAL_MS',
+    kind: 'int',
+    fallback: 5000,
+    min: 1,
+    scope: 'api',
+    doc: '任务进度落库合并间隔',
+  },
+  {
+    name: 'COLLECTOR_READER_THREADS',
+    kind: 'int',
+    fallback: 2,
+    min: 0,
+    max: 8,
+    scope: 'api',
+    doc: 'API 读取线程数，0 为主线程读取',
+  },
+  {
+    name: 'COLLECTOR_READER_TIMEOUT_MS',
+    kind: 'int',
+    fallback: 30000,
+    min: 1000,
+    max: 600000,
+    scope: 'api',
+    doc: '单次读取时限，超时返回 504',
+  },
   // Crawl pacing (passed to the child as CLI flags)
-  { name: 'COLLECTOR_LIST_CONCURRENCY', kind: 'int', fallback: null, min: 1, max: 16, scope: 'crawl', doc: '列表分页并发' },
-  { name: 'COLLECTOR_ASSET_CONCURRENCY', kind: 'int', fallback: null, min: 1, max: 32, scope: 'crawl', doc: '素材下载并发' },
-  { name: 'COLLECTOR_DELAY_MIN_MS', kind: 'int', fallback: null, min: 0, max: 600000, scope: 'crawl', doc: '请求最小间隔' },
-  { name: 'COLLECTOR_DELAY_MAX_MS', kind: 'int', fallback: null, min: 0, max: 600000, scope: 'crawl', doc: '请求最大间隔' },
+  {
+    name: 'COLLECTOR_LIST_CONCURRENCY',
+    kind: 'int',
+    fallback: null,
+    min: 1,
+    max: 16,
+    scope: 'crawl',
+    doc: '列表分页并发',
+  },
+  {
+    name: 'COLLECTOR_ASSET_CONCURRENCY',
+    kind: 'int',
+    fallback: null,
+    min: 1,
+    max: 32,
+    scope: 'crawl',
+    doc: '素材下载并发',
+  },
+  {
+    name: 'COLLECTOR_DELAY_MIN_MS',
+    kind: 'int',
+    fallback: null,
+    min: 0,
+    max: 600000,
+    scope: 'crawl',
+    doc: '请求最小间隔',
+  },
+  {
+    name: 'COLLECTOR_DELAY_MAX_MS',
+    kind: 'int',
+    fallback: null,
+    min: 0,
+    max: 600000,
+    scope: 'crawl',
+    doc: '请求最大间隔',
+  },
   // Resource guard
   { name: 'COLLECTOR_MIN_DISK_FREE_MIB', kind: 'int', fallback: 0, min: 0, scope: 'resources', doc: '磁盘保留水位' },
   { name: 'COLLECTOR_MIN_MEMORY_FREE_MIB', kind: 'int', fallback: 0, min: 0, scope: 'resources', doc: '内存硬水位' },
-  { name: 'COLLECTOR_SOFT_MEMORY_FREE_MIB', kind: 'int', fallback: 0, min: 0, scope: 'resources', doc: '内存软水位（触发浏览器回收）' },
-  { name: 'COLLECTOR_MEMORY_GRACE_MS', kind: 'int', fallback: 0, min: 0, scope: 'resources', doc: '低于硬水位持续多久才停止' },
+  {
+    name: 'COLLECTOR_SOFT_MEMORY_FREE_MIB',
+    kind: 'int',
+    fallback: 0,
+    min: 0,
+    scope: 'resources',
+    doc: '内存软水位（触发浏览器回收）',
+  },
+  {
+    name: 'COLLECTOR_MEMORY_GRACE_MS',
+    kind: 'int',
+    fallback: 0,
+    min: 0,
+    scope: 'resources',
+    doc: '低于硬水位持续多久才停止',
+  },
   // Browser recycling (read by the crawl child)
-  { name: 'COLLECTOR_BROWSER_RECYCLE_PAGES', kind: 'int', fallback: 400, min: 0, scope: 'browser', doc: '每采集多少页回收浏览器，0 关闭' },
-  { name: 'COLLECTOR_BROWSER_RECYCLE_MB', kind: 'int', fallback: 1000, min: 0, scope: 'browser', doc: 'Chrome 超过多少 MB 回收，0 关闭' },
-  { name: 'COLLECTOR_BROWSER_PRESSURE_MIN_PAGES', kind: 'int', fallback: 40, min: 0, scope: 'browser', doc: '软水位回收的最小页数间隔' },
+  {
+    name: 'COLLECTOR_BROWSER_RECYCLE_PAGES',
+    kind: 'int',
+    fallback: 400,
+    min: 0,
+    scope: 'browser',
+    doc: '每采集多少页回收浏览器，0 关闭',
+  },
+  {
+    name: 'COLLECTOR_BROWSER_RECYCLE_MB',
+    kind: 'int',
+    fallback: 1000,
+    min: 0,
+    scope: 'browser',
+    doc: 'Chrome 超过多少 MB 回收，0 关闭',
+  },
+  {
+    name: 'COLLECTOR_BROWSER_PRESSURE_MIN_PAGES',
+    kind: 'int',
+    fallback: 40,
+    min: 0,
+    scope: 'browser',
+    doc: '软水位回收的最小页数间隔',
+  },
   // Daily source budget
-  { name: 'COLLECTOR_SOURCE_DAILY_REQUEST_LIMIT', kind: 'int', fallback: 0, min: 0, scope: 'budget', doc: '每日请求数，0 不限' },
-  { name: 'COLLECTOR_SOURCE_DAILY_BOOK_LIMIT', kind: 'int', fallback: 0, min: 0, scope: 'budget', doc: '每日教材数，0 不限' },
-  { name: 'COLLECTOR_SOURCE_DAILY_ACTIVE_SECONDS', kind: 'int', fallback: 0, min: 0, scope: 'budget', doc: '每日采集时长，0 不限' },
-  { name: 'COLLECTOR_SOURCE_DAILY_DOWNLOAD_MIB', kind: 'int', fallback: 0, min: 0, scope: 'budget', doc: '每日下载量，0 不限' },
+  {
+    name: 'COLLECTOR_SOURCE_DAILY_REQUEST_LIMIT',
+    kind: 'int',
+    fallback: 0,
+    min: 0,
+    scope: 'budget',
+    doc: '每日请求数，0 不限',
+  },
+  {
+    name: 'COLLECTOR_SOURCE_DAILY_BOOK_LIMIT',
+    kind: 'int',
+    fallback: 0,
+    min: 0,
+    scope: 'budget',
+    doc: '每日教材数，0 不限',
+  },
+  {
+    name: 'COLLECTOR_SOURCE_DAILY_ACTIVE_SECONDS',
+    kind: 'int',
+    fallback: 0,
+    min: 0,
+    scope: 'budget',
+    doc: '每日采集时长，0 不限',
+  },
+  {
+    name: 'COLLECTOR_SOURCE_DAILY_DOWNLOAD_MIB',
+    kind: 'int',
+    fallback: 0,
+    min: 0,
+    scope: 'budget',
+    doc: '每日下载量，0 不限',
+  },
   // Debugging
-  { name: 'COLLECTOR_EVENT_CHANNEL', kind: 'enum', values: ['', 'ipc', 'stdout', 'none'], fallback: '', scope: 'debug', doc: '子进程事件通道' },
+  {
+    name: 'COLLECTOR_EVENT_CHANNEL',
+    kind: 'enum',
+    values: ['', 'ipc', 'stdout', 'none'],
+    fallback: '',
+    scope: 'debug',
+    doc: '子进程事件通道',
+  },
 ];
 
 const BY_NAME = new Map(SETTINGS.map((setting) => [setting.name, setting]));
@@ -81,7 +234,8 @@ function parseSetting(setting, raw) {
     }
     case 'enum': {
       const lowered = text.toLowerCase();
-      if (!setting.values.includes(lowered)) return { error: `${setting.name} 只能是 ${setting.values.filter(Boolean).join(' / ')}` };
+      if (!setting.values.includes(lowered))
+        return { error: `${setting.name} 只能是 ${setting.values.filter(Boolean).join(' / ')}` };
       return { value: lowered };
     }
     default:
@@ -135,9 +289,12 @@ function describeConfig(values, { redactPaths = false } = {}) {
 
 function formatConfig(values) {
   return Object.entries(describeConfig(values))
-    .map(([scope, entries]) => `  [${scope}] ${Object.entries(entries)
-      .map(([name, value]) => `${name.replace(/^COLLECTOR_/, '')}=${value == null ? '默认' : value}`)
-      .join(' ')}`)
+    .map(
+      ([scope, entries]) =>
+        `  [${scope}] ${Object.entries(entries)
+          .map(([name, value]) => `${name.replace(/^COLLECTOR_/, '')}=${value == null ? '默认' : value}`)
+          .join(' ')}`,
+    )
     .join('\n');
 }
 

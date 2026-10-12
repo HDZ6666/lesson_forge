@@ -9,12 +9,18 @@ function collectorReadiness(manager) {
   if (pauses.length) {
     const deadlines = pauses.map((state) => Date.parse(state.notBefore)).filter(Number.isFinite);
     gate = {
-      ...control, paused: true, manualRequired: Boolean(control?.manualRequired),
-      reason: pauses.map((state) => state.reason).filter(Boolean).join('；'),
+      ...control,
+      paused: true,
+      manualRequired: Boolean(control?.manualRequired),
+      reason: pauses
+        .map((state) => state.reason)
+        .filter(Boolean)
+        .join('；'),
       notBefore: deadlines.length ? new Date(Math.max(...deadlines)).toISOString() : null,
     };
   }
-  if(manager.manualRecovery?.active)gate={...gate,paused:true,manualRequired:true,reason:'管理员正在处理来源验证'};
+  if (manager.manualRecovery?.active)
+    gate = { ...gate, paused: true, manualRequired: true, reason: '管理员正在处理来源验证' };
   return { sourceControl: gate, sourceBudget: budget, resources };
 }
 

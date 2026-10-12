@@ -3,13 +3,36 @@
 const { sha256 } = require('./util.cjs');
 
 const VOID_TAGS = new Set([
-  'area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link',
-  'meta', 'param', 'source', 'track', 'wbr',
+  'area',
+  'base',
+  'br',
+  'col',
+  'embed',
+  'hr',
+  'img',
+  'input',
+  'link',
+  'meta',
+  'param',
+  'source',
+  'track',
+  'wbr',
 ]);
 
 const BLOCKED_TAGS = new Set([
-  'base', 'button', 'embed', 'form', 'iframe', 'input', 'link', 'meta',
-  'object', 'script', 'select', 'style', 'textarea',
+  'base',
+  'button',
+  'embed',
+  'form',
+  'iframe',
+  'input',
+  'link',
+  'meta',
+  'object',
+  'script',
+  'select',
+  'style',
+  'textarea',
 ]);
 
 const URL_ATTRIBUTE_PATTERN = /\b(?:href|src|action|formaction|poster|xlink:href)\s*=\s*(?:(['"])(.*?)\1|([^\s>]+))/gi;
@@ -19,18 +42,17 @@ const ACTIVE_CONTENT_URL_PATTERN = /^\s*(?:javascript|vbscript|data)\s*:/i;
 function sanitizeHtml(value) {
   if (value == null || value === '') return value == null ? null : String(value);
   let html = String(value);
+  html = html.replace(/<(script|style|iframe|object|embed|form|button|select|textarea)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, '');
   html = html.replace(
-    /<(script|style|iframe|object|embed|form|button|select|textarea)\b[^>]*>[\s\S]*?<\/\1\s*>/gi,
+    /<\/?(?:base|button|embed|form|iframe|input|link|meta|object|script|select|style|textarea)\b[^>]*>/gi,
     '',
   );
-  html = html.replace(/<\/?(?:base|button|embed|form|iframe|input|link|meta|object|script|select|style|textarea)\b[^>]*>/gi, '');
   html = html.replace(/\s+on[a-z0-9_-]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '');
   html = html.replace(/\s+(?:style|srcdoc)\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '');
   html = html.replace(
     /\s+(href|src|action|formaction|poster|xlink:href)\s*=\s*(?:(['"])(.*?)\2|([^\s>]+))/gi,
-    (match, _name, _quote, quotedUrl, bareUrl) => (
-      ACTIVE_CONTENT_URL_PATTERN.test(quotedUrl ?? bareUrl ?? '') ? '' : match
-    ),
+    (match, _name, _quote, quotedUrl, bareUrl) =>
+      ACTIVE_CONTENT_URL_PATTERN.test(quotedUrl ?? bareUrl ?? '') ? '' : match,
   );
   return html;
 }
@@ -106,7 +128,10 @@ function checkHtmlSafety(value) {
 }
 
 function assetKey(assetType, sourceUrl) {
-  const type = String(assetType || 'asset').trim().toLowerCase() || 'asset';
+  const type =
+    String(assetType || 'asset')
+      .trim()
+      .toLowerCase() || 'asset';
   return `${type}-${sha256(String(sourceUrl)).slice(0, 16)}`;
 }
 
@@ -114,23 +139,26 @@ function replaceImageSources(html, assetsByUrl) {
   if (html == null || html === '') return { html: html == null ? null : String(html), missing: [] };
   const missing = [];
   const input = String(html);
-  const output = input.replace(/<img\b([^>]*?)\bsrc(\s*=\s*)(["'])([\s\S]*?)\3([^>]*)>/gi,
-    (match, before, equals, quote, sourceUrl, after) => {
-      const asset = assetsByUrl.get(sourceUrl);
-      if (!asset) {
-        missing.push(sourceUrl);
-        return match;
-      }
-      return `<img${before}data-asset-key${equals}${quote}${asset.assetKey}${quote}${after}>`;
-    }).replace(/<img\b([^>]*?)\bsrc(\s*=\s*)(?!["'])([^\s>]+)([^>]*)>/gi,
-      (match, before, equals, sourceUrl, after) => {
+  const output = input
+    .replace(
+      /<img\b([^>]*?)\bsrc(\s*=\s*)(["'])([\s\S]*?)\3([^>]*)>/gi,
+      (match, before, equals, quote, sourceUrl, after) => {
         const asset = assetsByUrl.get(sourceUrl);
         if (!asset) {
           missing.push(sourceUrl);
           return match;
         }
-        return `<img${before}data-asset-key${equals}${asset.assetKey}${after}>`;
-      });
+        return `<img${before}data-asset-key${equals}${quote}${asset.assetKey}${quote}${after}>`;
+      },
+    )
+    .replace(/<img\b([^>]*?)\bsrc(\s*=\s*)(?!["'])([^\s>]+)([^>]*)>/gi, (match, before, equals, sourceUrl, after) => {
+      const asset = assetsByUrl.get(sourceUrl);
+      if (!asset) {
+        missing.push(sourceUrl);
+        return match;
+      }
+      return `<img${before}data-asset-key${equals}${asset.assetKey}${after}>`;
+    });
   return { html: output, missing };
 }
 

@@ -91,7 +91,7 @@ class BrowserSession {
   async open() {
     const { opts } = this;
     if (!this.context) {
-      this.playwright = this.playwright || await loadPlaywright();
+      this.playwright = this.playwright || (await loadPlaywright());
       if (opts.cdpUrl) {
         const connected = await connectCollectorOverCDP(this.playwright, opts);
         this.context = connected.context;
@@ -111,7 +111,7 @@ class BrowserSession {
         this.page = selected.page;
         this.ownedPage = selected.owned;
       } else {
-        this.page = this.context.pages?.()[0] || await this.context.newPage();
+        this.page = this.context.pages?.()[0] || (await this.context.newPage());
       }
     }
     await navigateToTextbook(this.page, initialTextbookUrl(opts), opts);
@@ -126,8 +126,10 @@ class BrowserSession {
   // browser belongs to someone else, and injected test contexts opt in
   // through `dependencies.reopenBrowser`.
   canRecycle() {
-    return typeof this.dependencies.reopenBrowser === 'function'
-      || (!this.injected && !this.connectedOverCDP && this.context != null);
+    return (
+      typeof this.dependencies.reopenBrowser === 'function' ||
+      (!this.injected && !this.connectedOverCDP && this.context != null)
+    );
   }
 
   recycleReason() {
@@ -153,8 +155,11 @@ class BrowserSession {
       await closeCollectorContext(this.context);
       this.context = null;
       this.page = null;
-      this.context = await launchCollectorContext(this.playwright, { ...this.opts, headless: this.opts.headless === true });
-      this.page = this.context.pages?.()[0] || await this.context.newPage();
+      this.context = await launchCollectorContext(this.playwright, {
+        ...this.opts,
+        headless: this.opts.headless === true,
+      });
+      this.page = this.context.pages?.()[0] || (await this.context.newPage());
     }
     this.recycle.pagesSince = 0;
     this.recycle.count += 1;
@@ -180,7 +185,11 @@ class BrowserSession {
       if (isTextbookFatalError(error) || isCookieSwitchError(error)) throw error;
       // Never let a reopen failure fall into the per-catalog "skip this
       // point" handler: stop the run as a resumable interrupt instead.
-      const failure = new QuestionSyncError(`浏览器回收后无法恢复采集页面：${error.message}`, 'browser_recycle_failed', error);
+      const failure = new QuestionSyncError(
+        `浏览器回收后无法恢复采集页面：${error.message}`,
+        'browser_recycle_failed',
+        error,
+      );
       failure.recycleFailure = true;
       throw failure;
     }
@@ -197,7 +206,9 @@ class BrowserSession {
 
   async closeOwnedTab() {
     if (this.ownedPage && this.page && typeof this.page.close === 'function') {
-      try { await this.page.close(); } catch {}
+      try {
+        await this.page.close();
+      } catch {}
     }
   }
 
@@ -220,8 +231,12 @@ class BrowserSession {
       return;
     }
     if (this.ownedBrowser) {
-      try { await this.context?.close(); } catch {}
-      try { await this.ownedBrowser.close(); } catch {}
+      try {
+        await this.context?.close();
+      } catch {}
+      try {
+        await this.ownedBrowser.close();
+      } catch {}
       this.ownedBrowser = null;
       this.context = null;
       this.page = null;

@@ -23,11 +23,8 @@ const { assetKey: canonicalAssetKey } = require('../qbpkg/normalize.cjs');
 const { retryDelay } = require('../policies/retry.cjs');
 const { openAssetResponse } = require('./request.cjs');
 
-const assertAllowedUrl = (value, hosts) => assertAllowedUrlShared(
-  value,
-  hosts,
-  (message, code, cause) => new QuestionSyncError(message, code, cause),
-);
+const assertAllowedUrl = (value, hosts) =>
+  assertAllowedUrlShared(value, hosts, (message, code, cause) => new QuestionSyncError(message, code, cause));
 
 async function disposeResponse(response) {
   if (!response || typeof response.dispose !== 'function') return;
@@ -39,7 +36,10 @@ async function disposeResponse(response) {
 }
 
 function extensionForAsset(url, mimeType) {
-  const mime = String(mimeType || '').split(';')[0].trim().toLowerCase();
+  const mime = String(mimeType || '')
+    .split(';')[0]
+    .trim()
+    .toLowerCase();
   const byMime = {
     'image/svg+xml': '.svg',
     'image/png': '.png',
@@ -56,15 +56,18 @@ function extensionForAsset(url, mimeType) {
   }
 }
 
-const KNOWN_ASSET_EXTENSIONS = new Set([
-  '.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.bmp', '.avif', '.jxl',
-]);
+const KNOWN_ASSET_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.bmp', '.avif', '.jxl']);
 
 function isSupportedAssetResponse(url, mimeType) {
-  const mime = String(mimeType || '').split(';')[0].trim().toLowerCase();
+  const mime = String(mimeType || '')
+    .split(';')[0]
+    .trim()
+    .toLowerCase();
   if (mime.startsWith('image/')) return true;
   let extension = '';
-  try { extension = path.extname(new URL(url).pathname).toLowerCase(); } catch {}
+  try {
+    extension = path.extname(new URL(url).pathname).toLowerCase();
+  } catch {}
   // A few CDN edges omit Content-Type or return octet-stream.  Only accept
   // those responses when the URL itself identifies a known image format;
   // this still rejects challenge HTML, JSON, and empty/unknown responses.
@@ -158,12 +161,18 @@ async function downloadAsset(context, options, asset) {
         await disposeResponse(response);
         response = null;
         if (error.blocked) throw error;
-        const retryable = !['host_not_allowed', 'asset_redirect', 'asset_too_large', 'asset_storage_error', 'asset_http_404'].includes(
-          String(error?.code || ''),
-        );
+        const retryable = ![
+          'host_not_allowed',
+          'asset_redirect',
+          'asset_too_large',
+          'asset_storage_error',
+          'asset_http_404',
+        ].includes(String(error?.code || ''));
         if (!retryable || retryIndex >= MAX_RETRIES) throw error;
         const delay = retryDelay('normal', retryIndex, lastHeaders, options.randomFn || Math.random);
-        console.warn(`[素材重试] ${requestUrl} 第 ${retryIndex + 1}/${MAX_RETRIES} 次，等待 ${(delay / 1000).toFixed(1)} 秒：${error.message}`);
+        console.warn(
+          `[素材重试] ${requestUrl} 第 ${retryIndex + 1}/${MAX_RETRIES} 次，等待 ${(delay / 1000).toFixed(1)} 秒：${error.message}`,
+        );
         await wait(delay);
       }
     }
@@ -203,7 +212,9 @@ async function downloadAsset(context, options, asset) {
           try {
             options.sourceControl?.observe(responseStatus(probe), responseHeaders(probe), { verification: false });
             probeBody = typeof probe?.body === 'function' ? await probe.body() : null;
-          } finally { await disposeResponse(probe); }
+          } finally {
+            await disposeResponse(probe);
+          }
           if (isEmptySvgPlaceholder(probeBody)) {
             return {
               ...asset,
@@ -215,7 +226,9 @@ async function downloadAsset(context, options, asset) {
               fallbackSourceUrl: fallbackUrl,
             };
           }
-        } catch (error) { if (error.blocked) throw error; }
+        } catch (error) {
+          if (error.blocked) throw error;
+        }
       }
       throw fallbackError;
     }
@@ -257,13 +270,10 @@ async function downloadAsset(context, options, asset) {
  * `{ downloadFailed: true, errorCode, errorMessage }` exactly like the serial
  * path used to; a storage error (disk) is fatal and propagates unchanged.
  */
-async function prefetchAssets(assets, {
-  concurrency = DEFAULT_ASSET_CONCURRENCY,
-  cache,
-  download,
-  onSuccess = null,
-  onFailure = null,
-} = {}) {
+async function prefetchAssets(
+  assets,
+  { concurrency = DEFAULT_ASSET_CONCURRENCY, cache, download, onSuccess = null, onFailure = null } = {},
+) {
   if (!(cache instanceof Map)) throw new TypeError('prefetchAssets 需要 Map 类型的 cache');
   if (typeof download !== 'function') throw new TypeError('prefetchAssets 需要 download 函数');
   const pending = new Map();

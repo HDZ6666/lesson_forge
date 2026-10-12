@@ -132,7 +132,10 @@ test('collector API exposes authenticated bounded snapshots and scoped candidate
     );
     assert.equal(candidatesResponse.status, 200);
     const candidates = await candidatesResponse.json();
-    assert.deepEqual(candidates.rows.map((row) => row.external_id), ['q1']);
+    assert.deepEqual(
+      candidates.rows.map((row) => row.external_id),
+      ['q1'],
+    );
 
     const progressResponse = await fetch(`${baseUrl}/v1/catalog-progress`, { headers });
     assert.equal(progressResponse.status, 200);
@@ -151,9 +154,7 @@ test('多教材实时进度按已知总题数加权，完成教材以最终题�
     { externalTextbookId: 'tb1', status: 'running' },
     { externalTextbookId: 'tb2', status: 'completed', questionCount: 20 },
   ];
-  const live = new Map([
-    ['tb1', { available: true, totalQuestionCount: 100, collectedQuestionCount: 25 }],
-  ]);
+  const live = new Map([['tb1', { available: true, totalQuestionCount: 100, collectedQuestionCount: 25 }]]);
   assert.deepEqual(aggregateLiveProgress(scopes, live, 7), {
     available: true,
     progressPercent: 37.5,
@@ -161,16 +162,17 @@ test('多教材实时进度按已知总题数加权，完成教材以最终题�
 });
 
 test('完成后按实际唯一题数展示 100%，不使用上游 total', () => {
-  const scopes = [
-    { externalTextbookId: 'tb1', status: 'completed', questionCount: 10012 },
-  ];
+  const scopes = [{ externalTextbookId: 'tb1', status: 'completed', questionCount: 10012 }];
   const live = new Map([
-    ['tb1', {
-      available: true,
-      totalQuestionCount: 10012,
-      collectedQuestionCount: 10012,
-      progressPercent: 100,
-    }],
+    [
+      'tb1',
+      {
+        available: true,
+        totalQuestionCount: 10012,
+        collectedQuestionCount: 10012,
+        progressPercent: 100,
+      },
+    ],
   ]);
   assert.deepEqual(aggregateLiveProgress(scopes, live, 99), {
     available: true,
@@ -180,10 +182,10 @@ test('完成后按实际唯一题数展示 100%，不使用上游 total', () => 
 
 test('单教材实时百分比和无实时投影时的旧阶段进度保持稳定', () => {
   const scope = [{ externalTextbookId: 'tb1', status: 'running' }];
-  assert.deepEqual(
-    aggregateLiveProgress(scope, new Map([['tb1', { available: true, progressPercent: 37.25 }]]), 5),
-    { available: true, progressPercent: 37.3 },
-  );
+  assert.deepEqual(aggregateLiveProgress(scope, new Map([['tb1', { available: true, progressPercent: 37.25 }]]), 5), {
+    available: true,
+    progressPercent: 37.3,
+  });
   assert.deepEqual(aggregateLiveProgress(scope, new Map(), 12), {
     available: false,
     progressPercent: 12,
@@ -236,32 +238,37 @@ test('独立 textbookScopes 创建题库任务不依赖 metadataRunId 或元数�
       acknowledgeSourcePolicy: true,
       metadataRunId: null,
       textbookExternalIds: ['260617'],
-      textbookScopes: [{
-        sourceProvider: 'zujuan',
-        externalVersionId: '199373',
-        externalTextbookId: '260617',
-        versionName: '浙教版',
-        textbookName: '九年级上册',
-      }],
+      textbookScopes: [
+        {
+          sourceProvider: 'zujuan',
+          externalVersionId: '199373',
+          externalTextbookId: '260617',
+          versionName: '浙教版',
+          textbookName: '九年级上册',
+        },
+      ],
       maxPages: 1,
     });
     assert.equal(started.metadataRunId, null);
-    assert.deepEqual(started.scopeItems.map((scope) => ({
-      sourceProvider: scope.sourceProvider,
-      externalVersionId: scope.externalVersionId,
-      externalTextbookId: scope.externalTextbookId,
-      versionName: scope.versionName,
-      textbookName: scope.textbookName,
-    })), [{
-      sourceProvider: 'zujuan',
-      externalVersionId: '199373',
-      externalTextbookId: '260617',
-      versionName: '浙教版',
-      textbookName: '九年级上册',
-    }]);
-    await waitFor(() => ['completed', 'failed', 'blocked', 'cancelled'].includes(
-      manager.get(started.id)?.status,
-    ));
+    assert.deepEqual(
+      started.scopeItems.map((scope) => ({
+        sourceProvider: scope.sourceProvider,
+        externalVersionId: scope.externalVersionId,
+        externalTextbookId: scope.externalTextbookId,
+        versionName: scope.versionName,
+        textbookName: scope.textbookName,
+      })),
+      [
+        {
+          sourceProvider: 'zujuan',
+          externalVersionId: '199373',
+          externalTextbookId: '260617',
+          versionName: '浙教版',
+          textbookName: '九年级上册',
+        },
+      ],
+    );
+    await waitFor(() => ['completed', 'failed', 'blocked', 'cancelled'].includes(manager.get(started.id)?.status));
     assert.ok(childArgs, '独立 scope 应启动题库脚本');
     assert.match(childArgs[0], /zujuan_question_sync\.cjs$/);
     assert.equal(childArgs[childArgs.indexOf('--textbook-id') + 1], '260617');
@@ -279,21 +286,26 @@ test('独立 textbookScopes 创建题库任务不依赖 metadataRunId 或元数�
 test('独立 textbookScopes 严格拒绝来源、重复项、映射和名称输入', () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'collector-independent-invalid-'));
   const dbPath = path.join(directory, 'collector.sqlite3');
-  const manager = new CollectorJobManager({ dbPath, spawnImpl() {
-    throw new Error('非法请求不应启动子进程');
-  } });
+  const manager = new CollectorJobManager({
+    dbPath,
+    spawnImpl() {
+      throw new Error('非法请求不应启动子进程');
+    },
+  });
   const base = {
     runType: 'content',
     acknowledgeSourcePolicy: true,
     metadataRunId: null,
     textbookExternalIds: ['tb1'],
-    textbookScopes: [{
-      sourceProvider: 'zujuan',
-      externalVersionId: 'v1',
-      externalTextbookId: 'tb1',
-      versionName: '版本',
-      textbookName: '教材',
-    }],
+    textbookScopes: [
+      {
+        sourceProvider: 'zujuan',
+        externalVersionId: 'v1',
+        externalTextbookId: 'tb1',
+        versionName: '版本',
+        textbookName: '教材',
+      },
+    ],
     maxPages: 1,
   };
   try {
@@ -302,22 +314,21 @@ test('独立 textbookScopes 严格拒绝来源、重复项、映射和名称输�
       /来源提供方不受支持/,
     );
     assert.throws(
-      () => manager.start({
-        ...base,
-        textbookExternalIds: ['tb1', 'tb2'],
-        textbookScopes: [base.textbookScopes[0]],
-      }),
+      () =>
+        manager.start({
+          ...base,
+          textbookExternalIds: ['tb1', 'tb2'],
+          textbookScopes: [base.textbookScopes[0]],
+        }),
       /数量不一致/,
     );
+    assert.throws(() => manager.start({ ...base, textbookExternalIds: ['tb2'] }), /顺序或映射不一致/);
     assert.throws(
-      () => manager.start({ ...base, textbookExternalIds: ['tb2'] }),
-      /顺序或映射不一致/,
-    );
-    assert.throws(
-      () => manager.start({
-        ...base,
-        textbookScopes: [{ ...base.textbookScopes[0], textbookName: 'x'.repeat(201) }],
-      }),
+      () =>
+        manager.start({
+          ...base,
+          textbookScopes: [{ ...base.textbookScopes[0], textbookName: 'x'.repeat(201) }],
+        }),
       /长度或格式不安全/,
     );
   } finally {
@@ -359,12 +370,23 @@ test('独立 textbookScopes 续采严格绑定 source run，并只切换为 --re
   const store = new SyncStore(dbPath);
   const sourceRunId = store.beginRun(scope);
   store.saveRunCatalogTree(sourceRunId, 'tb1', [{ externalId: 'c1', level: 1, name: '第一章' }]);
-  store.saveRunQuestion(sourceRunId, 'tb1', {
-    externalId: 'q1', contentHtml: '题干', plainText: '题干',
-  }, 'c1');
-  store.saveRunQuestionCatalogs(sourceRunId, 'tb1', 'q1', [{
-    externalId: 'c1', level: 1, name: '第一章',
-  }]);
+  store.saveRunQuestion(
+    sourceRunId,
+    'tb1',
+    {
+      externalId: 'q1',
+      contentHtml: '题干',
+      plainText: '题干',
+    },
+    'c1',
+  );
+  store.saveRunQuestionCatalogs(sourceRunId, 'tb1', 'q1', [
+    {
+      externalId: 'c1',
+      level: 1,
+      name: '第一章',
+    },
+  ]);
   store.finishRun(sourceRunId, 'interrupted', { pagesOk: 1, errors: 1 }, 'ECONNRESET');
   store.close();
 
@@ -382,20 +404,22 @@ test('独立 textbookScopes 续采严格绑定 source run，并只切换为 --re
       acknowledgeSourcePolicy: true,
       maxPages: 1,
       textbookExternalIds: ['tb1'],
-      textbookScopes: [{
-        sourceProvider: 'zujuan',
-        externalVersionId: 'v1',
-        externalTextbookId: 'tb1',
-        versionName: '版本',
-        textbookName: '教材',
-        bootstrapChapterExternalId: 'c1',
-        resumeFromCollectorRunId: sourceRunId,
-      }],
+      textbookScopes: [
+        {
+          sourceProvider: 'zujuan',
+          externalVersionId: 'v1',
+          externalTextbookId: 'tb1',
+          versionName: '版本',
+          textbookName: '教材',
+          bootstrapChapterExternalId: 'c1',
+          resumeFromCollectorRunId: sourceRunId,
+        },
+      ],
     });
     assert.equal(started.scopeItems[0].resumeFromCollectorRunId, sourceRunId);
-    await waitFor(() => ['completed', 'failed', 'blocked', 'interrupted', 'cancelled'].includes(
-      manager.get(started.id)?.status,
-    ));
+    await waitFor(() =>
+      ['completed', 'failed', 'blocked', 'interrupted', 'cancelled'].includes(manager.get(started.id)?.status),
+    );
     assert.ok(childArgs);
     assert.equal(childArgs[childArgs.indexOf('--resume-run-id') + 1], String(sourceRunId));
     assert.equal(childArgs.includes('--no-resume'), false);

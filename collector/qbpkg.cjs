@@ -58,32 +58,98 @@ function parseArgs(argv) {
   const positional = [];
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
-    if (arg === '--help' || arg === '-h') { options.help = true; continue; }
-    if (!options.command && !arg.startsWith('--')) { options.command = arg; continue; }
-    if (!arg.startsWith('--')) { positional.push(arg); continue; }
+    if (arg === '--help' || arg === '-h') {
+      options.help = true;
+      continue;
+    }
+    if (!options.command && !arg.startsWith('--')) {
+      options.command = arg;
+      continue;
+    }
+    if (!arg.startsWith('--')) {
+      positional.push(arg);
+      continue;
+    }
     switch (arg) {
-      case '--db': case '--source-db': case '--source': options.db = value(argv, i, arg); i += 1; break;
-      case '--output': case '--out': options.output = value(argv, i, arg); i += 1; break;
-      case '--package': case '--package-path': options.package = value(argv, i, arg); i += 1; break;
-      case '--metadata': case '--metadata-json': case '--dataset': case '--dataset-metadata': options.metadata = parseJsonOrFile(value(argv, i, arg), 'metadata'); i += 1; break;
-      case '--range-evidence': case '--completion-evidence': case '--sync-range': options.rangeEvidence = parseJsonOrFile(value(argv, i, arg), 'range evidence'); i += 1; break;
-      case '--provider': options.metadata = { ...(options.metadata || {}), provider: value(argv, i, arg) }; i += 1; break;
-      case '--version-name': options.metadata = { ...(options.metadata || {}), versionName: value(argv, i, arg) }; i += 1; break;
-      case '--textbook-name': options.metadata = { ...(options.metadata || {}), textbookName: value(argv, i, arg) }; i += 1; break;
-      case '--previous': options.previous = value(argv, i, arg); i += 1; break;
-      case '--batch-no': options.batchNo = value(argv, i, arg); i += 1; break;
-      case '--created-at': options.createdAt = value(argv, i, arg); i += 1; break;
-      case '--decrease-threshold': case '--max-decrease': options.decreaseThreshold = Number(value(argv, i, arg)); i += 1; break;
-      case '--block-on-deactivation': options.blockOnDeactivation = true; break;
-      case '--include-visible-solutions': case '--public-solutions': options.includeVisibleSolutions = true; break;
-      case '--full-snapshot': options.fullSnapshot = true; break;
-      default: throw new Error(`未知参数：${arg}`);
+      case '--db':
+      case '--source-db':
+      case '--source':
+        options.db = value(argv, i, arg);
+        i += 1;
+        break;
+      case '--output':
+      case '--out':
+        options.output = value(argv, i, arg);
+        i += 1;
+        break;
+      case '--package':
+      case '--package-path':
+        options.package = value(argv, i, arg);
+        i += 1;
+        break;
+      case '--metadata':
+      case '--metadata-json':
+      case '--dataset':
+      case '--dataset-metadata':
+        options.metadata = parseJsonOrFile(value(argv, i, arg), 'metadata');
+        i += 1;
+        break;
+      case '--range-evidence':
+      case '--completion-evidence':
+      case '--sync-range':
+        options.rangeEvidence = parseJsonOrFile(value(argv, i, arg), 'range evidence');
+        i += 1;
+        break;
+      case '--provider':
+        options.metadata = { ...(options.metadata || {}), provider: value(argv, i, arg) };
+        i += 1;
+        break;
+      case '--version-name':
+        options.metadata = { ...(options.metadata || {}), versionName: value(argv, i, arg) };
+        i += 1;
+        break;
+      case '--textbook-name':
+        options.metadata = { ...(options.metadata || {}), textbookName: value(argv, i, arg) };
+        i += 1;
+        break;
+      case '--previous':
+        options.previous = value(argv, i, arg);
+        i += 1;
+        break;
+      case '--batch-no':
+        options.batchNo = value(argv, i, arg);
+        i += 1;
+        break;
+      case '--created-at':
+        options.createdAt = value(argv, i, arg);
+        i += 1;
+        break;
+      case '--decrease-threshold':
+      case '--max-decrease':
+        options.decreaseThreshold = Number(value(argv, i, arg));
+        i += 1;
+        break;
+      case '--block-on-deactivation':
+        options.blockOnDeactivation = true;
+        break;
+      case '--include-visible-solutions':
+      case '--public-solutions':
+        options.includeVisibleSolutions = true;
+        break;
+      case '--full-snapshot':
+        options.fullSnapshot = true;
+        break;
+      default:
+        throw new Error(`未知参数：${arg}`);
     }
   }
   if (!options.help && !options.command) throw new Error('缺少 build 或 verify 子命令');
-  if (!options.help && !['build', 'verify'].includes(options.command)) throw new Error(`未知子命令：${options.command}`);
+  if (!options.help && !['build', 'verify'].includes(options.command))
+    throw new Error(`未知子命令：${options.command}`);
   if (!options.help && options.command === 'build') {
-    for (const field of ['db', 'output', 'metadata', 'rangeEvidence']) if (options[field] == null) throw new Error(`build 缺少 --${field === 'rangeEvidence' ? 'range-evidence' : field}`);
+    for (const field of ['db', 'output', 'metadata', 'rangeEvidence'])
+      if (options[field] == null)
+        throw new Error(`build 缺少 --${field === 'rangeEvidence' ? 'range-evidence' : field}`);
     if (options.fullSnapshot !== true) throw new Error('build 必须显式提供 --full-snapshot');
   }
   if (!options.help && options.command === 'verify' && !options.package) throw new Error('verify 缺少 --package');
@@ -94,10 +160,19 @@ function parseArgs(argv) {
 function main(argv = process.argv.slice(2)) {
   try {
     const options = parseArgs(argv);
-    if (options.help) { console.log(usage()); return 0; }
+    if (options.help) {
+      console.log(usage());
+      return 0;
+    }
     if (options.command === 'build') {
       const result = buildPackage(options);
-      console.log(JSON.stringify({ output: result.outputPath, manifest: result.manifest, diff: result.diff, validation: result.validation }, null, 2));
+      console.log(
+        JSON.stringify(
+          { output: result.outputPath, manifest: result.manifest, diff: result.diff, validation: result.validation },
+          null,
+          2,
+        ),
+      );
       return 0;
     }
     const report = verifyPackage(options.package, { throwOnError: false });

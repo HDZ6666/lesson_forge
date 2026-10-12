@@ -37,7 +37,12 @@ test('seal steps emit sealed / error events with the run counters', () => {
   const events = { emit: (type, payload) => emitted.push({ type, ...payload }) };
   const finished = [];
   const store = {
-    validateRunCompleteness: () => ({ complete: true, scanComplete: true, dataComplete: true, completionQuality: 'complete' }),
+    validateRunCompleteness: () => ({
+      complete: true,
+      scanComplete: true,
+      dataComplete: true,
+      completionQuality: 'complete',
+    }),
     finishRun: (...args) => finished.push(args),
     recordError: () => {},
   };
@@ -50,22 +55,50 @@ test('seal steps emit sealed / error events with the run counters', () => {
   let paused = null;
   const error = new QuestionSyncError('需要验证', 'http_403');
   const status = sealFailed(
-    { store: { ...store, finishRun: () => { throw new Error('already sealed'); } }, events, runId: 7, scope: {},
-      selectedCatalogs: [], counters, sourceControl: { markManual: (reason) => { paused = reason; } } },
+    {
+      store: {
+        ...store,
+        finishRun: () => {
+          throw new Error('already sealed');
+        },
+      },
+      events,
+      runId: 7,
+      scope: {},
+      selectedCatalogs: [],
+      counters,
+      sourceControl: {
+        markManual: (reason) => {
+          paused = reason;
+        },
+      },
+    },
     error,
   );
   assert.equal(status, 'failed');
   assert.equal(paused, '需要验证', 'source protection records the shared manual pause');
   assert.equal(counters.errors, 1);
   assert.equal(error.eventEmitted, true);
-  assert.deepEqual(emitted.slice(-2).map((event) => event.type), ['error', 'sealed']);
+  assert.deepEqual(
+    emitted.slice(-2).map((event) => event.type),
+    ['error', 'sealed'],
+  );
   assert.equal(emitted.at(-1).snapshotComplete, false);
 });
 
 test('an injected context is never closed and never recycled without reopenBrowser', async () => {
   let closed = 0;
-  const context = { close: async () => { closed += 1; }, pages: () => [] };
-  const page = { close: async () => { closed += 1; } };
+  const context = {
+    close: async () => {
+      closed += 1;
+    },
+    pages: () => [],
+  };
+  const page = {
+    close: async () => {
+      closed += 1;
+    },
+  };
   const browser = session({}, { context, page });
   assert.equal(browser.canRecycle(), false);
   await browser.dispose();
@@ -75,11 +108,17 @@ test('an injected context is never closed and never recycled without reopenBrows
 
 test('page trigger counts fetched pages and resets on recycle', async () => {
   const reopened = [];
-  const browser = session({ browserRecyclePages: 10 }, {
-    context: {},
-    page: { goto: async () => {}, url: () => 'https://zujuan.xkw.com/' },
-    reopenBrowser: async ({ reason }) => { reopened.push(reason); return {}; },
-  });
+  const browser = session(
+    { browserRecyclePages: 10 },
+    {
+      context: {},
+      page: { goto: async () => {}, url: () => 'https://zujuan.xkw.com/' },
+      reopenBrowser: async ({ reason }) => {
+        reopened.push(reason);
+        return {};
+      },
+    },
+  );
   browser.notePagesFetched(8);
   assert.equal(browser.recycleReason(), null);
   browser.notePagesFetched(2);
@@ -89,6 +128,12 @@ test('page trigger counts fetched pages and resets on recycle', async () => {
 });
 
 test('invalid recycle settings are rejected as invalid_option', () => {
-  assert.throws(() => session({ browserRecyclePages: '-5' }), (error) => error.code === 'invalid_option');
-  assert.throws(() => session({ browserRecycleMb: 'lots' }), (error) => error.code === 'invalid_option');
+  assert.throws(
+    () => session({ browserRecyclePages: '-5' }),
+    (error) => error.code === 'invalid_option',
+  );
+  assert.throws(
+    () => session({ browserRecycleMb: 'lots' }),
+    (error) => error.code === 'invalid_option',
+  );
 });

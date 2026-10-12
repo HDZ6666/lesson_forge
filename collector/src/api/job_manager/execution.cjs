@@ -63,21 +63,25 @@ class ExecutionMethods {
       if (summaryStatus === 'running') {
         const orphanStatus = result.cancelled
           ? 'cancelled'
-          : (job.abortCode === 'collector_shutdown'
-            ? (orphanRunIsResumable(this.dbPath, summary.id) ? 'interrupted' : 'failed')
-            : looksBlocked(job.lines)
-            ? 'blocked'
-            : (orphanHasResumablePartial(this.dbPath, summary.id, job.lines)
+          : job.abortCode === 'collector_shutdown'
+            ? orphanRunIsResumable(this.dbPath, summary.id)
               ? 'interrupted'
-              : 'failed'));
-        sealOrphanContentRun(this.dbPath, summary.id, orphanStatus, result.cancelled ? '同步已停止' : lastError(job.lines, '子进程异常退出'));
+              : 'failed'
+            : looksBlocked(job.lines)
+              ? 'blocked'
+              : orphanHasResumablePartial(this.dbPath, summary.id, job.lines)
+                ? 'interrupted'
+                : 'failed';
+        sealOrphanContentRun(
+          this.dbPath,
+          summary.id,
+          orphanStatus,
+          result.cancelled ? '同步已停止' : lastError(job.lines, '子进程异常退出'),
+        );
         try {
-          summary = readRunSnapshotSummary(
-            this.dbPath,
-            summary.id,
-            scope.externalTextbookId,
-            { allowIncomplete: true },
-          ) || summary;
+          summary =
+            readRunSnapshotSummary(this.dbPath, summary.id, scope.externalTextbookId, { allowIncomplete: true }) ||
+            summary;
         } catch {}
       }
       scope.collectorRunId = Number(summary.id);
@@ -87,12 +91,9 @@ class ExecutionMethods {
       scope.questionTagCount = Number(summary.questionTagCount || 0);
       scope.questionAssetCount = Number(summary.questionAssetCount || 0);
       scope.snapshotLockedAt = summary.snapshotLockedAt || summary.snapshot_locked_at || null;
-      scope.snapshotComplete = summary.snapshotComplete === true
-        || Number(summary.snapshot_complete || 0) === 1;
-      scope.scanComplete = summary.scanComplete === true
-        || Number(summary.scan_complete || 0) === 1;
-      scope.dataComplete = summary.dataComplete === true
-        || Number(summary.data_complete || 0) === 1;
+      scope.snapshotComplete = summary.snapshotComplete === true || Number(summary.snapshot_complete || 0) === 1;
+      scope.scanComplete = summary.scanComplete === true || Number(summary.scan_complete || 0) === 1;
+      scope.dataComplete = summary.dataComplete === true || Number(summary.data_complete || 0) === 1;
       scope.completionQuality = summary.completionQuality || summary.completion_quality || null;
       if (job.scopeItems.length === 1) {
         job.snapshotLockedAt = scope.snapshotLockedAt;
@@ -111,16 +112,16 @@ class ExecutionMethods {
       const resumablePartial = isResumablePartialRun(summary);
       scope.resumable = resumablePartial;
       const scanComplete = scope.scanComplete === true || scope.snapshotComplete === true;
-      scope.status = ['success', 'completed'].includes(String(summary.status || ''))
-        && scanComplete && !result.cancelled
-        ? 'completed'
-        : (result.cancelled
-          ? 'cancelled'
-          : (resumablePartial
-            ? 'interrupted'
-            : (['blocked', 'failed'].includes(String(summary.status || ''))
-            ? String(summary.status)
-            : 'failed')));
+      scope.status =
+        ['success', 'completed'].includes(String(summary.status || '')) && scanComplete && !result.cancelled
+          ? 'completed'
+          : result.cancelled
+            ? 'cancelled'
+            : resumablePartial
+              ? 'interrupted'
+              : ['blocked', 'failed'].includes(String(summary.status || ''))
+                ? String(summary.status)
+                : 'failed';
       job.collectorRunId = job.scopeItems.length === 1 ? scope.collectorRunId : null;
       return summary;
     }
@@ -153,7 +154,9 @@ class ExecutionMethods {
       if (process.platform === 'win32') child.kill('SIGTERM');
       else process.kill(-child.pid, 'SIGTERM');
     } catch {
-      try { child.kill?.('SIGTERM'); } catch {}
+      try {
+        child.kill?.('SIGTERM');
+      } catch {}
     }
     child._terminationTimer = setTimeout(() => {
       if (job.child !== child) return;
@@ -165,18 +168,19 @@ class ExecutionMethods {
         if (process.platform === 'win32') child.kill('SIGKILL');
         else process.kill(-child.pid, 'SIGKILL');
       } catch {
-        try { child.kill?.('SIGKILL'); } catch {}
+        try {
+          child.kill?.('SIGKILL');
+        } catch {}
       }
     }, this.killGraceMs || KILL_GRACE_MS);
   }
 
   startWatchdog(job) {
     this.stopWatchdog(job);
-    const interval = Math.max(20, Math.min(
-      WATCHDOG_MAX_TICK_MS,
-      Math.floor(this.stallTimeoutMs / 4),
-      Math.floor(this.jobTimeoutMs / 4),
-    ));
+    const interval = Math.max(
+      20,
+      Math.min(WATCHDOG_MAX_TICK_MS, Math.floor(this.stallTimeoutMs / 4), Math.floor(this.jobTimeoutMs / 4)),
+    );
     let lastHeartbeatWrite = 0;
     job._watchdog = setInterval(() => {
       if (!job.child || TERMINAL_STATUSES.has(String(job.status))) return;
@@ -192,16 +196,26 @@ class ExecutionMethods {
         return;
       }
       if (job._startedAtMs && now - job._startedAtMs > this.jobTimeoutMs) {
-        this.abortJob(job, 'job_timeout', `采集任务超过总时限 ${Math.round(this.jobTimeoutMs / 1000)} 秒，已终止子进程`);
+        this.abortJob(
+          job,
+          'job_timeout',
+          `采集任务超过总时限 ${Math.round(this.jobTimeoutMs / 1000)} 秒，已终止子进程`,
+        );
         return;
       }
       if (job.lastActivityAt && now - job.lastActivityAt > this.stallTimeoutMs) {
-        this.abortJob(job, 'stalled', `采集子进程 ${Math.round(this.stallTimeoutMs / 1000)} 秒内没有任何进度或心跳，已终止`);
+        this.abortJob(
+          job,
+          'stalled',
+          `采集子进程 ${Math.round(this.stallTimeoutMs / 1000)} 秒内没有任何进度或心跳，已终止`,
+        );
         return;
       }
       if (now - lastHeartbeatWrite >= HEARTBEAT_WRITE_MS) {
         lastHeartbeatWrite = now;
-        try { this.store?.heartbeat(job.id); } catch {}
+        try {
+          this.store?.heartbeat(job.id);
+        } catch {}
         if (job._persistDirty) this.persist(job, { force: true });
       }
     }, interval);
@@ -289,9 +303,12 @@ class ExecutionMethods {
   baseArgs() {
     const args = [
       '--acknowledge-source-policy',
-      '--db', this.dbPath,
-      '--data-dir', this.dataDir,
-      '--profile-dir', this.profileDir,
+      '--db',
+      this.dbPath,
+      '--data-dir',
+      this.dataDir,
+      '--profile-dir',
+      this.profileDir,
     ];
     args.push(this.headful ? '--headful' : '--headless');
     return args;
@@ -344,7 +361,9 @@ class ExecutionMethods {
       // run created after this job's watermark before falling back to the
       // request's (usually null) metadataRunId.
       let run = null;
-      try { run = metadataRunAfter(this.dbPath, watermark); } catch {}
+      try {
+        run = metadataRunAfter(this.dbPath, watermark);
+      } catch {}
       sealOrphanMetadataRun(
         this.dbPath,
         run?.status === 'running' ? run.id : job.metadataRunId,
@@ -355,7 +374,9 @@ class ExecutionMethods {
     }
     if (result.returnCode !== 0) {
       let run = null;
-      try { run = metadataRunAfter(this.dbPath, watermark); } catch {}
+      try {
+        run = metadataRunAfter(this.dbPath, watermark);
+      } catch {}
       const blocked = this.jobLooksBlocked(job);
       const message = this.jobErrorMessage(job, '版本和教材同步脚本执行失败');
       sealOrphanMetadataRun(
@@ -372,7 +393,12 @@ class ExecutionMethods {
     const run = metadataRunAfter(this.dbPath, watermark);
     if (!run || Number(run.id) <= watermark || String(run.status || '') !== 'success') {
       if (run && String(run.status || '') === 'running') {
-        sealOrphanMetadataRun(this.dbPath, run.id, this.jobLooksBlocked(job) ? 'blocked' : 'failed', '无法确认本次元数据运行已完成');
+        sealOrphanMetadataRun(
+          this.dbPath,
+          run.id,
+          this.jobLooksBlocked(job) ? 'blocked' : 'failed',
+          '无法确认本次元数据运行已完成',
+        );
       }
       const error = new Error('无法确认本次元数据运行 ID');
       error.code = this.jobErrorCode(job, 'metadata_run_unconfirmed');
@@ -412,15 +438,22 @@ class ExecutionMethods {
       this.persist(job, { force: true });
       const childArgs = [
         ...this.baseArgs(),
-        '--textbook-id', textbook.externalTextbookId,
-        '--chapter-id', textbook.bootstrapChapterExternalId || textbook.externalTextbookId,
+        '--textbook-id',
+        textbook.externalTextbookId,
+        '--chapter-id',
+        textbook.bootstrapChapterExternalId || textbook.externalTextbookId,
       ];
       // Keep the collector strategy owned by this manager.  The API's page
       // cap is an existing bounded contract; only a resume source changes the
       // checkpoint switch passed to the child.
       if (job.maxPages < SITE_PAGE_LIMIT) childArgs.push('--max-pages', String(job.maxPages));
       if (job.limitTo1000Pages === true) childArgs.push('--limit-to-1000-pages');
-      childArgs.push(...crawlTuningArgs({ ...this.crawlTuning, listConcurrency: job.listConcurrency ?? this.crawlTuning.listConcurrency }));
+      childArgs.push(
+        ...crawlTuningArgs({
+          ...this.crawlTuning,
+          listConcurrency: job.listConcurrency ?? this.crawlTuning.listConcurrency,
+        }),
+      );
       if (scope?.resumeFromCollectorRunId != null) {
         childArgs.push('--resume-run-id', String(scope.resumeFromCollectorRunId));
       } else {
@@ -456,29 +489,29 @@ class ExecutionMethods {
         return 'aborted';
       }
       const snapshotStatus = String(result.snapshot?.status || '').trim();
-      const snapshotComplete = result.snapshot?.snapshotComplete === true
-        || Number(result.snapshot?.snapshot_complete || 0) === 1;
-      const scanComplete = result.snapshot?.scanComplete === true
-        || Number(result.snapshot?.scan_complete || 0) === 1
-        || snapshotComplete;
+      const snapshotComplete =
+        result.snapshot?.snapshotComplete === true || Number(result.snapshot?.snapshot_complete || 0) === 1;
+      const scanComplete =
+        result.snapshot?.scanComplete === true || Number(result.snapshot?.scan_complete || 0) === 1 || snapshotComplete;
       const resumablePartial = isResumablePartialRun(result.snapshot);
       if (resumablePartial) {
         if (scope) {
           scope.status = 'interrupted';
           scope.resumable = true;
-          scope.error = scope.error || scopeErrorText(
-            result.snapshot,
-            this.jobErrorMessage(job, `教材 ${textbook.textbookName} 采集暂时中断，可使用 collectorRunId 续采`),
-          );
+          scope.error =
+            scope.error ||
+            scopeErrorText(
+              result.snapshot,
+              this.jobErrorMessage(job, `教材 ${textbook.textbookName} 采集暂时中断，可使用 collectorRunId 续采`),
+            );
           scope.errorCode = scope.errorCode || this.jobErrorCode(job, 'interrupted');
         }
         job.partialInterrupted = true;
         job.partialMessage = scope?.error || `教材 ${textbook.textbookName} 采集暂时中断`;
         return 'interrupted';
       }
-      const snapshotFailed = !result.snapshot
-        || !['success', 'completed'].includes(snapshotStatus)
-        || (!snapshotComplete && !scanComplete);
+      const snapshotFailed =
+        !result.snapshot || !['success', 'completed'].includes(snapshotStatus) || (!snapshotComplete && !scanComplete);
       if (result.returnCode !== 0 || snapshotFailed) {
         const blocked = snapshotStatus === 'blocked' || this.jobLooksBlocked(job);
         const fallback = `教材 ${textbook.textbookName} 同步失败或快照不完整`;
@@ -503,7 +536,10 @@ class ExecutionMethods {
         scope.errorCode = null;
       }
       job.completedTextbooks += 1;
-      job.progressPercent = Math.min(99, Math.round((5 + (job.completedTextbooks / job.totalTextbooks) * 94) * 10) / 10);
+      job.progressPercent = Math.min(
+        99,
+        Math.round((5 + (job.completedTextbooks / job.totalTextbooks) * 94) * 10) / 10,
+      );
       this.persist(job, { force: true });
     }
   }

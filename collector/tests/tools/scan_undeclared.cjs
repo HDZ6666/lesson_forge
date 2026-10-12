@@ -36,17 +36,92 @@ if (!acorn) {
 }
 
 const GLOBALS = new Set([
-  'require', 'module', 'exports', '__dirname', '__filename', 'process', 'console', 'Buffer',
-  'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'setImmediate', 'clearImmediate',
-  'queueMicrotask', 'structuredClone', 'fetch', 'URL', 'URLSearchParams', 'TextEncoder', 'TextDecoder',
-  'AbortController', 'AbortSignal', 'Promise', 'Array', 'Object', 'String', 'Number', 'Boolean', 'Symbol',
-  'Map', 'Set', 'WeakMap', 'WeakSet', 'Date', 'Math', 'JSON', 'RegExp', 'Error', 'TypeError', 'RangeError',
-  'SyntaxError', 'ReferenceError', 'EvalError', 'URIError', 'AggregateError', 'BigInt', 'Reflect', 'Proxy',
-  'Intl', 'Infinity', 'NaN', 'undefined', 'globalThis', 'isNaN', 'isFinite', 'parseInt', 'parseFloat',
-  'encodeURIComponent', 'decodeURIComponent', 'encodeURI', 'decodeURI', 'escape', 'unescape',
-  'Uint8Array', 'Int8Array', 'Uint16Array', 'Int16Array', 'Uint32Array', 'Int32Array', 'Float32Array',
-  'Float64Array', 'ArrayBuffer', 'SharedArrayBuffer', 'DataView', 'Atomics', 'WebAssembly', 'performance',
-  'arguments', 'eval', 'Function', 'document', 'window', 'location', 'navigator', 'crypto',
+  'require',
+  'module',
+  'exports',
+  '__dirname',
+  '__filename',
+  'process',
+  'console',
+  'Buffer',
+  'setTimeout',
+  'clearTimeout',
+  'setInterval',
+  'clearInterval',
+  'setImmediate',
+  'clearImmediate',
+  'queueMicrotask',
+  'structuredClone',
+  'fetch',
+  'URL',
+  'URLSearchParams',
+  'TextEncoder',
+  'TextDecoder',
+  'AbortController',
+  'AbortSignal',
+  'Promise',
+  'Array',
+  'Object',
+  'String',
+  'Number',
+  'Boolean',
+  'Symbol',
+  'Map',
+  'Set',
+  'WeakMap',
+  'WeakSet',
+  'Date',
+  'Math',
+  'JSON',
+  'RegExp',
+  'Error',
+  'TypeError',
+  'RangeError',
+  'SyntaxError',
+  'ReferenceError',
+  'EvalError',
+  'URIError',
+  'AggregateError',
+  'BigInt',
+  'Reflect',
+  'Proxy',
+  'Intl',
+  'Infinity',
+  'NaN',
+  'undefined',
+  'globalThis',
+  'isNaN',
+  'isFinite',
+  'parseInt',
+  'parseFloat',
+  'encodeURIComponent',
+  'decodeURIComponent',
+  'encodeURI',
+  'decodeURI',
+  'escape',
+  'unescape',
+  'Uint8Array',
+  'Int8Array',
+  'Uint16Array',
+  'Int16Array',
+  'Uint32Array',
+  'Int32Array',
+  'Float32Array',
+  'Float64Array',
+  'ArrayBuffer',
+  'SharedArrayBuffer',
+  'DataView',
+  'Atomics',
+  'WebAssembly',
+  'performance',
+  'arguments',
+  'eval',
+  'Function',
+  'document',
+  'window',
+  'location',
+  'navigator',
+  'crypto',
 ]);
 
 function collectFiles(args) {
@@ -73,20 +148,35 @@ function collectFiles(args) {
 function declaredNames(pattern, into) {
   if (!pattern) return;
   switch (pattern.type) {
-    case 'Identifier': into.add(pattern.name); break;
-    case 'ObjectPattern':
-      for (const prop of pattern.properties) declaredNames(prop.type === 'RestElement' ? prop.argument : prop.value, into);
+    case 'Identifier':
+      into.add(pattern.name);
       break;
-    case 'ArrayPattern': for (const element of pattern.elements) declaredNames(element, into); break;
-    case 'RestElement': declaredNames(pattern.argument, into); break;
-    case 'AssignmentPattern': declaredNames(pattern.left, into); break;
-    default: break;
+    case 'ObjectPattern':
+      for (const prop of pattern.properties)
+        declaredNames(prop.type === 'RestElement' ? prop.argument : prop.value, into);
+      break;
+    case 'ArrayPattern':
+      for (const element of pattern.elements) declaredNames(element, into);
+      break;
+    case 'RestElement':
+      declaredNames(pattern.argument, into);
+      break;
+    case 'AssignmentPattern':
+      declaredNames(pattern.left, into);
+      break;
+    default:
+      break;
   }
 }
 
 function scan(file) {
   const source = fs.readFileSync(file, 'utf8').replace(/^#!.*\n/, '');
-  const ast = acorn.parse(source, { ecmaVersion: 'latest', sourceType: 'script', allowHashBang: true, locations: true });
+  const ast = acorn.parse(source, {
+    ecmaVersion: 'latest',
+    sourceType: 'script',
+    allowHashBang: true,
+    locations: true,
+  });
   const problems = [];
   const scopes = [new Set()];
   const declare = (name) => scopes[scopes.length - 1].add(name);
@@ -96,7 +186,8 @@ function scan(file) {
     for (const node of body || []) {
       if (node.type === 'FunctionDeclaration' && node.id) declare(node.id.name);
       if (node.type === 'ClassDeclaration' && node.id) declare(node.id.name);
-      if (node.type === 'VariableDeclaration') for (const decl of node.declarations) declaredNames(decl.id, scopes[scopes.length - 1]);
+      if (node.type === 'VariableDeclaration')
+        for (const decl of node.declarations) declaredNames(decl.id, scopes[scopes.length - 1]);
     }
   }
 
@@ -176,7 +267,9 @@ function scan(file) {
         return;
       case 'Identifier':
         if (!has(node.name)) {
-          problems.push(`${path.relative(ROOT, file)}:${node.loc.start.line}:${node.loc.start.column + 1} 未声明标识符 ${node.name}`);
+          problems.push(
+            `${path.relative(ROOT, file)}:${node.loc.start.line}:${node.loc.start.column + 1} 未声明标识符 ${node.name}`,
+          );
         }
         return;
       case 'MemberExpression':
@@ -185,7 +278,10 @@ function scan(file) {
         return;
       case 'Property':
         if (node.computed) visit(node.key, node);
-        if (node.shorthand && node.value.type === 'Identifier') { visit(node.value, node); return; }
+        if (node.shorthand && node.value.type === 'Identifier') {
+          visit(node.value, node);
+          return;
+        }
         visit(node.value, node);
         return;
       case 'MethodDefinition':
@@ -218,8 +314,11 @@ function scan(file) {
 
   function visitDefaults(pattern) {
     if (!pattern) return;
-    if (pattern.type === 'AssignmentPattern') { visit(pattern.right, pattern); visitDefaults(pattern.left); }
-    else if (pattern.type === 'ObjectPattern') for (const prop of pattern.properties) visitDefaults(prop.type === 'RestElement' ? prop.argument : prop.value);
+    if (pattern.type === 'AssignmentPattern') {
+      visit(pattern.right, pattern);
+      visitDefaults(pattern.left);
+    } else if (pattern.type === 'ObjectPattern')
+      for (const prop of pattern.properties) visitDefaults(prop.type === 'RestElement' ? prop.argument : prop.value);
     else if (pattern.type === 'ArrayPattern') for (const element of pattern.elements) visitDefaults(element);
   }
 
@@ -239,5 +338,7 @@ for (const file of files) {
     console.log(`${path.relative(ROOT, file)}: 解析失败 ${error.message}`);
   }
 }
-console.log(total ? `发现 ${total} 处问题（扫描 ${files.length} 个文件）` : `扫描 ${files.length} 个文件，无未声明标识符`);
+console.log(
+  total ? `发现 ${total} 处问题（扫描 ${files.length} 个文件）` : `扫描 ${files.length} 个文件，无未声明标识符`,
+);
 process.exit(total ? 1 : 0);

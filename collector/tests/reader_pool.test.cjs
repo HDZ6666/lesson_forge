@@ -44,7 +44,9 @@ test('a slow reader does not block the main event loop', async () => {
     histogram.enable();
     const slow = pool.call('readCandidates', 600);
     let ticks = 0;
-    const ticker = setInterval(() => { ticks += 1; }, 20);
+    const ticker = setInterval(() => {
+      ticks += 1;
+    }, 20);
     const result = await slow;
     clearInterval(ticker);
     histogram.disable();

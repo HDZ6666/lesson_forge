@@ -15,12 +15,7 @@ const {
   TERMINAL_STATUSES,
 } = require('./job_manager/constants.cjs');
 const { deploymentBoolean, intInRange } = require('./request_validation.cjs');
-const {
-  lastError,
-  looksBlocked,
-  sealOrphanContentRun,
-  sealOrphanMetadataRun,
-} = require('./orphan_runs.cjs');
+const { lastError, looksBlocked, sealOrphanContentRun, sealOrphanMetadataRun } = require('./orphan_runs.cjs');
 
 module.exports = {
   ACTIVE_STATUSES,

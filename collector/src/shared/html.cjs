@@ -9,41 +9,52 @@ const { normalizeWhitespace } = require('./utils.cjs');
  */
 
 const VOID_TAGS = new Set([
-  'area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input',
-  'link', 'meta', 'param', 'source', 'track', 'wbr',
+  'area',
+  'base',
+  'br',
+  'col',
+  'embed',
+  'hr',
+  'img',
+  'input',
+  'link',
+  'meta',
+  'param',
+  'source',
+  'track',
+  'wbr',
 ]);
 
 function decodeHtmlEntities(value) {
-  return String(value ?? '').replace(
-    /&(#(?:x[0-9a-f]+|[0-9]+)|amp|lt|gt|quot|apos|nbsp|#x27);/gi,
-    (full, token) => {
-      const lower = String(token).toLowerCase();
-      if (lower === 'amp') return '&';
-      if (lower === 'lt') return '<';
-      if (lower === 'gt') return '>';
-      if (lower === 'quot') return '"';
-      if (lower === 'apos' || lower === '#x27') return "'";
-      if (lower === 'nbsp') return '\u00a0';
-      if (lower.startsWith('#x')) {
-        const number = Number.parseInt(lower.slice(2), 16);
-        return Number.isFinite(number) ? String.fromCodePoint(number) : full;
-      }
-      if (lower.startsWith('#')) {
-        const number = Number.parseInt(lower.slice(1), 10);
-        return Number.isFinite(number) ? String.fromCodePoint(number) : full;
-      }
-      return full;
-    },
-  );
+  return String(value ?? '').replace(/&(#(?:x[0-9a-f]+|[0-9]+)|amp|lt|gt|quot|apos|nbsp|#x27);/gi, (full, token) => {
+    const lower = String(token).toLowerCase();
+    if (lower === 'amp') return '&';
+    if (lower === 'lt') return '<';
+    if (lower === 'gt') return '>';
+    if (lower === 'quot') return '"';
+    if (lower === 'apos' || lower === '#x27') return "'";
+    if (lower === 'nbsp') return '\u00a0';
+    if (lower.startsWith('#x')) {
+      const number = Number.parseInt(lower.slice(2), 16);
+      return Number.isFinite(number) ? String.fromCodePoint(number) : full;
+    }
+    if (lower.startsWith('#')) {
+      const number = Number.parseInt(lower.slice(1), 10);
+      return Number.isFinite(number) ? String.fromCodePoint(number) : full;
+    }
+    return full;
+  });
 }
 
 function stripHtml(value) {
-  return decodeHtmlEntities(String(value ?? '')
-    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '')
-    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, '')
-    .replace(/<br\s*\/?>/gi, '\n')
-    .replace(/<\/(?:p|div|li|tr|td|th|h[1-6])\s*>/gi, '\n')
-    .replace(/<[^>]*>/g, ''))
+  return decodeHtmlEntities(
+    String(value ?? '')
+      .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '')
+      .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, '')
+      .replace(/<br\s*\/?>/gi, '\n')
+      .replace(/<\/(?:p|div|li|tr|td|th|h[1-6])\s*>/gi, '\n')
+      .replace(/<[^>]*>/g, ''),
+  )
     .replace(/\r/g, '')
     .replace(/[ \t]+/g, ' ')
     .replace(/\n[ \t]+/g, '\n')
@@ -52,7 +63,9 @@ function stripHtml(value) {
 }
 
 function classListFromAttrs(attrs) {
-  return String(attrs?.class || '').split(/\s+/).filter(Boolean);
+  return String(attrs?.class || '')
+    .split(/\s+/)
+    .filter(Boolean);
 }
 
 function hasClass(attrs, wanted) {
@@ -217,10 +230,14 @@ function firstByClass(html, className, tag = null) {
 
 function findByAttribute(html, attribute, expected = null, tag = null) {
   const wanted = String(attribute).toLowerCase();
-  return findElements(html, (attrs) => {
-    const value = attrs[wanted] ?? attrs[attribute];
-    return value !== undefined && (expected == null || String(value) === String(expected));
-  }, tag);
+  return findElements(
+    html,
+    (attrs) => {
+      const value = attrs[wanted] ?? attrs[attribute];
+      return value !== undefined && (expected == null || String(value) === String(expected));
+    },
+    tag,
+  );
 }
 
 function firstByAttribute(html, attribute, expected = null, tag = null) {
@@ -239,7 +256,11 @@ function attr(attrs, name, fallback = null) {
 
 function absoluteUrl(value, baseUrl) {
   if (!value) return null;
-  try { return new URL(value, baseUrl).href; } catch { return null; }
+  try {
+    return new URL(value, baseUrl).href;
+  } catch {
+    return null;
+  }
 }
 
 module.exports = {

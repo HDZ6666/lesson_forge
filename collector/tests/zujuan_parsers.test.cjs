@@ -87,8 +87,9 @@ test('COL-003 真实题卡：题干含“安全威胁”的合法题目正常解
 });
 
 test('COL-003 新入口：合法 JSON 题干包含验证码/captcha/forbidden 等防护词仍判为正常响应', () => {
-  const stem = '小明在网站登录时需要输入四位数字<b>验证码</b>（captcha），若忘记密码会提示 forbidden，'
-    + '求验证码首位为奇数的概率。';
+  const stem =
+    '小明在网站登录时需要输入四位数字<b>验证码</b>（captcha），若忘记密码会提示 forbidden，' +
+    '求验证码首位为奇数的概率。';
   const text = envelope(syntheticCard('90000001', stem));
   assert.equal(isProtectionText(text), true, '样本必须真的包含防护词，否则测试无意义');
   const classification = classifyQuestionResponse({ status: 200, text });
@@ -151,15 +152,18 @@ test('COL-010 合成题卡：失效公式 PNG 与主示意图分别识别，跳�
   const stem = `如图，在平面直角<img src="${formulaUrl}">坐标系中<img src="${figureUrl}">求点 P 的坐标。`;
   const question = parseQuestionBlock(syntheticCard('19109827', stem));
   assert.equal(question.externalId, '19109827');
-  assert.deepEqual(question.assets.map((asset) => asset.type), ['formula_image', 'question_image']);
+  assert.deepEqual(
+    question.assets.map((asset) => asset.type),
+    ['formula_image', 'question_image'],
+  );
   assert.equal(question.hasFormula, true);
   assert.equal(question.hasImage, true);
 
   const skippedFormula = {
     ...question,
-    assets: question.assets.map((asset) => (asset.type === 'formula_image'
-      ? { ...asset, skipped: true, skipReason: 'http_404' }
-      : asset)),
+    assets: question.assets.map((asset) =>
+      asset.type === 'formula_image' ? { ...asset, skipped: true, skipReason: 'http_404' } : asset,
+    ),
   };
   const finalized = finalizeQuestion(skippedFormula);
   assert.equal(finalized.assets.length, 1);
@@ -205,20 +209,23 @@ test('空页与解析失败分别分类；total 增大只扩展目标页数', ()
 });
 
 test('目录树与列表请求：知识点节点映射 catelogTokpointId，普通目录映射 categoryId', () => {
-  const tree = normalizeCatalogTree({
-    id: '260617',
-    title: '九年级上册',
-    children: [
-      {
-        id: '261285',
-        title: '第六章 概率的进一步认识',
-        href: '/czsx/zj261285/',
-        children: [
-          { id: '223709', title: '用树状图或表格求概率', href: '/czsx/zj261285/ctk223709/', isKnowledge: 1 },
-        ],
-      },
-    ],
-  }, { textbookId: '260617' });
+  const tree = normalizeCatalogTree(
+    {
+      id: '260617',
+      title: '九年级上册',
+      children: [
+        {
+          id: '261285',
+          title: '第六章 概率的进一步认识',
+          href: '/czsx/zj261285/',
+          children: [
+            { id: '223709', title: '用树状图或表格求概率', href: '/czsx/zj261285/ctk223709/', isKnowledge: 1 },
+          ],
+        },
+      ],
+    },
+    { textbookId: '260617' },
+  );
   assert.equal(tree.nodes.length, 2);
   const [chapter, point] = tree.nodes;
   assert.equal(chapter.categoryId, '261285');
@@ -226,7 +233,10 @@ test('目录树与列表请求：知识点节点映射 catelogTokpointId，普�
   assert.equal(point.categoryId, '261285');
   assert.equal(point.catelogTokpointId, '223709');
   assert.equal(point.type, 'point');
-  assert.deepEqual(selectCatalogs(tree, { catalogLevels: [2] }).map((node) => node.externalId), ['223709']);
+  assert.deepEqual(
+    selectCatalogs(tree, { catalogLevels: [2] }).map((node) => node.externalId),
+    ['223709'],
+  );
 
   const request = buildQuestionListRequest({ bankId: 2 }, point, 7);
   assert.equal(request.url, 'https://zujuan.xkw.com/zujuan-api/question/list');
@@ -238,25 +248,39 @@ test('目录树与列表请求：知识点节点映射 catelogTokpointId，普�
 });
 
 test('重复知识点按教材章节保留两处，原始来源 ID 仍用于请求', () => {
-  const raw = {id:'195861',title:'七年级上册',children:['196009','196010'].map(id => ({
-    id,title:`章节 ${id}`,href:`/czsx/zj${id}/`,children:[{
-      id:'4712',title:'根据点在数轴的位置判断式子的正负',isKnowledge:1,
-      href:`/czsx/zj${id}/ctk4712`,
-    }],
-  }))};
-  const tree = normalizeCatalogTree(raw, {textbookId:'195861'});
-  const points = selectCatalogs(tree, {catalogIds:['4712']});
-  assert.deepEqual(points.map(p => p.externalId), ['ctk_196009_4712','ctk_196010_4712']);
+  const raw = {
+    id: '195861',
+    title: '七年级上册',
+    children: ['196009', '196010'].map((id) => ({
+      id,
+      title: `章节 ${id}`,
+      href: `/czsx/zj${id}/`,
+      children: [
+        {
+          id: '4712',
+          title: '根据点在数轴的位置判断式子的正负',
+          isKnowledge: 1,
+          href: `/czsx/zj${id}/ctk4712`,
+        },
+      ],
+    })),
+  };
+  const tree = normalizeCatalogTree(raw, { textbookId: '195861' });
+  const points = selectCatalogs(tree, { catalogIds: ['4712'] });
+  assert.deepEqual(
+    points.map((p) => p.externalId),
+    ['ctk_196009_4712', 'ctk_196010_4712'],
+  );
   for (const point of points) {
     assert.equal(point.parentExternalId, point.categoryId);
     assert.deepEqual(point.ancestorIds, [point.categoryId, point.externalId]);
-    const body = new URLSearchParams(buildQuestionListRequest({bankId:2},point,1).body);
+    const body = new URLSearchParams(buildQuestionListRequest({ bankId: 2 }, point, 1).body);
     assert.equal(body.get('categoryId'), point.categoryId);
     assert.equal(body.get('catelogTokpointId'), '4712');
   }
-  assert.deepEqual(selectCatalogs(tree,{catalogIds:['ctk_196009_4712','4712']}),points);
-  const reversed = normalizeCatalogTree({...raw,children:[...raw.children].reverse()},{textbookId:'195861'});
-  assert.deepEqual(reversed.nodes.map(n=>n.externalId).sort(),tree.nodes.map(n=>n.externalId).sort());
-  raw.children[0].children.push({...raw.children[0].children[0]});
-  assert.throws(()=>normalizeCatalogTree(raw,{textbookId:'195861'}),/目录 ID 重复：4712；位置/);
+  assert.deepEqual(selectCatalogs(tree, { catalogIds: ['ctk_196009_4712', '4712'] }), points);
+  const reversed = normalizeCatalogTree({ ...raw, children: [...raw.children].reverse() }, { textbookId: '195861' });
+  assert.deepEqual(reversed.nodes.map((n) => n.externalId).sort(), tree.nodes.map((n) => n.externalId).sort());
+  raw.children[0].children.push({ ...raw.children[0].children[0] });
+  assert.throws(() => normalizeCatalogTree(raw, { textbookId: '195861' }), /目录 ID 重复：4712；位置/);
 });

@@ -37,11 +37,11 @@ const TERMINAL_RUN_STATUS_SQL = TERMINAL_RUN_STATUSES.map((status) => `'${status
 // databases.  Keep the migration deliberately additive so an operator can
 // point a newer collector at an existing database without losing history.
 const RUN_COLUMN_MIGRATIONS = Object.freeze({
-  provider: 'TEXT NOT NULL DEFAULT \'zujuan\'',
-  started_at: 'TEXT NOT NULL DEFAULT \'\'',
+  provider: "TEXT NOT NULL DEFAULT 'zujuan'",
+  started_at: "TEXT NOT NULL DEFAULT ''",
   finished_at: 'TEXT',
-  status: 'TEXT NOT NULL DEFAULT \'unknown\'',
-  scope_json: 'TEXT NOT NULL DEFAULT \'{}\'',
+  status: "TEXT NOT NULL DEFAULT 'unknown'",
+  scope_json: "TEXT NOT NULL DEFAULT '{}'",
   pages_ok: 'INTEGER NOT NULL DEFAULT 0',
   questions_seen: 'INTEGER NOT NULL DEFAULT 0',
   questions_inserted: 'INTEGER NOT NULL DEFAULT 0',
@@ -141,11 +141,11 @@ const COLUMN_MIGRATIONS = Object.freeze({
     textbook_external_id: 'TEXT',
     question_external_id: 'TEXT',
     dimension: 'TEXT',
-    tag_external_id: 'TEXT NOT NULL DEFAULT \'\'',
+    tag_external_id: "TEXT NOT NULL DEFAULT ''",
     tag_value: 'TEXT',
     relation_type: 'TEXT',
     evidence_type: 'TEXT',
-    query_fingerprint: 'TEXT NOT NULL DEFAULT \'\'',
+    query_fingerprint: "TEXT NOT NULL DEFAULT ''",
     captured_at: 'TEXT',
     // Keep captured_at for compatibility with the intermediate schema; the
     // public contract uses observed_at.
@@ -174,7 +174,10 @@ function quoteIdentifier(value) {
 
 function tableColumns(db, table) {
   return new Set(
-    db.prepare(`PRAGMA table_info(${quoteIdentifier(table)})`).all().map((row) => String(row.name)),
+    db
+      .prepare(`PRAGMA table_info(${quoteIdentifier(table)})`)
+      .all()
+      .map((row) => String(row.name)),
   );
 }
 
@@ -182,16 +185,14 @@ function addMissingColumns(db, table, definitions) {
   const columns = tableColumns(db, table);
   for (const [name, definition] of Object.entries(definitions)) {
     if (columns.has(name)) continue;
-    db.exec(
-      `ALTER TABLE ${quoteIdentifier(table)} ADD COLUMN ${quoteIdentifier(name)} ${definition}`,
-    );
+    db.exec(`ALTER TABLE ${quoteIdentifier(table)} ADD COLUMN ${quoteIdentifier(name)} ${definition}`);
   }
 }
 
 function tableExists(db, table) {
-  return Boolean(db.prepare(
-    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1",
-  ).get(String(table)));
+  return Boolean(
+    db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1").get(String(table)),
+  );
 }
 
 /**
@@ -271,12 +272,23 @@ function dedupeRows(db, table, columns) {
   // Avoid re-scanning every historical row at each API startup. Nullable or
   // partially indexed legacy schemas still take the repair path below.
   const info = db.prepare(`PRAGMA table_info(${quoteIdentifier(table)})`).all();
-  if (columns.every(column => info.some(item => item.name === column && item.notnull))) {
+  if (columns.every((column) => info.some((item) => item.name === column && item.notnull))) {
     const indexes = db.prepare(`PRAGMA index_list(${quoteIdentifier(table)})`).all();
-    if (indexes.some(index => index.unique && !index.partial && (() => {
-      const keys = db.prepare(`PRAGMA index_info(${quoteIdentifier(index.name)})`).all().map(item => item.name);
-      return keys.length === columns.length && columns.every(column => keys.includes(column));
-    })())) return;
+    if (
+      indexes.some(
+        (index) =>
+          index.unique &&
+          !index.partial &&
+          (() => {
+            const keys = db
+              .prepare(`PRAGMA index_info(${quoteIdentifier(index.name)})`)
+              .all()
+              .map((item) => item.name);
+            return keys.length === columns.length && columns.every((column) => keys.includes(column));
+          })(),
+      )
+    )
+      return;
   }
   // Tables created by this collector are rowid tables.  A defensive catch
   // keeps migration usable if an operator imported a WITHOUT ROWID table.
@@ -300,9 +312,7 @@ function ensureSyncRunColumns(db) {
   const columns = tableColumns(db, 'sync_runs');
   for (const [name, definition] of Object.entries(RUN_COLUMN_MIGRATIONS)) {
     if (columns.has(name)) continue;
-    db.exec(
-      `ALTER TABLE ${quoteIdentifier('sync_runs')} ADD COLUMN ${quoteIdentifier(name)} ${definition}`,
-    );
+    db.exec(`ALTER TABLE ${quoteIdentifier('sync_runs')} ADD COLUMN ${quoteIdentifier(name)} ${definition}`);
   }
 }
 
@@ -567,23 +577,32 @@ function migrateRunSnapshotSchema(db) {
   copyLegacyTagColumns(db);
   copyLegacyAssetColumns(db);
   normalizeLegacyAnswerColumns(db);
-  dedupeRows(db, 'sync_run_catalog_items', [
-    'run_id', 'provider', 'textbook_external_id', 'catalog_external_id',
-  ]);
-  dedupeRows(db, 'sync_run_question_items', [
-    'run_id', 'provider', 'textbook_external_id', 'question_external_id',
-  ]);
+  dedupeRows(db, 'sync_run_catalog_items', ['run_id', 'provider', 'textbook_external_id', 'catalog_external_id']);
+  dedupeRows(db, 'sync_run_question_items', ['run_id', 'provider', 'textbook_external_id', 'question_external_id']);
   dedupeRows(db, 'sync_run_question_catalogs', [
-    'run_id', 'provider', 'textbook_external_id', 'question_external_id',
+    'run_id',
+    'provider',
+    'textbook_external_id',
+    'question_external_id',
     'catalog_external_id',
   ]);
   dedupeRows(db, 'sync_run_question_tags', [
-    'run_id', 'provider', 'textbook_external_id', 'question_external_id',
-    'dimension', 'tag_external_id', 'tag_value', 'relation_type',
-    'evidence_type', 'query_fingerprint',
+    'run_id',
+    'provider',
+    'textbook_external_id',
+    'question_external_id',
+    'dimension',
+    'tag_external_id',
+    'tag_value',
+    'relation_type',
+    'evidence_type',
+    'query_fingerprint',
   ]);
   dedupeRows(db, 'sync_run_question_assets', [
-    'run_id', 'provider', 'textbook_external_id', 'question_external_id',
+    'run_id',
+    'provider',
+    'textbook_external_id',
+    'question_external_id',
     'asset_key',
   ]);
 
@@ -920,16 +939,22 @@ function ensureRunSnapshotSchema(dbPath) {
       // time while a failed migration rolls back both data and triggers.
       const version = Number(db.prepare('PRAGMA user_version').get().user_version || 0);
       let nextVersion = version;
-      const ready = (version & 2) !== 0 && Boolean(db.prepare(
-        "SELECT 1 FROM sqlite_master WHERE type='trigger' AND name='trg_sync_runs_no_reopen'",
-      ).get());
+      const ready =
+        (version & 2) !== 0 &&
+        Boolean(
+          db.prepare("SELECT 1 FROM sqlite_master WHERE type='trigger' AND name='trg_sync_runs_no_reopen'").get(),
+        );
       if (!ready) {
         migrateRunSnapshotSchema(db);
         nextVersion |= 2;
       }
-      const previewIndex = Boolean(db.prepare(
-        "SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_sync_run_question_items_preview_types'",
-      ).get());
+      const previewIndex = Boolean(
+        db
+          .prepare(
+            "SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_sync_run_question_items_preview_types'",
+          )
+          .get(),
+      );
       if ((version & 4) === 0 || !previewIndex) {
         // The older scope index omits provider, so DISTINCT question_type
         // must visit each large question row. This covering index keeps the
@@ -941,7 +966,9 @@ function ensureRunSnapshotSchema(dbPath) {
       if (nextVersion !== version) db.exec(`PRAGMA user_version = ${nextVersion};`);
       db.exec('COMMIT;');
     } catch (error) {
-      try { db.exec('ROLLBACK;'); } catch {}
+      try {
+        db.exec('ROLLBACK;');
+      } catch {}
       throw error;
     }
   } finally {

@@ -64,9 +64,8 @@ function positiveDuration(value, fallback, name) {
  * CLI flag; `null` means "leave the CLI default".
  */
 function resolveCrawlTuning(raw = {}) {
-  const optional = (value, name, min, max) => (
-    value == null || value === '' ? null : intInRange(value, name, min, max)
-  );
+  const optional = (value, name, min, max) =>
+    value == null || value === '' ? null : intInRange(value, name, min, max);
   const tuning = {
     listConcurrency: optional(raw.listConcurrency, 'COLLECTOR_LIST_CONCURRENCY', 1, MAX_LIST_CONCURRENCY),
     assetConcurrency: optional(raw.assetConcurrency, 'COLLECTOR_ASSET_CONCURRENCY', 1, MAX_ASSET_CONCURRENCY),
@@ -97,10 +96,7 @@ class CollectorJobManager {
     this.metrics = { startedAt: Date.now(), browserRecycles: 0, jobsFinished: {}, jobErrors: {} };
     // Headful is an operator/deployment setting only.  It is intentionally
     // read once here and never taken from a request payload.
-    this.headful = deploymentBoolean(
-      options.headful == null ? process.env.COLLECTOR_HEADFUL : options.headful,
-      true,
-    );
+    this.headful = deploymentBoolean(options.headful == null ? process.env.COLLECTOR_HEADFUL : options.headful, true);
     // The API is often started independently of a crawl process.  Upgrade an
     // existing collector DB here so `/v1/runs/*` works immediately after a
     // deployment upgrade, including databases created by older collectors.
@@ -109,9 +105,14 @@ class CollectorJobManager {
     ensureRunSnapshotSchema(this.dbPath);
     this.sourceControl = new SourceControl(this.dbPath);
     this.sourceBudget = new SourceBudget(this.dbPath, options.sourceBudgetOptions);
-    this.resourceGuard = new ResourceGuard({ ...options.resourceGuardOptions, paths: {
-      database: path.dirname(this.dbPath), data: this.dataDir, profile: this.profileDir,
-    } });
+    this.resourceGuard = new ResourceGuard({
+      ...options.resourceGuardOptions,
+      paths: {
+        database: path.dirname(this.dbPath),
+        data: this.dataDir,
+        profile: this.profileDir,
+      },
+    });
     this.jobTimeoutMs = positiveDuration(
       options.jobTimeoutMs ?? process.env.COLLECTOR_JOB_TIMEOUT_MS,
       DEFAULT_JOB_TIMEOUT_MS,
@@ -135,11 +136,12 @@ class CollectorJobManager {
     // 0 disables it.  A leak that reaches this limit stops the crawl as a
     // resumable interrupt instead of swapping the whole host.
     const maxRss = options.childMaxRssMb ?? process.env.COLLECTOR_CHILD_MAX_RSS_MB;
-    this.childMaxRssMb = maxRss == null || maxRss === '' ? 0 : intInRange(maxRss, 'COLLECTOR_CHILD_MAX_RSS_MB', 0, 65536);
+    this.childMaxRssMb =
+      maxRss == null || maxRss === '' ? 0 : intInRange(maxRss, 'COLLECTOR_CHILD_MAX_RSS_MB', 0, 65536);
     this.ownerToken = randomUUID();
     this.owner = { pid: process.pid, token: this.ownerToken };
     registerOwner(this.ownerToken);
-    this.store = options.store === null ? null : (options.store || new JobStore(this.dbPath));
+    this.store = options.store === null ? null : options.store || new JobStore(this.dbPath);
     this.jobs = new Map();
     this.activeJobId = null;
     this.disposed = false;
@@ -179,10 +181,13 @@ class CollectorJobManager {
       // reaches SQLite within one interval instead of waiting for the next
       // event or the watchdog heartbeat.
       if (!job._persistTimer) {
-        job._persistTimer = setTimeout(() => {
-          job._persistTimer = null;
-          if (job._persistDirty) this.persist(job, { force: true });
-        }, interval - (now - job._persistedAt));
+        job._persistTimer = setTimeout(
+          () => {
+            job._persistTimer = null;
+            if (job._persistDirty) this.persist(job, { force: true });
+          },
+          interval - (now - job._persistedAt),
+        );
         job._persistTimer.unref?.();
       }
       return;
@@ -223,7 +228,11 @@ class CollectorJobManager {
   recoverOrphanJobs() {
     if (!this.store) return [];
     let rows = [];
-    try { rows = this.store.findActive(); } catch { return []; }
+    try {
+      rows = this.store.findActive();
+    } catch {
+      return [];
+    }
     const recovered = [];
     for (const job of rows) {
       if (job.ownerToken && ownerIsLive(job.ownerToken)) continue;
@@ -244,7 +253,9 @@ class CollectorJobManager {
           job.lines = job.lines || [];
           job.lines.push(`[stderr] [恢复] 已向遗留采集子进程组 ${job.childPid} 发送 SIGTERM`);
         } catch {
-          try { process.kill(job.childPid, 'SIGTERM'); } catch {}
+          try {
+            process.kill(job.childPid, 'SIGTERM');
+          } catch {}
         }
       }
       for (const scope of job.scopeItems || []) {
@@ -276,7 +287,11 @@ class CollectorJobManager {
   }
 
   start(payload = {}) {
-    if(this.manualRecovery?.active) {const error=new Error('管理员正在处理来源验证，等待浏览器交回');error.statusCode=409;throw error;}
+    if (this.manualRecovery?.active) {
+      const error = new Error('管理员正在处理来源验证，等待浏览器交回');
+      error.statusCode = 409;
+      throw error;
+    }
     if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
       throw new Error('请求体必须是 JSON 对象');
     }
@@ -300,14 +315,19 @@ class CollectorJobManager {
       throw new Error('该来源学段学科的采集适配尚未验证');
     }
     const listConcurrency = payload.listConcurrency == null ? null : payload.listConcurrency;
-    if (listConcurrency !== null && (runType !== 'content' || !Number.isInteger(listConcurrency) || listConcurrency < 1 || listConcurrency > MAX_LIST_CONCURRENCY)) {
+    if (
+      listConcurrency !== null &&
+      (runType !== 'content' ||
+        !Number.isInteger(listConcurrency) ||
+        listConcurrency < 1 ||
+        listConcurrency > MAX_LIST_CONCURRENCY)
+    ) {
       throw new Error('listConcurrency 仅接受题目任务的 1 到 16 整数');
     }
     const limitTo1000Pages = requestBoolean(payload.limitTo1000Pages, 'limitTo1000Pages', false);
-    const hasIndependentScopes = runType === 'content'
-      && Object.prototype.hasOwnProperty.call(payload, 'textbookScopes');
-    if (runType === 'content'
-      && Object.prototype.hasOwnProperty.call(payload, 'resumeFromCollectorRunId')) {
+    const hasIndependentScopes =
+      runType === 'content' && Object.prototype.hasOwnProperty.call(payload, 'textbookScopes');
+    if (runType === 'content' && Object.prototype.hasOwnProperty.call(payload, 'resumeFromCollectorRunId')) {
       throw new Error('resumeFromCollectorRunId 必须随 textbookScopes[ ] 按教材提供');
     }
     let metadataRunId = null;
@@ -321,30 +341,36 @@ class CollectorJobManager {
         independentScopes = normalized.scopes;
       } else {
         metadataRunId = intInRange(payload.metadataRunId, 'metadataRunId', 1, Number.MAX_SAFE_INTEGER);
-        textbookExternalIds = (Array.isArray(payload.textbookExternalIds)
-          ? payload.textbookExternalIds
-          : [])
-          .map((value) => String(value == null ? '' : value).trim());
+        textbookExternalIds = (Array.isArray(payload.textbookExternalIds) ? payload.textbookExternalIds : []).map(
+          (value) => String(value == null ? '' : value).trim(),
+        );
         if (!textbookExternalIds.length || textbookExternalIds.length > MAX_SELECTED_TEXTBOOKS) {
           throw new Error(`教材选择数量必须在 1 到 ${MAX_SELECTED_TEXTBOOKS} 之间`);
         }
         if (workflowVersion === 2 && textbookExternalIds.length !== 1) {
           throw new Error('新同步任务必须且只能选择一本教材');
         }
-        if (new Set(textbookExternalIds).size !== textbookExternalIds.length) throw new Error('教材选择列表不能包含重复 ID');
+        if (new Set(textbookExternalIds).size !== textbookExternalIds.length)
+          throw new Error('教材选择列表不能包含重复 ID');
         if (textbookExternalIds.some((value) => !safeExternalId(value))) throw new Error('教材来源 ID 不安全');
-        validatedTextbooks = validateMetadataSelection(
-          this.dbPath,
-          metadataRunId,
-          textbookExternalIds,
-        ).textbooks;
+        validatedTextbooks = validateMetadataSelection(this.dbPath, metadataRunId, textbookExternalIds).textbooks;
       }
     }
-    const requestDigest = createHash('sha256').update(JSON.stringify({
-      runType, workflowVersion, maxPages, limitTo1000Pages, metadataRunId,
-      textbookExternalIds, independentScopes, sourceNamespace: 'zujuan:junior:math',
-      ...(listConcurrency == null ? {} : { listConcurrency }),
-    })).digest('hex');
+    const requestDigest = createHash('sha256')
+      .update(
+        JSON.stringify({
+          runType,
+          workflowVersion,
+          maxPages,
+          limitTo1000Pages,
+          metadataRunId,
+          textbookExternalIds,
+          independentScopes,
+          sourceNamespace: 'zujuan:junior:math',
+          ...(listConcurrency == null ? {} : { listConcurrency }),
+        }),
+      )
+      .digest('hex');
     const replay = () => {
       if (!requestedId) return null;
       // Read the store first: another manager may have advanced the job.
@@ -376,7 +402,7 @@ class CollectorJobManager {
     const job = {
       id: requestedId || randomUUID(),
       requestDigest: requestedId ? requestDigest : null,
-      listConcurrency: runType === 'content' ? listConcurrency ?? this.crawlTuning.listConcurrency : null,
+      listConcurrency: runType === 'content' ? (listConcurrency ?? this.crawlTuning.listConcurrency) : null,
       runType,
       workflowVersion,
       sourceNamespace: 'zujuan:junior:math',
@@ -385,46 +411,45 @@ class CollectorJobManager {
       metadataRunId,
       collectorRunId: null,
       textbookExternalIds,
-      scopeItems: runType === 'content'
-        ? textbookExternalIds.map((externalTextbookId, index) => {
-          const independent = independentScopes[index];
-          const textbook = validatedTextbooks.find(
-            (item) => item.externalTextbookId === externalTextbookId,
-          );
-          return {
-            sourceProvider: independent?.sourceProvider || PROVIDER,
-            externalVersionId: independent?.externalVersionId || textbook?.versionExternalId || null,
-            versionName: independent?.versionName || null,
-            externalTextbookId,
-            textbookName: independent?.textbookName || textbook?.textbookName || externalTextbookId,
-            bootstrapChapterExternalId: independent?.bootstrapChapterExternalId
-              || textbook?.bootstrapChapterExternalId || null,
-            resumeFromCollectorRunId: independent?.resumeFromCollectorRunId == null
-              ? null : Number(independent.resumeFromCollectorRunId),
-            collectorRunId: null,
-            status: 'queued',
-            catalogCount: 0,
-            questionCount: 0,
-            questionCatalogCount: 0,
-            questionTagCount: 0,
-            questionAssetCount: 0,
-            snapshotLockedAt: null,
-            snapshotComplete: false,
-            pagesOk: 0,
-            questionsSeen: 0,
-            questionsInserted: 0,
-            questionsUpdated: 0,
-            detailsFetched: 0,
-            assetsDownloaded: 0,
-            errorCount: 0,
-            error: null,
-            errorCode: null,
-            resumable: false,
-            startedAt: null,
-            finishedAt: null,
-          };
-        })
-        : [],
+      scopeItems:
+        runType === 'content'
+          ? textbookExternalIds.map((externalTextbookId, index) => {
+              const independent = independentScopes[index];
+              const textbook = validatedTextbooks.find((item) => item.externalTextbookId === externalTextbookId);
+              return {
+                sourceProvider: independent?.sourceProvider || PROVIDER,
+                externalVersionId: independent?.externalVersionId || textbook?.versionExternalId || null,
+                versionName: independent?.versionName || null,
+                externalTextbookId,
+                textbookName: independent?.textbookName || textbook?.textbookName || externalTextbookId,
+                bootstrapChapterExternalId:
+                  independent?.bootstrapChapterExternalId || textbook?.bootstrapChapterExternalId || null,
+                resumeFromCollectorRunId:
+                  independent?.resumeFromCollectorRunId == null ? null : Number(independent.resumeFromCollectorRunId),
+                collectorRunId: null,
+                status: 'queued',
+                catalogCount: 0,
+                questionCount: 0,
+                questionCatalogCount: 0,
+                questionTagCount: 0,
+                questionAssetCount: 0,
+                snapshotLockedAt: null,
+                snapshotComplete: false,
+                pagesOk: 0,
+                questionsSeen: 0,
+                questionsInserted: 0,
+                questionsUpdated: 0,
+                detailsFetched: 0,
+                assetsDownloaded: 0,
+                errorCount: 0,
+                error: null,
+                errorCode: null,
+                resumable: false,
+                startedAt: null,
+                finishedAt: null,
+              };
+            })
+          : [],
       maxPages,
       limitTo1000Pages,
       totalVersions: 0,
@@ -472,7 +497,9 @@ class CollectorJobManager {
     this.jobs.set(job.id, job);
     this.activeJobId = job.id;
     this.trimJobs();
-    job.execution = Promise.resolve().then(() => this.execute(job)).catch((error) => this.failJob(job, error));
+    job.execution = Promise.resolve()
+      .then(() => this.execute(job))
+      .catch((error) => this.failJob(job, error));
     return publicJob(job);
   }
 
@@ -486,9 +513,9 @@ class CollectorJobManager {
   }
 
   scopeFor(job, externalTextbookId) {
-    return (job.scopeItems || []).find(
-      (scope) => String(scope.externalTextbookId) === String(externalTextbookId),
-    ) || null;
+    return (
+      (job.scopeItems || []).find((scope) => String(scope.externalTextbookId) === String(externalTextbookId)) || null
+    );
   }
 }
 

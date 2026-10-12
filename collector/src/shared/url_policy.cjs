@@ -7,11 +7,7 @@ const { StopCrawlError } = require('./errors.cjs');
 // the allow-list.
 const ALLOWED_PAGE_HOSTS = new Set(['zujuan.xkw.com']);
 const ALLOWED_TREE_HOSTS = new Set(['static.zxxk.com']);
-const ALLOWED_ASSET_HOSTS = new Set([
-  'staticzujuan.xkw.com',
-  'img.xkw.com',
-  'zujuan.xkw.com',
-]);
+const ALLOWED_ASSET_HOSTS = new Set(['staticzujuan.xkw.com', 'img.xkw.com', 'zujuan.xkw.com']);
 
 function defaultMakeError(message, code) {
   return new StopCrawlError(message, code);

@@ -33,7 +33,9 @@ function ensureDir(dir) {
 }
 
 function removeQuietly(target) {
-  try { fs.rmSync(target, { recursive: true, force: true }); } catch {}
+  try {
+    fs.rmSync(target, { recursive: true, force: true });
+  } catch {}
 }
 
 function makeTempDir(prefix, parentDir = os.tmpdir()) {
@@ -68,7 +70,9 @@ function zipFiles(target, files, cwd) {
 function listZipEntries(packagePath) {
   const args = ['-Z1', packagePath];
   const result = assertToolOk(runTool('/usr/bin/unzip', args), 'unzip', args);
-  return String(result.stdout || '').split(/\r?\n/).filter(Boolean);
+  return String(result.stdout || '')
+    .split(/\r?\n/)
+    .filter(Boolean);
 }
 
 function listZipEntryDetails(packagePath) {
@@ -95,8 +99,13 @@ function isSafeZipEntry(entry) {
   if (!entry || entry.startsWith('/') || entry.startsWith('\\')) return false;
   if (entry.includes('\0') || entry.includes('\\')) return false;
   const normalized = path.posix.normalize(entry);
-  return normalized === entry && normalized !== '.' && !normalized.startsWith('../')
-    && !normalized.includes('/../') && !entry.endsWith('/');
+  return (
+    normalized === entry &&
+    normalized !== '.' &&
+    !normalized.startsWith('../') &&
+    !normalized.includes('/../') &&
+    !entry.endsWith('/')
+  );
 }
 
 function parseJsonFile(filePath, label) {

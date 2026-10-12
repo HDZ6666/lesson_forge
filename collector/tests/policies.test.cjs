@@ -11,7 +11,11 @@ const {
   validatePageResult,
 } = require('../src/policies/pagination.cjs');
 const { classifyListPageContent, pageResultFromError } = require('../src/sources/zujuan/response_classifier.cjs');
-const { completionQualityFor, resolveFinalRunState, summarizeCompleteness } = require('../src/policies/completeness.cjs');
+const {
+  completionQualityFor,
+  resolveFinalRunState,
+  summarizeCompleteness,
+} = require('../src/policies/completeness.cjs');
 const { QuestionSyncError } = require('../src/shared/errors.cjs');
 
 describe('pagination policy', () => {
@@ -39,17 +43,28 @@ describe('pagination policy', () => {
 
   it('完全相同的非空页签名判为 pagination_loop，空页返回 null', () => {
     const previous = new Set();
-    const first = validatePageResult({
-      questions: [{ externalId: '1' }, { externalId: '2' }],
-      questionIds: ['1', '2'],
-    }, 1, 2, previous);
+    const first = validatePageResult(
+      {
+        questions: [{ externalId: '1' }, { externalId: '2' }],
+        questionIds: ['1', '2'],
+      },
+      1,
+      2,
+      previous,
+    );
     previous.add(first);
     assert.equal(typeof first, 'string');
     assert.throws(
-      () => validatePageResult({
-        questions: [{ externalId: '1' }, { externalId: '2' }],
-        questionIds: ['1', '2'],
-      }, 2, 2, previous),
+      () =>
+        validatePageResult(
+          {
+            questions: [{ externalId: '1' }, { externalId: '2' }],
+            questionIds: ['1', '2'],
+          },
+          2,
+          2,
+          previous,
+        ),
       (error) => error instanceof QuestionSyncError && error.code === 'pagination_loop',
     );
     assert.equal(validatePageResult({ questions: [], questionIds: [] }, 3, 3, previous), null);

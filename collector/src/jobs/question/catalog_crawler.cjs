@@ -109,12 +109,9 @@ function createCatalogCrawler(ctx) {
     const target = Math.max(0, Number(value) || 0);
     return opts.limitTo1000Pages === true ? Math.min(explicitLastPage, target) : target;
   };
-  const consecutiveEmptyPages = Number(opts.consecutiveEmptyPages) > 0
-    ? Number(opts.consecutiveEmptyPages)
-    : DEFAULT_CONSECUTIVE_EMPTY_PAGES;
-  const stallWindows = Number(opts.stallWindows) > 0
-    ? Number(opts.stallWindows)
-    : DEFAULT_STALL_WINDOWS;
+  const consecutiveEmptyPages =
+    Number(opts.consecutiveEmptyPages) > 0 ? Number(opts.consecutiveEmptyPages) : DEFAULT_CONSECUTIVE_EMPTY_PAGES;
+  const stallWindows = Number(opts.stallWindows) > 0 ? Number(opts.stallWindows) : DEFAULT_STALL_WINDOWS;
   const catalogStates = selectedCatalogs.map((catalog) => {
     const filterJson = '{}';
     const scopeKey = sha256(`${PROVIDER}|${opts.textbookId}|${catalog.externalId}|${filterJson}`);
@@ -126,17 +123,13 @@ function createCatalogCrawler(ctx) {
     const checkpoint = opts.resume ? store.getRunCheckpoint(runId, scopeKey) : 0;
     const savedPages = opts.resume ? store.getRunPageSignatures(runId, catalog.externalId) : [];
     const savedPageNumbers = new Set(savedPages.map((entry) => Number(entry.pageNumber)));
-    const previousSignatures = new Set(savedPages
-      .filter((entry) => entry.signature)
-      .map((entry) => entry.signature));
+    const previousSignatures = new Set(savedPages.filter((entry) => entry.signature).map((entry) => entry.signature));
     const previousQuestionIds = new Set(savedPages.flatMap((entry) => entry.questionIds));
-    const savedProgress = opts.resume
-      ? store.getRunCatalogProgress(runId, opts.textbookId, catalog.externalId)
-      : null;
+    const savedProgress = opts.resume ? store.getRunCatalogProgress(runId, opts.textbookId, catalog.externalId) : null;
     const hasPageOne = savedPageNumbers.has(1);
-    const lastSavedPage = savedPages.find((entry) => (
-      entry.resultType === PAGE_RESULT.SUCCESS && Number(entry.questionCount || 0) > 0
-    )) || null;
+    const lastSavedPage =
+      savedPages.find((entry) => entry.resultType === PAGE_RESULT.SUCCESS && Number(entry.questionCount || 0) > 0) ||
+      null;
     const maxObserved = Number(savedProgress?.maxObservedTotal || savedProgress?.expectedTotal || 0);
     return {
       catalog,
@@ -150,10 +143,9 @@ function createCatalogCrawler(ctx) {
       expectedPages: capTargetPages(savedProgress?.targetPages ?? savedProgress?.expectedPages ?? 0),
       expectedTotal: savedProgress?.expectedTotal ?? null,
       maxObservedTotal: maxObserved || 0,
-      targetPages: capTargetPages(growTargetPages(
-        savedProgress?.targetPages ?? savedProgress?.expectedPages ?? 0,
-        maxObserved || null,
-      )),
+      targetPages: capTargetPages(
+        growTargetPages(savedProgress?.targetPages ?? savedProgress?.expectedPages ?? 0, maxObserved || null),
+      ),
       emptyStreak: 0,
       zeroNewWindows: 0,
       boundaryProbe: false,
@@ -170,9 +162,7 @@ function createCatalogCrawler(ctx) {
     store.reopenCatalogProgress(runId, opts.textbookId, state.catalog.externalId);
   }
 
-  const listConcurrency = opts.limit > 0
-    ? 1
-    : Math.max(1, Number(opts.concurrency) || DEFAULT_LIST_CONCURRENCY);
+  const listConcurrency = opts.limit > 0 ? 1 : Math.max(1, Number(opts.concurrency) || DEFAULT_LIST_CONCURRENCY);
 
   const normalizedCatalogOf = (catalog) => ({
     ...catalog,
@@ -189,12 +179,10 @@ function createCatalogCrawler(ctx) {
     state.expectedPages = state.targetPages;
   };
 
-  const finishCatalogScan = (state, {
-    stalled = false,
-    stallReason = null,
-    pageLimitReached = false,
-    rawSnapshot = null,
-  } = {}) => {
+  const finishCatalogScan = (
+    state,
+    { stalled = false, stallReason = null, pageLimitReached = false, rawSnapshot = null } = {},
+  ) => {
     runProgress.catalogsDone += 1;
     store.completeCatalog({
       runId,
@@ -216,15 +204,19 @@ function createCatalogCrawler(ctx) {
     if (resumeHints[id]) resumeHints[id].finished = !stalled && !pageLimitReached;
     persistResumeScope();
     if (resumeCoverageGaps.includes(id)) {
-      store.db.prepare(`UPDATE sync_run_catalog_progress SET scan_complete=0, data_complete=0,
+      store.db
+        .prepare(
+          `UPDATE sync_run_catalog_progress SET scan_complete=0, data_complete=0,
         completion_quality='completed_with_issues', stall_reason='resume_coverage_unverified'
-        WHERE run_id=? AND catalog_external_id=?`).run(runId, id);
+        WHERE run_id=? AND catalog_external_id=?`,
+        )
+        .run(runId, id);
     }
     const progress = store.getRunCatalogProgress(runId, opts.textbookId, state.catalog.externalId);
     console.log(
-      `[列表] catalog=${state.catalog.externalId} scan=${pageLimitReached ? 'limited' : (stalled ? 'stalled' : 'complete')}`
-      + ` quality=${progress?.completionQuality || ''} last=${progress?.lastCompletedPage || 0}`
-      + ` target=${state.targetPages || 0}`,
+      `[列表] catalog=${state.catalog.externalId} scan=${pageLimitReached ? 'limited' : stalled ? 'stalled' : 'complete'}` +
+        ` quality=${progress?.completionQuality || ''} last=${progress?.lastCompletedPage || 0}` +
+        ` target=${state.targetPages || 0}`,
     );
   };
 
@@ -318,7 +310,9 @@ function createCatalogCrawler(ctx) {
       state.savedPageNumbers.add(Number(pageNumber));
       state.nextPage = Math.max(state.nextPage, Number(pageNumber) + 1);
       state.emptyStreak = 0;
-      console.log(`[列表] catalog=${catalog.externalId} page=${pageNumber} result=${resultType} total=${state.expectedTotal}`);
+      console.log(
+        `[列表] catalog=${catalog.externalId} page=${pageNumber} result=${resultType} total=${state.expectedTotal}`,
+      );
       emitProgress(state, pageNumber, resultType);
       return { resultType, empty: false, newCount: 0, questions: [] };
     }
@@ -382,7 +376,9 @@ function createCatalogCrawler(ctx) {
     counters.questionsUpdated += result.updated || 0;
     state.emptyStreak = 0;
     state.nextPage = Math.max(state.nextPage, Number(pageNumber) + 1);
-    console.log(`[列表] catalog=${catalog.externalId} page=${pageNumber} questions=${questions.length} total=${state.expectedTotal}`);
+    console.log(
+      `[列表] catalog=${catalog.externalId} page=${pageNumber} questions=${questions.length} total=${state.expectedTotal}`,
+    );
     emitProgress(state, pageNumber, PAGE_RESULT.SUCCESS);
     return {
       resultType: PAGE_RESULT.SUCCESS,
@@ -413,7 +409,9 @@ function createCatalogCrawler(ctx) {
       state.savedPageNumbers.add(Number(row.pageNumber));
       state.nextPage = Math.max(state.nextPage, Number(row.pageNumber) + 1);
       state.emptyStreak = 0;
-      console.warn(`[列表] catalog=${state.catalog.externalId} page=${row.pageNumber} ${resultType}: ${row.error.message}`);
+      console.warn(
+        `[列表] catalog=${state.catalog.externalId} page=${row.pageNumber} ${resultType}: ${row.error.message}`,
+      );
       return { resultType, empty: false, newCount: 0, questions: [] };
     }
     return persistCatalogPage(state, row.pageNumber, row.parsed);
@@ -449,16 +447,18 @@ function createCatalogCrawler(ctx) {
 
   async function fetchWindow(state, pageNumbers) {
     heartbeat(`fetch_window:${state.catalog.externalId}:${pageNumbers[0]}`);
-    const rows = await Promise.all(pageNumbers.map(async (pageNumber) => {
-      try {
-        const parsed = await postQuestionList(session.page, opts, state.catalog, pageNumber, {
-          allowVerificationWait: false,
-        });
-        return { pageNumber, parsed, error: null };
-      } catch (error) {
-        return { pageNumber, parsed: null, error };
-      }
-    }));
+    const rows = await Promise.all(
+      pageNumbers.map(async (pageNumber) => {
+        try {
+          const parsed = await postQuestionList(session.page, opts, state.catalog, pageNumber, {
+            allowVerificationWait: false,
+          });
+          return { pageNumber, parsed, error: null };
+        } catch (error) {
+          return { pageNumber, parsed: null, error };
+        }
+      }),
+    );
     return rows.sort((left, right) => left.pageNumber - right.pageNumber);
   }
 
@@ -473,8 +473,9 @@ function createCatalogCrawler(ctx) {
           slot: index + 1,
           pageNumber,
           status: 'fetching',
-          line: `catalog=${state.catalog.externalId} page=${pageNumber} 抓取中`
-            + (state.expectedTotal == null ? '' : ` total=${state.expectedTotal}`),
+          line:
+            `catalog=${state.catalog.externalId} page=${pageNumber} 抓取中` +
+            (state.expectedTotal == null ? '' : ` total=${state.expectedTotal}`),
         })),
       });
     } catch (error) {
@@ -483,11 +484,8 @@ function createCatalogCrawler(ctx) {
   }
 
   function noteFetchSlot(state, pageNumber, saved) {
-    const resultType = saved?.resultType
-      || (saved?.empty ? PAGE_RESULT.EMPTY_PAGE : PAGE_RESULT.SUCCESS);
-    const questionCount = Array.isArray(saved?.questions)
-      ? saved.questions.length
-      : (saved?.empty ? 0 : null);
+    const resultType = saved?.resultType || (saved?.empty ? PAGE_RESULT.EMPTY_PAGE : PAGE_RESULT.SUCCESS);
+    const questionCount = Array.isArray(saved?.questions) ? saved.questions.length : saved?.empty ? 0 : null;
     let status = 'saved';
     if (saved?.empty || resultType === PAGE_RESULT.EMPTY_PAGE) status = 'empty';
     else if (resultType === PAGE_RESULT.DUPLICATE_PAGE) status = 'duplicate';
@@ -499,10 +497,11 @@ function createCatalogCrawler(ctx) {
         resultType,
         sourceTotal: state.expectedTotal,
         targetPages: state.targetPages,
-        line: `catalog=${state.catalog.externalId} page=${pageNumber}`
-          + (questionCount == null ? '' : ` questions=${questionCount}`)
-          + (state.expectedTotal == null ? '' : ` total=${state.expectedTotal}`)
-          + (status === 'saved' ? '' : ` ${status}`),
+        line:
+          `catalog=${state.catalog.externalId} page=${pageNumber}` +
+          (questionCount == null ? '' : ` questions=${questionCount}`) +
+          (state.expectedTotal == null ? '' : ` total=${state.expectedTotal}`) +
+          (status === 'saved' ? '' : ` ${status}`),
       });
     } catch (error) {
       console.warn(`[进度] 窗口页状态写入失败：${error.message}`);
@@ -514,24 +513,31 @@ function createCatalogCrawler(ctx) {
     if (!hint || state.resumeChecked || state.nextPage < 2) return;
     state.resumeChecked = true;
     if (hint.lastPage < 3 || !hint.anchorId || opts.limit > 0) return;
-    const growth = state.expectedTotal != null && hint.total != null
-      ? Math.max(0, state.expectedTotal - hint.total) : 0;
-    const boundary = Math.min(explicitLastPage, safetyPageLimit,
-      Math.max(2, hint.lastPage + Math.floor(growth / DEFAULT_PAGE_CAPACITY)));
+    const growth =
+      state.expectedTotal != null && hint.total != null ? Math.max(0, state.expectedTotal - hint.total) : 0;
+    const boundary = Math.min(
+      explicitLastPage,
+      safetyPageLimit,
+      Math.max(2, hint.lastPage + Math.floor(growth / DEFAULT_PAGE_CAPACITY)),
+    );
     // A page number is only a search hint. Require the saved boundary ID in
     // a current response; otherwise continue the fresh scan from page 2.
     for (const pageNumber of [boundary, boundary + 1]) {
       if (pageNumber > explicitLastPage || pageNumber > safetyPageLimit) break;
       assertNotStopped();
       await requestGate(opts.sleepFn || sleep);
-      const parsed = await postQuestionList(session.page, opts, state.catalog, pageNumber, { allowVerificationWait: false });
+      const parsed = await postQuestionList(session.page, opts, state.catalog, pageNumber, {
+        allowVerificationWait: false,
+      });
       if (!(parsed.questionIds || []).map(String).includes(String(hint.anchorId))) continue;
       resumeCoverageGaps.push(String(state.catalog.externalId));
       persistResumeScope();
       await persistCatalogPage(state, pageNumber, parsed);
       state.nextPage = pageNumber + 1;
       if (hint.finished && growth < DEFAULT_PAGE_CAPACITY) finishCatalogScan(state);
-      console.log(`[续采] catalog=${state.catalog.externalId} 边界题 ${hint.anchorId} 已在当前 page=${pageNumber} 复核`);
+      console.log(
+        `[续采] catalog=${state.catalog.externalId} 边界题 ${hint.anchorId} 已在当前 page=${pageNumber} 复核`,
+      );
       return;
     }
     console.log(`[续采] catalog=${state.catalog.externalId} 旧边界未匹配，继续从前部重新扫描`);
@@ -546,16 +552,19 @@ function createCatalogCrawler(ctx) {
     for (const state of catalogStates) {
       if (opts.limit > 0 && counters.questionsSeen >= opts.limit) break;
       try {
-        catalogPages:
-        while (!state.finished) {
+        catalogPages: while (!state.finished) {
           await verifyResumeFrontier(state);
           if (state.finished) break;
           if (opts.limit > 0 && counters.questionsSeen >= opts.limit) break;
           // Check the task policy boundary before the generic safety ceiling.
           // This keeps an explicitly configured safetyPageLimit of 1000 from
           // turning the intentional policy stop into a stalled catalog.
-          if (opts.limitTo1000Pages === true && !opts.maxPagesProvided
-            && explicitLastPage === SITE_PAGE_LIMIT && state.nextPage > explicitLastPage) {
+          if (
+            opts.limitTo1000Pages === true &&
+            !opts.maxPagesProvided &&
+            explicitLastPage === SITE_PAGE_LIMIT &&
+            state.nextPage > explicitLastPage
+          ) {
             finishCatalogScan(state, {
               pageLimitReached: true,
               stallReason: 'page_limit_1000',
@@ -589,8 +598,9 @@ function createCatalogCrawler(ctx) {
           session.notePagesFetched(pageNumbers.length);
           let sourcePause = rows.find((row) => row.error?.blocked)?.error;
           if (!sourcePause) {
-            try { await prefetchWindowAssets(rows); }
-            catch (error) {
+            try {
+              await prefetchWindowAssets(rows);
+            } catch (error) {
               if (!error.blocked) throw error;
               sourcePause = error;
             }
@@ -603,10 +613,14 @@ function createCatalogCrawler(ctx) {
               for (const question of row.parsed?.questions || []) {
                 for (const asset of question.assets || []) {
                   const url = String(asset.sourceUrl || asset.url || '');
-                  if (url && !assetCache.has(url)) assetCache.set(url, {
-                    ...asset, sourceUrl: url, downloadFailed: true,
-                    errorCode: sourcePause.code, errorMessage: sourcePause.message,
-                  });
+                  if (url && !assetCache.has(url))
+                    assetCache.set(url, {
+                      ...asset,
+                      sourceUrl: url,
+                      downloadFailed: true,
+                      errorCode: sourcePause.code,
+                      errorMessage: sourcePause.message,
+                    });
                 }
               }
             }
@@ -616,11 +630,16 @@ function createCatalogCrawler(ctx) {
             }
             for (const row of rows.filter((item) => item.error)) {
               store.recordPageAttempt({
-                runId, textbookExternalId: opts.textbookId,
-                catalog: normalizedCatalogOf(state.catalog), pageNumber: row.pageNumber,
-                resultType: PAGE_RESULT.REQUEST_FAILED, errorCode: row.error.code || sourcePause.code,
-                queryFingerprint: state.scopeKey, filterJson: state.filterJson,
-                expectedTotal: state.expectedTotal, targetPages: state.targetPages,
+                runId,
+                textbookExternalId: opts.textbookId,
+                catalog: normalizedCatalogOf(state.catalog),
+                pageNumber: row.pageNumber,
+                resultType: PAGE_RESULT.REQUEST_FAILED,
+                errorCode: row.error.code || sourcePause.code,
+                queryFingerprint: state.scopeKey,
+                filterJson: state.filterJson,
+                expectedTotal: state.expectedTotal,
+                targetPages: state.targetPages,
               });
               noteFetchSlot(state, row.pageNumber, { resultType: PAGE_RESULT.REQUEST_FAILED });
             }

@@ -13,9 +13,10 @@ class LifecycleMethods {
     job.status = status;
     job.phase = status === 'completed' ? 'completed' : status;
     job.errorMessage = message;
-    job.errorCode = status === 'completed'
-      ? null
-      : (errorCode || job.errorCode || this.jobErrorCode(job, status === 'cancelled' ? 'cancelled' : status));
+    job.errorCode =
+      status === 'completed'
+        ? null
+        : errorCode || job.errorCode || this.jobErrorCode(job, status === 'cancelled' ? 'cancelled' : status);
     job.progressPercent = status === 'completed' ? 100 : job.progressPercent;
     job.currentTextbookId = null;
     job.currentTextbookName = null;
@@ -57,9 +58,10 @@ class LifecycleMethods {
       .map((scope) => scope.collectorRunId)
       .filter((value) => Number.isSafeInteger(Number(value)) && Number(value) > 0);
     job.collectorRunId = completedRuns.length === 1 ? Number(completedRuns[0]) : null;
-    job.snapshotComplete = status === 'completed'
-      && (job.scopeItems || []).length > 0
-      && (job.scopeItems || []).every((scope) => scope.snapshotComplete === true);
+    job.snapshotComplete =
+      status === 'completed' &&
+      (job.scopeItems || []).length > 0 &&
+      (job.scopeItems || []).every((scope) => scope.snapshotComplete === true);
     if (job.scopeItems.length === 1) {
       job.snapshotLockedAt = job.scopeItems[0].snapshotLockedAt || null;
     }
@@ -72,7 +74,9 @@ class LifecycleMethods {
     if (this.activeJobId === job.id) this.activeJobId = null;
     this.persist(job, { force: true });
     if (this.store) {
-      try { this.store.release(job.id); } catch {}
+      try {
+        this.store.release(job.id);
+      } catch {}
     }
   }
 
@@ -140,7 +144,9 @@ class LifecycleMethods {
     unregisterOwner(this.ownerToken);
     for (const job of this.jobs.values()) this.stopWatchdog(job);
     if (this.store) {
-      try { this.store.close(); } catch {}
+      try {
+        this.store.close();
+      } catch {}
     }
   }
 
@@ -166,7 +172,7 @@ class LifecycleMethods {
       }
       // This includes runChild's exit, snapshot reconciliation and mutex
       // release. The SQLite store stays open throughout those callbacks.
-      await Promise.all([...this.jobs.values()].map(job => job.execution).filter(Boolean));
+      await Promise.all([...this.jobs.values()].map((job) => job.execution).filter(Boolean));
       this.dispose();
     })();
     return this._shutdownPromise;

@@ -57,8 +57,7 @@ function lockIsStale(lockPath) {
  */
 function acquireLock(lockPath, options = {}) {
   ensureDir(path.dirname(lockPath));
-  const conflictError = options.conflictError
-    || ((target) => new Error(`已有同步任务持有锁：${target}。`));
+  const conflictError = options.conflictError || ((target) => new Error(`已有同步任务持有锁：${target}。`));
   const openError = options.openError || ((target, cause) => cause);
   const open = () => {
     const descriptor = fs.openSync(lockPath, 'wx', 0o600);
@@ -71,7 +70,9 @@ function acquireLock(lockPath, options = {}) {
   } catch (error) {
     if (error?.code !== 'EEXIST') throw openError(lockPath, error);
     if (!lockIsStale(lockPath)) throw conflictError(lockPath, error);
-    try { fs.unlinkSync(lockPath); } catch (unlinkError) {
+    try {
+      fs.unlinkSync(lockPath);
+    } catch (unlinkError) {
       throw conflictError(lockPath, unlinkError);
     }
     try {
@@ -81,8 +82,12 @@ function acquireLock(lockPath, options = {}) {
     }
   }
   return () => {
-    try { fs.closeSync(fd); } catch {}
-    try { fs.unlinkSync(lockPath); } catch {}
+    try {
+      fs.closeSync(fd);
+    } catch {}
+    try {
+      fs.unlinkSync(lockPath);
+    } catch {}
   };
 }
 

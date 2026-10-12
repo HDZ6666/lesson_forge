@@ -9,12 +9,7 @@
  */
 
 const { QuestionSyncError } = require('../../shared/errors.cjs');
-const {
-  jsonStringify,
-  normalizeId,
-  normalizeWhitespace,
-  sha256,
-} = require('../../shared/utils.cjs');
+const { jsonStringify, normalizeId, normalizeWhitespace, sha256 } = require('../../shared/utils.cjs');
 const {
   absoluteUrl,
   attr,
@@ -28,10 +23,7 @@ const {
   hasClass,
   stripHtml,
 } = require('../../shared/html.cjs');
-const {
-  assetKey: canonicalAssetKey,
-  normalizeHtml: normalizePackageHtml,
-} = require('../../qbpkg/normalize.cjs');
+const { assetKey: canonicalAssetKey, normalizeHtml: normalizePackageHtml } = require('../../qbpkg/normalize.cjs');
 const { DEFAULT_BASE_URL } = require('./constants.cjs');
 
 function parseDifficulty(value) {
@@ -63,8 +55,8 @@ function normalizeAssetType(url, originalType = null) {
   if (source.includes('/formula/') || original === 'formula' || original === 'formula_image') {
     return 'formula_image';
   }
-  if (/\.(?:png|jpe?g|gif|webp|bmp)(?:$|[?#])/.test(source)
-    || original === 'image' || original === 'question_image') return 'question_image';
+  if (/\.(?:png|jpe?g|gif|webp|bmp)(?:$|[?#])/.test(source) || original === 'image' || original === 'question_image')
+    return 'question_image';
   return 'other';
 }
 
@@ -81,8 +73,7 @@ function parseQuestionBlock(block, baseUrl = DEFAULT_BASE_URL) {
   };
   const rootAttrs = root.attrs || {};
   const item = root.outer || block;
-  const addButton = firstByClass(item, 'addques', 'a')
-    || firstByAttribute(item, 'quesid', null, 'a');
+  const addButton = firstByClass(item, 'addques', 'a') || firstByAttribute(item, 'quesid', null, 'a');
   const addAttrs = addButton?.attrs || {};
   const info = findByClass(item, 'info-cnt').map(elementText).map(normalizeWhitespace);
   const difficulty = parseDifficulty(info[1] || attr(addAttrs, 'qdname', ''));
@@ -91,31 +82,38 @@ function parseQuestionBlock(block, baseUrl = DEFAULT_BASE_URL) {
   const contentHtml = content ? stripListOrdinal(content.inner, questionIndex) : '';
   const plainText = contentHtml ? stripHtml(contentHtml) : '';
   const source = firstByClass(item, 'ques-src', 'a');
-  const detail = findByClass(item, 'detail', 'a').find((entry) => (
-    /(?:^|\/)2q\d+\.html/i.test(String(attr(entry.attrs, 'href', '')))
-    || String(attr(entry.attrs, 'data-btntype', '')).toLowerCase() === 'quesdetail'
-  )) || firstByClass(item, 'detail', 'a');
-  const sourceTitle = normalizeWhitespace(
-    String(attr(source?.attrs, 'title', '') || '').replace(/^原始出处\s*[：:]\s*/, ''),
-  ) || null;
+  const detail =
+    findByClass(item, 'detail', 'a').find(
+      (entry) =>
+        /(?:^|\/)2q\d+\.html/i.test(String(attr(entry.attrs, 'href', ''))) ||
+        String(attr(entry.attrs, 'data-btntype', '')).toLowerCase() === 'quesdetail',
+    ) || firstByClass(item, 'detail', 'a');
+  const sourceTitle =
+    normalizeWhitespace(String(attr(source?.attrs, 'title', '') || '').replace(/^原始出处\s*[：:]\s*/, '')) || null;
   const sourceShort = normalizeWhitespace(elementText(source)) || null;
   const detailUrl = absoluteUrl(attr(detail?.attrs, 'href'), baseUrl);
   const sourceUrl = absoluteUrl(attr(source?.attrs, 'href'), baseUrl);
   const images = findElements(contentHtml, (attrs, tag) => tag === 'img', 'img');
-  const assets = images.map((image) => {
-    const imageUrl = absoluteUrl(attr(image.attrs, 'src') || attr(image.attrs, 'data-src'), baseUrl);
-    const originalType = String(imageUrl || '').toLowerCase().includes('/formula/')
-      ? 'formula'
-      : (/\.svg(?:$|[?#])/i.test(String(imageUrl || '')) ? 'svg' : 'image');
-    return {
-      sourceUrl: imageUrl,
-      url: imageUrl,
-      type: normalizeAssetType(imageUrl, originalType),
-      assetType: normalizeAssetType(imageUrl, originalType),
-      originalType,
-      originalUrl: attr(image.attrs, 'src') || attr(image.attrs, 'data-src') || null,
-    };
-  }).filter((asset) => asset.url);
+  const assets = images
+    .map((image) => {
+      const imageUrl = absoluteUrl(attr(image.attrs, 'src') || attr(image.attrs, 'data-src'), baseUrl);
+      const originalType = String(imageUrl || '')
+        .toLowerCase()
+        .includes('/formula/')
+        ? 'formula'
+        : /\.svg(?:$|[?#])/i.test(String(imageUrl || ''))
+          ? 'svg'
+          : 'image';
+      return {
+        sourceUrl: imageUrl,
+        url: imageUrl,
+        type: normalizeAssetType(imageUrl, originalType),
+        assetType: normalizeAssetType(imageUrl, originalType),
+        originalType,
+        originalUrl: attr(image.attrs, 'src') || attr(image.attrs, 'data-src') || null,
+      };
+    })
+    .filter((asset) => asset.url);
 
   const knowledge = [];
   for (const link of findByClass(item, 'knowledge-item', 'a')) {
@@ -152,14 +150,14 @@ function parseQuestionBlock(block, baseUrl = DEFAULT_BASE_URL) {
     evidenceType: 'provider_asserted',
   }));
 
-  const infoTitles = findElements(item, (attrs) => attr(attrs, 'title') != null)
-    .map((entry) => String(attr(entry.attrs, 'title', '')));
+  const infoTitles = findElements(item, (attrs) => attr(attrs, 'title') != null).map((entry) =>
+    String(attr(entry.attrs, 'title', '')),
+  );
   const usageTitle = infoTitles.find((value) => /次组卷/.test(decodeHtmlEntities(value)));
   const usageMatch = String(usageTitle || '').match(/(\d+)\s*次组卷/);
   const referenceContainer = firstByClass(item, 'look-more-src');
   const referenceLabel = normalizeWhitespace(
-    elementText(firstByClass(referenceContainer?.outer || '', 'info-txt'))
-      || elementText(referenceContainer),
+    elementText(firstByClass(referenceContainer?.outer || '', 'info-txt')) || elementText(referenceContainer),
   );
   const referenceCountMatch = referenceLabel.match(/(\d+)\s*卷引用/);
   const referencePapers = findByClass(referenceContainer?.outer || item, 'src-item', 'a')
@@ -170,9 +168,7 @@ function parseQuestionBlock(block, baseUrl = DEFAULT_BASE_URL) {
     .filter((entry) => entry.name);
 
   const dateElement = firstByClass(item, 'no-bound', 'span');
-  const websiteTimeText = normalizeWhitespace(
-    attr(dateElement?.attrs, 'title') || elementText(dateElement),
-  ) || null;
+  const websiteTimeText = normalizeWhitespace(attr(dateElement?.attrs, 'title') || elementText(dateElement)) || null;
   const categoryId = attr(addAttrs, 'categoryid') || attr(addAttrs, 'categoryId');
   const categoryName = attr(addAttrs, 'categoryname') || attr(addAttrs, 'categoryName');
   const qdid = attr(addAttrs, 'qdid');
@@ -189,13 +185,19 @@ function parseQuestionBlock(block, baseUrl = DEFAULT_BASE_URL) {
     qdvalue: qdvalue == null || qdvalue === '' ? null : Number(qdvalue),
   };
   const difficultyLabel = difficulty.label || normalizeWhitespace(qdname) || null;
-  const easeCoefficient = difficulty.coefficient == null
-    ? (rawDifficulty.qdvalue == null ? null : rawDifficulty.qdvalue)
-    : difficulty.coefficient;
-  const providerCategory = categoryId || categoryName ? {
-    id: categoryId == null || categoryId === '' ? null : String(categoryId),
-    name: categoryName == null || categoryName === '' ? null : normalizeWhitespace(categoryName),
-  } : null;
+  const easeCoefficient =
+    difficulty.coefficient == null
+      ? rawDifficulty.qdvalue == null
+        ? null
+        : rawDifficulty.qdvalue
+      : difficulty.coefficient;
+  const providerCategory =
+    categoryId || categoryName
+      ? {
+          id: categoryId == null || categoryId === '' ? null : String(categoryId),
+          name: categoryName == null || categoryName === '' ? null : normalizeWhitespace(categoryName),
+        }
+      : null;
 
   return {
     externalId: externalId == null ? null : String(externalId),
@@ -240,7 +242,9 @@ function parseQuestionBlock(block, baseUrl = DEFAULT_BASE_URL) {
     assembleCount: usageMatch ? Number(usageMatch[1]) : null,
     referenceCount: referenceCountMatch
       ? Number(referenceCountMatch[1])
-      : (referencePapers.length ? referencePapers.length : null),
+      : referencePapers.length
+        ? referencePapers.length
+        : null,
     referencePapers,
     referenceLabel: referenceLabel || null,
     isNew,
@@ -284,11 +288,19 @@ function normalizeQuestionContent(item, assets) {
   const allAssets = (Array.isArray(assets) ? assets : []).filter((asset) => asset?.sourceUrl);
   const skippedAssets = allAssets.filter((asset) => asset.skipped || asset.ignored);
   const normalizedAssets = allAssets.filter((asset) => !asset.skipped && !asset.ignored);
-  const assetsByUrl = new Map(normalizedAssets.map((asset) => [asset.sourceUrl, {
-    ...asset,
-    assetKey: canonicalAssetKey(asset.assetType || asset.type, asset.sourceUrl),
-  }]));
-  const sourceHtml = removeAssetImagesBySource(item?.contentHtml, skippedAssets.map((asset) => asset.sourceUrl));
+  const assetsByUrl = new Map(
+    normalizedAssets.map((asset) => [
+      asset.sourceUrl,
+      {
+        ...asset,
+        assetKey: canonicalAssetKey(asset.assetType || asset.type, asset.sourceUrl),
+      },
+    ]),
+  );
+  const sourceHtml = removeAssetImagesBySource(
+    item?.contentHtml,
+    skippedAssets.map((asset) => asset.sourceUrl),
+  );
   const normalized = normalizePackageHtml(sourceHtml, assetsByUrl);
   const html = String(normalized.html || '').trim();
   const text = normalizeWhitespace(stripHtml(html));
@@ -305,18 +317,20 @@ function normalizeQuestionContent(item, assets) {
 
 function finalizeQuestion(question) {
   const item = question && typeof question === 'object' ? { ...question } : {};
-  const assets = (Array.isArray(item.assets) ? item.assets : []).map((asset) => {
-    const sourceUrl = String(asset.sourceUrl || asset.url || '').trim();
-    const assetType = normalizeAssetType(sourceUrl, asset.originalType || asset.type);
-    return {
-      ...asset,
-      sourceUrl,
-      url: sourceUrl,
-      type: assetType,
-      assetType,
-      originalType: asset.originalType || asset.type || null,
-    };
-  }).filter((asset) => asset.sourceUrl);
+  const assets = (Array.isArray(item.assets) ? item.assets : [])
+    .map((asset) => {
+      const sourceUrl = String(asset.sourceUrl || asset.url || '').trim();
+      const assetType = normalizeAssetType(sourceUrl, asset.originalType || asset.type);
+      return {
+        ...asset,
+        sourceUrl,
+        url: sourceUrl,
+        type: assetType,
+        assetType,
+        originalType: asset.originalType || asset.type || null,
+      };
+    })
+    .filter((asset) => asset.sourceUrl);
   const uniqueAssets = [];
   const seenAssets = new Set();
   for (const asset of assets) {
@@ -336,10 +350,11 @@ function finalizeQuestion(question) {
     contentHtml: html || null,
     plainText: text || null,
     contentSource: item.contentSource || 'list_api',
-    contentComplete: Boolean(html || text)
-      && Boolean(text || /<img\b[^>]*\bdata-asset-key=/i.test(html || ''))
-      && normalizedContent.missingAssets.length === 0
-      && normalizedContent.errors.length === 0,
+    contentComplete:
+      Boolean(html || text) &&
+      Boolean(text || /<img\b[^>]*\bdata-asset-key=/i.test(html || '')) &&
+      normalizedContent.missingAssets.length === 0 &&
+      normalizedContent.errors.length === 0,
     contentHash: stable ? sha256(stable) : null,
     // Recompute after every asset/HTML rewrite. A formula fallback or a
     // skipped placeholder changes the canonical HTML and must change the
@@ -358,12 +373,18 @@ function finalizeQuestion(question) {
     htmlAssetErrors: normalizedContent.errors || [],
     missingAssets: normalizedContent.missingAssets || [],
     difficultyCode: item.difficultyCode == null ? null : String(item.difficultyCode),
-    difficultyQdid: item.difficultyQdid == null
-      ? (item.difficultyCode == null ? null : String(item.difficultyCode))
-      : String(item.difficultyQdid),
-    easeCoefficient: item.easeCoefficient == null
-      ? (item.difficultyCoefficient == null ? null : Number(item.difficultyCoefficient))
-      : Number(item.easeCoefficient),
+    difficultyQdid:
+      item.difficultyQdid == null
+        ? item.difficultyCode == null
+          ? null
+          : String(item.difficultyCode)
+        : String(item.difficultyQdid),
+    easeCoefficient:
+      item.easeCoefficient == null
+        ? item.difficultyCoefficient == null
+          ? null
+          : Number(item.difficultyCoefficient)
+        : Number(item.easeCoefficient),
     raw: item.raw || {},
   };
 }
@@ -385,15 +406,14 @@ function parseQuestionListHtml(html, baseUrl = DEFAULT_BASE_URL) {
 function parseQuestionListPayload(payload, baseUrl = DEFAULT_BASE_URL) {
   let value = payload;
   if (typeof value === 'string') {
-    try { value = JSON.parse(value); } catch (error) {
+    try {
+      value = JSON.parse(value);
+    } catch (error) {
       throw new QuestionSyncError(`题目列表接口不是有效 JSON：${error.message}`, 'list_api_contract');
     }
   }
   if (!value || String(value.code) !== '0' || !value.data || typeof value.data !== 'object') {
-    throw new QuestionSyncError(
-      `题目列表接口返回异常：${jsonStringify(value).slice(0, 800)}`,
-      'list_api_contract',
-    );
+    throw new QuestionSyncError(`题目列表接口返回异常：${jsonStringify(value).slice(0, 800)}`, 'list_api_contract');
   }
   const html = String(value.data.html || '');
   const parsed = parseQuestionListHtml(html, baseUrl);
@@ -426,15 +446,14 @@ function parseQuestionListPayload(payload, baseUrl = DEFAULT_BASE_URL) {
 function parseQuestionListTotalPayload(payload) {
   let value = payload;
   if (typeof value === 'string') {
-    try { value = JSON.parse(value); } catch (error) {
+    try {
+      value = JSON.parse(value);
+    } catch (error) {
       throw new QuestionSyncError(`题目列表接口不是有效 JSON：${error.message}`, 'list_api_contract');
     }
   }
   if (!value || String(value.code) !== '0' || !value.data || typeof value.data !== 'object') {
-    throw new QuestionSyncError(
-      `题目列表接口返回异常：${jsonStringify(value).slice(0, 800)}`,
-      'list_api_contract',
-    );
+    throw new QuestionSyncError(`题目列表接口返回异常：${jsonStringify(value).slice(0, 800)}`, 'list_api_contract');
   }
   return { code: '0', total: normalizeDisplayTotal(value.data.total) };
 }
@@ -458,8 +477,9 @@ function removeAssetImages(html, assetKeys = []) {
 }
 
 function removeAssetImagesBySource(html, sourceUrls = []) {
-  const urls = new Set((Array.isArray(sourceUrls) ? sourceUrls : [])
-    .map((value) => String(value || '').trim()).filter(Boolean));
+  const urls = new Set(
+    (Array.isArray(sourceUrls) ? sourceUrls : []).map((value) => String(value || '').trim()).filter(Boolean),
+  );
   if (!urls.size) return html == null ? html : String(html);
   return String(html || '').replace(
     /<img\b([^>]*?)\bsrc\s*=\s*(?:(['"])([\s\S]*?)\2|([^\s>]+))([^>]*)>/gi,

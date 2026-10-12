@@ -56,8 +56,11 @@ function sealCompleted({ store, events, runId, scope, selectedCatalogs, counters
  */
 function sealFailed({ store, events, runId, scope, selectedCatalogs, counters, sourceControl }, error) {
   if (MANUAL_PAUSE_CODES.has(error.code)) {
-    try { sourceControl.markManual(error.message); }
-    catch (pauseError) { console.warn(`[暂停记录失败] ${pauseError.message}`); }
+    try {
+      sourceControl.markManual(error.message);
+    } catch (pauseError) {
+      console.warn(`[暂停记录失败] ${pauseError.message}`);
+    }
   }
   counters.errors += 1;
   const message = String(error.message || error);

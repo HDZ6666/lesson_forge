@@ -66,7 +66,9 @@ function isStableExternalId(value) {
  * their historical raw-page file names unchanged.
  */
 function safeFilePart(value, maxLength = 160) {
-  return String(value ?? '').replace(/[^a-zA-Z0-9._-]+/g, '_').slice(0, maxLength);
+  return String(value ?? '')
+    .replace(/[^a-zA-Z0-9._-]+/g, '_')
+    .slice(0, maxLength);
 }
 
 function ensureDir(directory) {

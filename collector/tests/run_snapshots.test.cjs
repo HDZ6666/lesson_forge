@@ -9,10 +9,7 @@ const { PassThrough } = require('node:stream');
 const { DatabaseSync } = require('node:sqlite');
 const test = require('node:test');
 
-const {
-  ensureRunSnapshotSchema,
-  TERMINAL_RUN_STATUSES,
-} = require('../src/storage/run_snapshots.cjs');
+const { ensureRunSnapshotSchema, TERMINAL_RUN_STATUSES } = require('../src/storage/run_snapshots.cjs');
 const { resolveContentRun, snapshotScopeIds } = require('../src/storage/readers/common.cjs');
 const {
   readRunCatalogs,
@@ -36,58 +33,76 @@ function temporaryDb(prefix = 'collector-snapshot-') {
   };
 }
 
-function seedRun(dbPath, {
-  status = 'success',
-  scope = { textbookId: 'tb1' },
-  textbookIds = ['tb1'],
-  duplicateQuestion = false,
-  finish = true,
-} = {}) {
+function seedRun(
+  dbPath,
+  {
+    status = 'success',
+    scope = { textbookId: 'tb1' },
+    textbookIds = ['tb1'],
+    duplicateQuestion = false,
+    finish = true,
+  } = {},
+) {
   const store = new SyncStore(dbPath);
   const runId = store.beginRun(scope);
   for (const textbookId of textbookIds) {
     const catalogId = `${textbookId}-c1`;
     const questionId = duplicateQuestion ? 'q-shared' : `${textbookId}-q1`;
-    store.saveRunCatalogTree(runId, textbookId, [{
-      externalId: catalogId,
-      parentExternalId: null,
-      level: 1,
-      type: 'chapter',
-      name: `${textbookId} 第一章`,
-      path: `/${catalogId}`,
-      sortOrder: 1,
-    }]);
-    store.saveRunQuestion(runId, textbookId, {
-      externalId: questionId,
-      detailUrl: `https://zujuan.xkw.com/${questionId}`,
-      sourceTitle: `${textbookId} 试题`,
-      questionType: '单选题',
-      questionTypeId: '1101',
-      contentHtml: `<p>${textbookId} 题干</p>`,
-      plainText: `${textbookId} 题干`,
-      detailFetched: true,
-      solutionHtml: '<p>解析</p>',
-      rawData: { externalId: questionId },
-      contentHash: `hash-${textbookId}`,
-      listContentHash: `list-${textbookId}`,
-      detailContentHash: `detail-${textbookId}`,
-    }, catalogId);
-    store.saveRunQuestionCatalogs(runId, textbookId, questionId, [{
-      externalId: catalogId,
-      level: 1,
-      name: `${textbookId} 第一章`,
-      path: `/${catalogId}`,
-    }]);
+    store.saveRunCatalogTree(runId, textbookId, [
+      {
+        externalId: catalogId,
+        parentExternalId: null,
+        level: 1,
+        type: 'chapter',
+        name: `${textbookId} 第一章`,
+        path: `/${catalogId}`,
+        sortOrder: 1,
+      },
+    ]);
+    store.saveRunQuestion(
+      runId,
+      textbookId,
+      {
+        externalId: questionId,
+        detailUrl: `https://zujuan.xkw.com/${questionId}`,
+        sourceTitle: `${textbookId} 试题`,
+        questionType: '单选题',
+        questionTypeId: '1101',
+        contentHtml: `<p>${textbookId} 题干</p>`,
+        plainText: `${textbookId} 题干`,
+        detailFetched: true,
+        solutionHtml: '<p>解析</p>',
+        rawData: { externalId: questionId },
+        contentHash: `hash-${textbookId}`,
+        listContentHash: `list-${textbookId}`,
+        detailContentHash: `detail-${textbookId}`,
+      },
+      catalogId,
+    );
+    store.saveRunQuestionCatalogs(runId, textbookId, questionId, [
+      {
+        externalId: catalogId,
+        level: 1,
+        name: `${textbookId} 第一章`,
+        path: `/${catalogId}`,
+      },
+    ]);
   }
-  if (finish) store.finishRun(runId, status, {
-    pagesOk: 3,
-    questionsSeen: textbookIds.length,
-    questionsInserted: textbookIds.length,
-    questionsUpdated: 0,
-    detailsFetched: textbookIds.length,
-    assetsDownloaded: 0,
-    errors: status === 'success' ? 0 : 1,
-  }, status === 'success' ? null : '采集失败');
+  if (finish)
+    store.finishRun(
+      runId,
+      status,
+      {
+        pagesOk: 3,
+        questionsSeen: textbookIds.length,
+        questionsInserted: textbookIds.length,
+        questionsUpdated: 0,
+        detailsFetched: textbookIds.length,
+        assetsDownloaded: 0,
+        errors: status === 'success' ? 0 : 1,
+      },
+      status === 'success' ? null : '采集失败',
+    );
   store.close();
   return runId;
 }
@@ -95,12 +110,23 @@ function seedRun(dbPath, {
 test('sealed coverage retains the root observation and only counts frozen scan targets', () => {
   const { directory, dbPath } = temporaryDb('collector-coverage-');
   try {
-    const runId = seedRun(dbPath, { finish: false, scope: {
-      textbookId: 'tb1', coverageFormat: 'run-coverage-v1', textbookExpectedTotal: 40000,
-      textbookExpectedTotalObservedAt: '2026-10-01T00:00:00Z', summaryStrategy: 'textbook_root_probe',
-      availableCatalogCount: 3, selectedCatalogCount: 2, scanCatalogIds: ['tb1-c1', 'tb1-c2'],
-      catalogSelectionTruncated: true, startPage: 1, maxPages: 30, limit: 0,
-    } });
+    const runId = seedRun(dbPath, {
+      finish: false,
+      scope: {
+        textbookId: 'tb1',
+        coverageFormat: 'run-coverage-v1',
+        textbookExpectedTotal: 40000,
+        textbookExpectedTotalObservedAt: '2026-10-01T00:00:00Z',
+        summaryStrategy: 'textbook_root_probe',
+        availableCatalogCount: 3,
+        selectedCatalogCount: 2,
+        scanCatalogIds: ['tb1-c1', 'tb1-c2'],
+        catalogSelectionTruncated: true,
+        startPage: 1,
+        maxPages: 30,
+        limit: 0,
+      },
+    });
     new QuestionSyncStore(dbPath, { dataDir: directory }).close();
     const db = new DatabaseSync(dbPath);
     try {
@@ -111,7 +137,9 @@ test('sealed coverage retains the root observation and only counts frozen scan t
       insert.run(runId, 'tb1', 'tb1-c1', '2026-10-01T01:00:00Z', 0);
       insert.run(runId, 'tb1', 'old-removed-target', '2026-10-01T01:00:00Z', 1);
       insert.run(runId, 'tb2', 'tb1-c2', '2026-10-01T01:00:00Z', 1);
-    } finally { db.close(); }
+    } finally {
+      db.close();
+    }
     const store = new QuestionSyncStore(dbPath, { dataDir: directory });
     store.finishRun(runId, 'failed', { errors: 1 });
     store.close();
@@ -129,23 +157,39 @@ test('sealed coverage retains the root observation and only counts frozen scan t
       // Projections can change after sealing; the historic report cannot.
       late.prepare('UPDATE sync_run_catalog_progress SET failed_page_count=99 WHERE run_id=?').run(runId);
       assert.throws(() => late.prepare('UPDATE sync_runs SET scope_json=? WHERE id=?').run('{}', runId), /immutable/);
-    } finally { late.close(); }
-    assert.deepEqual(readRunSnapshotSummary(dbPath, runId, 'tb1', { sealedForImport: true }).coverage, summary.coverage);
-  } finally { fs.rmSync(directory, { recursive: true, force: true }); }
+    } finally {
+      late.close();
+    }
+    assert.deepEqual(
+      readRunSnapshotSummary(dbPath, runId, 'tb1', { sealedForImport: true }).coverage,
+      summary.coverage,
+    );
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test('legacy and truncated target declarations retain unknown coverage', () => {
   const { directory, dbPath } = temporaryDb('collector-coverage-legacy-');
   try {
-    const runId = seedRun(dbPath, { status: 'failed', scope: {
-      textbookId: 'tb1', coverageFormat: 'run-coverage-v1', textbookExpectedTotal: 0,
-      summaryStrategy: 'textbook_root_probe',
-      selectedCatalogCount: 501, scanCatalogIds: Array.from({ length: 501 }, (_, index) => `c-${index}`),
-    } });
+    const runId = seedRun(dbPath, {
+      status: 'failed',
+      scope: {
+        textbookId: 'tb1',
+        coverageFormat: 'run-coverage-v1',
+        textbookExpectedTotal: 0,
+        summaryStrategy: 'textbook_root_probe',
+        selectedCatalogCount: 501,
+        scanCatalogIds: Array.from({ length: 501 }, (_, index) => `c-${index}`),
+      },
+    });
     new QuestionSyncStore(dbPath, { dataDir: directory }).close();
     const db = new DatabaseSync(dbPath);
-    try { db.exec('ALTER TABLE sync_run_catalog_progress DROP COLUMN failed_page_count'); }
-    finally { db.close(); }
+    try {
+      db.exec('ALTER TABLE sync_run_catalog_progress DROP COLUMN failed_page_count');
+    } finally {
+      db.close();
+    }
     const coverage = readRunSnapshotSummary(dbPath, runId, 'tb1', { sealedForImport: true }).coverage;
     assert.equal(coverage.sourceReport.count, 0);
     assert.equal(coverage.sourceReport.observedAt, null); // No guessed start/finish time.
@@ -153,7 +197,9 @@ test('legacy and truncated target declarations retain unknown coverage', () => {
     assert.equal(coverage.scan.unscannedCatalogCount, null);
     assert.equal(coverage.scan.failedPageCount, null);
     assert.equal(coverage.scan.assetErrorCount, null);
-  } finally { fs.rmSync(directory, { recursive: true, force: true }); }
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test('new sealed coverage preserves exact large target counts without returning target arrays', () => {
@@ -161,12 +207,18 @@ test('new sealed coverage preserves exact large target counts without returning 
   try {
     const targets = Array.from({ length: 501 }, (_, index) => `c-${index}`);
     const store = new QuestionSyncStore(dbPath, { dataDir: directory });
-    const runId = store.beginRun({
-      textbookId: 'tb1', coverageFormat: 'run-coverage-v1', scanCatalogIds: targets,
-      selectedCatalogCount: 501, availableCatalogCount: 501,
-      // Caller-supplied historic evidence must never be inherited.
-      sealedCoverageEvidence: { collectorRunId: 999 },
-    }, { resume: false });
+    const runId = store.beginRun(
+      {
+        textbookId: 'tb1',
+        coverageFormat: 'run-coverage-v1',
+        scanCatalogIds: targets,
+        selectedCatalogCount: 501,
+        availableCatalogCount: 501,
+        // Caller-supplied historic evidence must never be inherited.
+        sealedCoverageEvidence: { collectorRunId: 999 },
+      },
+      { resume: false },
+    );
     assert.equal(JSON.parse(store.getRun(runId).scope_json).sealedCoverageEvidence, undefined);
     store.finishRun(runId, 'failed', { errors: 1 });
     store.close();
@@ -177,21 +229,30 @@ test('new sealed coverage preserves exact large target counts without returning 
     assert.equal(report.coverage.scan.unscannedCatalogCount, 501);
     assert.equal(report.coverage.scan.failedPageCount, 0);
     assert.equal(Object.hasOwn(report.coverage.scan, 'scanCatalogIds'), false);
-  } finally { fs.rmSync(directory, { recursive: true, force: true }); }
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test('legacy multi-book totals cannot masquerade as one book root observation', () => {
   const { directory, dbPath } = temporaryDb('collector-coverage-multi-');
   try {
-    const runId = seedRun(dbPath, { textbookIds: ['tb1', 'tb2'], scope: {
-      textbookIds: ['tb1', 'tb2'], textbookExpectedTotal: 40000,
-      summaryStrategy: 'textbook_root_probe', selectedCatalogCount: 2,
-    } });
+    const runId = seedRun(dbPath, {
+      textbookIds: ['tb1', 'tb2'],
+      scope: {
+        textbookIds: ['tb1', 'tb2'],
+        textbookExpectedTotal: 40000,
+        summaryStrategy: 'textbook_root_probe',
+        selectedCatalogCount: 2,
+      },
+    });
     const coverage = readRunSnapshotSummary(dbPath, runId, 'tb1').coverage;
     assert.equal(coverage.sourceReport.count, null);
     assert.equal(coverage.scan.selectedCatalogCount, null);
     assert.equal(coverage.scan.unscannedCatalogCount, null);
-  } finally { fs.rmSync(directory, { recursive: true, force: true }); }
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test('summary scope check finds row scopes omitted from the run declaration', () => {
@@ -217,32 +278,43 @@ function seedMetadata(dbPath, textbookIds = ['tb1', 'tb2']) {
   const store = new MetadataStore(dbPath);
   const runId = store.beginRun('https://zujuan.xkw.com/');
   const observedAt = new Date().toISOString();
-  store.saveVersionGroup({
-    externalVersionId: 'v1',
-    versionName: '测试版',
-    sourceUrl: 'https://zujuan.xkw.com/v1',
-    isNew: 'N',
-    sortOrder: 1,
-    raw: {},
-  }, textbookIds.map((externalTextbookId, index) => ({
-    externalTextbookId,
-    versionExternalId: 'v1',
-    textbookName: `教材 ${externalTextbookId}`,
-    grade: '九年级',
-    volume: '上册',
-    sourceUrl: `https://zujuan.xkw.com/${externalTextbookId}`,
-    sortOrder: index + 1,
-    bootstrapChapterExternalId: `${externalTextbookId}-c1`,
-    raw: {},
-  })), observedAt, runId);
-  store.finishRun(runId, 'success', {
-    versionsSeen: 1,
-    textbooksSeen: textbookIds.length,
-    inserted: textbookIds.length + 1,
-    updated: 0,
-    unchanged: 0,
-    errors: 0,
-  }, null, null);
+  store.saveVersionGroup(
+    {
+      externalVersionId: 'v1',
+      versionName: '测试版',
+      sourceUrl: 'https://zujuan.xkw.com/v1',
+      isNew: 'N',
+      sortOrder: 1,
+      raw: {},
+    },
+    textbookIds.map((externalTextbookId, index) => ({
+      externalTextbookId,
+      versionExternalId: 'v1',
+      textbookName: `教材 ${externalTextbookId}`,
+      grade: '九年级',
+      volume: '上册',
+      sourceUrl: `https://zujuan.xkw.com/${externalTextbookId}`,
+      sortOrder: index + 1,
+      bootstrapChapterExternalId: `${externalTextbookId}-c1`,
+      raw: {},
+    })),
+    observedAt,
+    runId,
+  );
+  store.finishRun(
+    runId,
+    'success',
+    {
+      versionsSeen: 1,
+      textbooksSeen: textbookIds.length,
+      inserted: textbookIds.length + 1,
+      updated: 0,
+      unchanged: 0,
+      errors: 0,
+    },
+    null,
+    null,
+  );
   store.close();
   return runId;
 }
@@ -251,24 +323,31 @@ test('连续元数据运行保留各自不可变的版本和教材快照', () =>
   const { directory, dbPath } = temporaryDb('collector-metadata-snapshot-');
   const store = new MetadataStore(dbPath);
   const save = (runId, versionName, textbookName, observedAt) => {
-    store.saveVersionGroup({
-      externalVersionId: 'v1',
-      versionName,
-      sourceUrl: 'https://zujuan.xkw.com/v1',
-      isNew: 'N',
-      sortOrder: 1,
-      raw: { versionName },
-    }, [{
-      externalTextbookId: 'tb1',
-      versionExternalId: 'v1',
-      textbookName,
-      grade: '九年级',
-      volume: '上册',
-      sourceUrl: 'https://zujuan.xkw.com/tb1',
-      sortOrder: 1,
-      bootstrapChapterExternalId: 'c1',
-      raw: { textbookName },
-    }], observedAt, runId);
+    store.saveVersionGroup(
+      {
+        externalVersionId: 'v1',
+        versionName,
+        sourceUrl: 'https://zujuan.xkw.com/v1',
+        isNew: 'N',
+        sortOrder: 1,
+        raw: { versionName },
+      },
+      [
+        {
+          externalTextbookId: 'tb1',
+          versionExternalId: 'v1',
+          textbookName,
+          grade: '九年级',
+          volume: '上册',
+          sourceUrl: 'https://zujuan.xkw.com/tb1',
+          sortOrder: 1,
+          bootstrapChapterExternalId: 'c1',
+          raw: { textbookName },
+        },
+      ],
+      observedAt,
+      runId,
+    );
   };
   const counters = {
     versionsSeen: 1,
@@ -297,10 +376,15 @@ test('连续元数据运行保留各自不可变的版本和教材快照', () =>
     assert.equal(validateMetadataSelection(dbPath, firstRunId, ['tb1']).textbooks[0].textbookName, '旧教材名');
 
     assert.throws(
-      () => store.db.prepare(`
+      () =>
+        store.db
+          .prepare(
+            `
         UPDATE source_metadata_run_textbooks SET textbook_name = '篡改'
         WHERE run_id = ? AND external_textbook_id = 'tb1'
-      `).run(firstRunId),
+      `,
+          )
+          .run(firstRunId),
       /immutable/i,
     );
     assert.throws(
@@ -318,31 +402,45 @@ function seedChildRun(dbPath, textbookId, status = 'success', { finish = true } 
   const runId = store.beginRun({ textbookId });
   const catalogId = `${textbookId}-c1`;
   const questionId = `${textbookId}-q1`;
-  store.saveRunCatalogTree(runId, textbookId, [{
-    externalId: catalogId,
-    level: 1,
-    name: `目录 ${textbookId}`,
-    path: `/${catalogId}`,
-  }]);
-  store.saveRunQuestion(runId, textbookId, {
-    externalId: questionId,
-    questionType: '单选题',
-    contentHtml: `<p>${textbookId}</p>`,
-    plainText: textbookId,
-  }, catalogId);
-  store.saveRunQuestionCatalogs(runId, textbookId, questionId, [{
-    externalId: catalogId,
-    level: 1,
-    name: `目录 ${textbookId}`,
-    path: `/${catalogId}`,
-  }]);
+  store.saveRunCatalogTree(runId, textbookId, [
+    {
+      externalId: catalogId,
+      level: 1,
+      name: `目录 ${textbookId}`,
+      path: `/${catalogId}`,
+    },
+  ]);
+  store.saveRunQuestion(
+    runId,
+    textbookId,
+    {
+      externalId: questionId,
+      questionType: '单选题',
+      contentHtml: `<p>${textbookId}</p>`,
+      plainText: textbookId,
+    },
+    catalogId,
+  );
+  store.saveRunQuestionCatalogs(runId, textbookId, questionId, [
+    {
+      externalId: catalogId,
+      level: 1,
+      name: `目录 ${textbookId}`,
+      path: `/${catalogId}`,
+    },
+  ]);
   if (finish) {
-    store.finishRun(runId, status, {
-      pagesOk: 2,
-      questionsSeen: 1,
-      questionsInserted: 1,
-      errors: status === 'success' ? 0 : 1,
-    }, status === 'success' ? null : `教材 ${textbookId} 采集失败`);
+    store.finishRun(
+      runId,
+      status,
+      {
+        pagesOk: 2,
+        questionsSeen: 1,
+        questionsInserted: 1,
+        errors: status === 'success' ? 0 : 1,
+      },
+      status === 'success' ? null : `教材 ${textbookId} 采集失败`,
+    );
   }
   store.close();
   return runId;
@@ -438,53 +536,48 @@ test('运行快照 schema 可从旧库增量升级，重复升级安全且终态
 
     const upgraded = new DatabaseSync(dbPath);
     assert.equal(upgraded.prepare('PRAGMA user_version').get().user_version & 6, 6);
-    assert.ok(upgraded.prepare("SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_sync_run_question_items_preview_types'").get());
-    const run = upgraded.prepare(
-      'SELECT status, snapshot_locked_at FROM sync_runs WHERE id = 1',
-    ).get();
+    assert.ok(
+      upgraded
+        .prepare("SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_sync_run_question_items_preview_types'")
+        .get(),
+    );
+    const run = upgraded.prepare('SELECT status, snapshot_locked_at FROM sync_runs WHERE id = 1').get();
     assert.equal(run.status, 'completed');
     assert.ok(run.snapshot_locked_at, '旧终态即使没有 finished_at 也应有锁标记');
-    const columns = new Set(upgraded.prepare(
-      'PRAGMA table_info(sync_run_question_items)',
-    ).all().map((row) => row.name));
+    const columns = new Set(
+      upgraded
+        .prepare('PRAGMA table_info(sync_run_question_items)')
+        .all()
+        .map((row) => row.name),
+    );
     assert.ok(columns.has('answer_html'));
     assert.ok(columns.has('analysis_html'));
     assert.ok(columns.has('answer_status'));
     assert.ok(columns.has('solution_html'));
     assert.ok(columns.has('raw_json'));
     assert.deepEqual(
-      upgraded.prepare(
-        "SELECT name FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'trg_sync_run_%' ORDER BY name",
-      ).all().map((row) => row.name).length,
+      upgraded
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'trg_sync_run_%' ORDER BY name")
+        .all()
+        .map((row) => row.name).length,
       10,
     );
-    assert.deepEqual(TERMINAL_RUN_STATUSES, [
-      'success', 'completed', 'failed', 'blocked', 'interrupted', 'cancelled',
-    ]);
-    assert.throws(
-      () => upgraded.exec("UPDATE sync_runs SET status = 'running' WHERE id = 1"),
-      /immutable/,
-    );
+    assert.deepEqual(TERMINAL_RUN_STATUSES, ['success', 'completed', 'failed', 'blocked', 'interrupted', 'cancelled']);
+    assert.throws(() => upgraded.exec("UPDATE sync_runs SET status = 'running' WHERE id = 1"), /immutable/);
     assert.throws(
       () => upgraded.exec("UPDATE sync_runs SET message = '篡改统计' WHERE id = 1"),
       /immutable/,
       '终态运行的统计/消息字段也不能绕过锁保护',
     );
+    assert.throws(() => upgraded.exec("UPDATE sync_run_catalog_items SET name = '篡改' WHERE run_id = 1"), /immutable/);
     assert.throws(
-      () => upgraded.exec(
-        "UPDATE sync_run_catalog_items SET name = '篡改' WHERE run_id = 1",
-      ),
-      /immutable/,
-    );
-    assert.throws(
-      () => upgraded.exec(
-        "UPDATE sync_run_catalog_items SET run_id = 2 WHERE run_id = 1",
-      ),
+      () => upgraded.exec('UPDATE sync_run_catalog_items SET run_id = 2 WHERE run_id = 1'),
       /immutable/,
       '不能通过把终态行改挂到运行中 run 来绕过写保护',
     );
     assert.throws(
-      () => upgraded.exec(`
+      () =>
+        upgraded.exec(`
         INSERT INTO sync_run_question_items (
           run_id, provider, textbook_external_id, question_external_id,
           content_html, plain_text, question_type
@@ -507,20 +600,16 @@ test('interrupted 是不可变不完整终态，但明确 allowIncomplete 时只
       textbookIds: ['tb-interrupted'],
     });
     const store = new SyncStore(dbPath);
-    assert.throws(
-      () => store.db.prepare("UPDATE sync_runs SET message = '篡改' WHERE id = ?").run(runId),
-      /immutable/,
-    );
+    assert.throws(() => store.db.prepare("UPDATE sync_runs SET message = '篡改' WHERE id = ?").run(runId), /immutable/);
     store.close();
     assert.throws(
       () => readRunSnapshotSummary(dbPath, runId, 'tb-interrupted'),
       (error) => error.code === 'snapshot_unavailable',
     );
-    const partial = readRunSnapshotSummary(
-      dbPath,
-      runId,
-      { textbookExternalId: 'tb-interrupted', allowIncomplete: true },
-    );
+    const partial = readRunSnapshotSummary(dbPath, runId, {
+      textbookExternalId: 'tb-interrupted',
+      allowIncomplete: true,
+    });
     assert.equal(partial.status, 'interrupted');
     assert.equal(partial.snapshotComplete, false);
     assert.ok(partial.counts.questionItemCount > 0);
@@ -542,9 +631,17 @@ test('采集中题目预览使用实时行数，不能复用尚未更新的运�
     const options = { textbookExternalId: 'tb1', selection: 'included' };
     assert.equal(readRunQuestions(dbPath, runId, options).total, 1);
     const store = new SyncStore(dbPath);
-    store.saveRunQuestion(runId, 'tb1', {
-      externalId: 'q-new', questionType: '填空题', plainText: '新题', contentHtml: '<p>新题</p>',
-    }, 'tb1-c1');
+    store.saveRunQuestion(
+      runId,
+      'tb1',
+      {
+        externalId: 'q-new',
+        questionType: '填空题',
+        plainText: '新题',
+        contentHtml: '<p>新题</p>',
+      },
+      'tb1-c1',
+    );
     store.close();
     const result = readRunQuestions(dbPath, runId, options);
     assert.equal(result.total, 2);
@@ -597,11 +694,23 @@ test('运行目录/题目快照服务端分页、筛选和题目详情保持教�
     assert.equal(filtered.total, 1);
     assert.equal(filtered.rows[0].externalTextbookId, 'tb2');
     assert.equal(filtered.rows[0].externalQuestionId, 'q-shared');
-    const selection = readRunQuestions(dbPath, runId, { textbookExternalId: 'tb2', excludedIds: ['q-shared'], selection: 'included' });
+    const selection = readRunQuestions(dbPath, runId, {
+      textbookExternalId: 'tb2',
+      excludedIds: ['q-shared'],
+      selection: 'included',
+    });
     assert.equal(selection.total, 0);
     assert.equal(selection.summary.excluded, 1);
-    assert.equal(readRunQuestions(dbPath, runId, { textbookExternalId: 'tb2', excludedIds: ['q-shared'], selection: 'excluded' }).total, 1);
-    assert.equal(readRunCatalogs(dbPath, runId, { textbookExternalId: 'tb2', excludedIds: ['q-shared'] }).rows[0].excludedQuestionCount, 1);
+    assert.equal(
+      readRunQuestions(dbPath, runId, { textbookExternalId: 'tb2', excludedIds: ['q-shared'], selection: 'excluded' })
+        .total,
+      1,
+    );
+    assert.equal(
+      readRunCatalogs(dbPath, runId, { textbookExternalId: 'tb2', excludedIds: ['q-shared'] }).rows[0]
+        .excludedQuestionCount,
+      1,
+    );
 
     assert.throws(
       () => readRunQuestion(dbPath, runId, 'q-shared'),
@@ -616,18 +725,9 @@ test('运行目录/题目快照服务端分页、筛选和题目详情保持教�
     assert.equal(Object.hasOwn(detail.item, 'analysisHtml'), false);
     assert.equal(detail.item.catalogs.length, 1);
 
-    assert.throws(
-      () => readRunQuestion(dbPath, runId, '9'.repeat(65)),
-      /格式不安全/,
-    );
-    assert.throws(
-      () => readRunQuestions(dbPath, runId, { questionType: 'x'.repeat(81) }),
-      /格式不安全/,
-    );
-    assert.throws(
-      () => readRunQuestions(dbPath, runId, { keyword: 'x'.repeat(121) }),
-      /格式不安全/,
-    );
+    assert.throws(() => readRunQuestion(dbPath, runId, '9'.repeat(65)), /格式不安全/);
+    assert.throws(() => readRunQuestions(dbPath, runId, { questionType: 'x'.repeat(81) }), /格式不安全/);
+    assert.throws(() => readRunQuestions(dbPath, runId, { keyword: 'x'.repeat(121) }), /格式不安全/);
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }
@@ -644,53 +744,68 @@ test('完整题库快照 API 返回五类不可变数据且计数与教材 scope
   });
   const catalogId = 'tb1-c1';
   const questionId = 'tb1-q1';
-  store.saveRunCatalogTree(runId, 'tb1', [{
-    externalId: catalogId,
-    level: 1,
-    type: 'chapter',
-    name: '第一章',
-    path: '/第一章',
-  }]);
-  store.saveRunQuestion(runId, 'tb1', {
-    externalId: questionId,
-    questionType: '单选题',
-    contentHtml: '<p>题干</p>',
-    plainText: '题干',
-    detailFetched: true,
-    assets: [{
-      url: 'https://assets.example/tb1-q1.png',
-      type: 'image',
+  store.saveRunCatalogTree(runId, 'tb1', [
+    {
+      externalId: catalogId,
+      level: 1,
+      type: 'chapter',
+      name: '第一章',
+      path: '/第一章',
+    },
+  ]);
+  store.saveRunQuestion(
+    runId,
+    'tb1',
+    {
+      externalId: questionId,
+      questionType: '单选题',
+      contentHtml: '<p>题干</p>',
+      plainText: '题干',
+      detailFetched: true,
+      assets: [
+        {
+          url: 'https://assets.example/tb1-q1.png',
+          type: 'image',
+          assetKey: 'image-1',
+          localPath: 'assets/tb1-q1.png',
+          sha256: 'a'.repeat(64),
+          mimeType: 'image/png',
+          byteSize: 10,
+        },
+      ],
+      providerLabels: [{ dimension: 'provider_tag', value: '同步题' }],
+    },
+    catalogId,
+  );
+  store.saveRunQuestionCatalogs(runId, 'tb1', questionId, [
+    {
+      externalId: catalogId,
+      level: 1,
+      name: '第一章',
+      path: '/第一章',
+    },
+  ]);
+  store.saveRunQuestionTags(runId, 'tb1', questionId, [
+    {
+      dimension: 'knowledge',
+      tagExternalId: 'k-1',
+      tagValue: '知识点',
+      relationType: 'knowledge',
+      evidenceType: 'provider_asserted',
+      queryFingerprint: 'provider',
+    },
+  ]);
+  store.saveRunQuestionAssets(runId, 'tb1', questionId, [
+    {
       assetKey: 'image-1',
+      assetType: 'image',
+      url: 'https://assets.example/tb1-q1.png',
       localPath: 'assets/tb1-q1.png',
       sha256: 'a'.repeat(64),
       mimeType: 'image/png',
       byteSize: 10,
-    }],
-    providerLabels: [{ dimension: 'provider_tag', value: '同步题' }],
-  }, catalogId);
-  store.saveRunQuestionCatalogs(runId, 'tb1', questionId, [{
-    externalId: catalogId,
-    level: 1,
-    name: '第一章',
-    path: '/第一章',
-  }]);
-  store.saveRunQuestionTags(runId, 'tb1', questionId, [{
-    dimension: 'knowledge',
-    tagExternalId: 'k-1',
-    tagValue: '知识点',
-    relationType: 'knowledge',
-    evidenceType: 'provider_asserted',
-    queryFingerprint: 'provider',
-  }]);
-  store.saveRunQuestionAssets(runId, 'tb1', questionId, [{
-    assetKey: 'image-1',
-    assetType: 'image',
-    url: 'https://assets.example/tb1-q1.png',
-    localPath: 'assets/tb1-q1.png',
-    sha256: 'a'.repeat(64),
-    mimeType: 'image/png',
-    byteSize: 10,
-  }]);
+    },
+  ]);
   store.finishRun(runId, 'success', {
     pagesOk: 1,
     questionsSeen: 1,
@@ -733,9 +848,7 @@ test('完整题库快照 API 返回五类不可变数据且计数与教材 scope
       assert.ok(body.tags.some((tag) => tag.tagValue === '知识点'));
       assert.equal(body.assets[0].assetKey, 'image-1');
 
-      const summaryResponse = await fetch(
-        `${baseUrl}/v1/runs/${runId}/snapshot-summary?textbookExternalId=tb1`,
-      );
+      const summaryResponse = await fetch(`${baseUrl}/v1/runs/${runId}/snapshot-summary?textbookExternalId=tb1`);
       assert.equal(summaryResponse.status, 200);
       const summaryBody = await summaryResponse.json();
       assert.equal(summaryBody.snapshotComplete, true);
@@ -773,10 +886,12 @@ test('完整题库快照 API 拒绝与 sync_runs 声明计数不一致的快照'
     // exercised independently of SQLite's write guard.
     const db = new DatabaseSync(dbPath);
     db.exec('DROP TRIGGER trg_sync_runs_no_reopen');
-    db.prepare(`
+    db.prepare(
+      `
       UPDATE sync_runs SET question_item_count = question_item_count + 1
       WHERE id = ?
-    `).run(runId);
+    `,
+    ).run(runId);
     db.close();
 
     assert.throws(
@@ -853,10 +968,7 @@ test('运行快照 API 认证、分页边界、404/409 错误契约稳定', asyn
     assert.equal(unauthorized.status, 401);
 
     const headers = { authorization: 'Bearer snapshot-token' };
-    const pageResponse = await fetch(
-      `${baseUrl}/v1/runs/${runId}/catalogs?page=2&pageSize=1`,
-      { headers },
-    );
+    const pageResponse = await fetch(`${baseUrl}/v1/runs/${runId}/catalogs?page=2&pageSize=1`, { headers });
     assert.equal(pageResponse.status, 200);
     const page = await pageResponse.json();
     assert.equal(page.total, 2);
@@ -864,10 +976,7 @@ test('运行快照 API 认证、分页边界、404/409 错误契约稳定', asyn
     assert.equal(page.rows.length, 1);
     assert.equal(page.rows[0].externalTextbookId, 'tb2');
 
-    const invalidPage = await fetch(
-      `${baseUrl}/v1/runs/${runId}/questions?page=0`,
-      { headers },
-    );
+    const invalidPage = await fetch(`${baseUrl}/v1/runs/${runId}/questions?page=0`, { headers });
     assert.equal(invalidPage.status, 400);
     assert.equal((await invalidPage.json()).error.code, 'bad_request');
 
@@ -875,10 +984,7 @@ test('运行快照 API 认证、分页边界、404/409 错误契约稳定', asyn
     assert.equal(missingRun.status, 404);
     assert.equal((await missingRun.json()).error.code, 'run_not_found');
 
-    const ambiguous = await fetch(
-      `${baseUrl}/v1/runs/${runId}/questions/q-shared`,
-      { headers },
-    );
+    const ambiguous = await fetch(`${baseUrl}/v1/runs/${runId}/questions/q-shared`, { headers });
     assert.equal(ambiguous.status, 409);
     assert.equal((await ambiguous.json()).error.code, 'question_ambiguous');
   } finally {
@@ -911,16 +1017,17 @@ test('多教材 content job 为每本教材绑定独立 run、统计、时间和
       textbookExternalIds: ['tb1', 'tb2'],
       maxPages: 1,
     });
-    await waitFor(() => ['completed', 'failed', 'blocked', 'cancelled'].includes(
-      manager.get(started.id)?.status,
-    ));
+    await waitFor(() => ['completed', 'failed', 'blocked', 'cancelled'].includes(manager.get(started.id)?.status));
     const job = manager.get(started.id);
     assert.equal(job.status, 'completed');
     assert.equal(job.completedTextbooks, 2);
     assert.equal(job.catalogCount, 2);
     assert.equal(job.questionCount, 2);
     assert.equal(job.scopeItems.length, 2);
-    assert.deepEqual(job.scopeItems.map((scope) => scope.status), ['completed', 'completed']);
+    assert.deepEqual(
+      job.scopeItems.map((scope) => scope.status),
+      ['completed', 'completed'],
+    );
     assert.deepEqual(job.scopeItems.map((scope) => scope.collectorRunId).length, 2);
     assert.notEqual(job.scopeItems[0].collectorRunId, job.scopeItems[1].collectorRunId);
     assert.equal(sawVisibleSolutionsFlag, false);
@@ -964,9 +1071,7 @@ test('多教材 content job 在单本失败时保留已完成 scope 并标记失
       textbookExternalIds: ['tb1', 'tb2'],
       maxPages: 1,
     });
-    await waitFor(() => ['completed', 'failed', 'blocked', 'cancelled'].includes(
-      manager.get(started.id)?.status,
-    ));
+    await waitFor(() => ['completed', 'failed', 'blocked', 'cancelled'].includes(manager.get(started.id)?.status));
     const job = manager.get(started.id);
     assert.equal(job.status, 'failed');
     assert.equal(job.completedTextbooks, 1);
@@ -1002,9 +1107,9 @@ test('子进程异常退出时会封存仍为 running 的底层 content run', as
     });
     await waitFor(() => manager.get(started.id)?.status === 'failed');
     const db = new DatabaseSync(dbPath, { readOnly: true });
-    const run = db.prepare(
-      'SELECT status, finished_at, snapshot_locked_at FROM sync_runs WHERE id = ?',
-    ).get(orphanRunId);
+    const run = db
+      .prepare('SELECT status, finished_at, snapshot_locked_at FROM sync_runs WHERE id = ?')
+      .get(orphanRunId);
     db.close();
     assert.equal(run.status, 'failed');
     assert.ok(run.finished_at);
@@ -1067,8 +1172,5 @@ test('COLLECTOR_HEADFUL 只由部署配置读取，不接受任务请求覆盖',
     else process.env.COLLECTOR_HEADFUL = previous;
     fs.rmSync(directory, { recursive: true, force: true });
   }
-  assert.throws(
-    () => new CollectorJobManager({ dbPath, headful: 'maybe' }),
-    /COLLECTOR_HEADFUL 必须是 true\/false/,
-  );
+  assert.throws(() => new CollectorJobManager({ dbPath, headful: 'maybe' }), /COLLECTOR_HEADFUL 必须是 true\/false/);
 });

@@ -54,22 +54,27 @@ const { createHash } = require('node:crypto');
 
 function isAbsoluteStoragePath(value) {
   const text = String(value || '');
-  return path.isAbsolute(text)
-    || path.posix.isAbsolute(text)
-    || path.win32.isAbsolute(text)
+  return (
+    path.isAbsolute(text) ||
+    path.posix.isAbsolute(text) ||
+    path.win32.isAbsolute(text) ||
     // Reject drive-relative spellings (`C:foo`) too; they are not absolute
     // on Windows but can escape the intended drive when resolved there.
-    || /^[A-Za-z]:/.test(text)
-    || /^\\\\/.test(text);
+    /^[A-Za-z]:/.test(text) ||
+    /^\\\\/.test(text)
+  );
 }
 
 function resolveAssetFile(dataDir, storagePath) {
   if (typeof dataDir !== 'string' || !dataDir.trim()) {
     throw httpError('collector 素材目录未配置', 503, 'asset_unavailable');
   }
-  if (typeof storagePath !== 'string' || !storagePath.trim()
-    || /[\u0000-\u001f\u007f]/.test(storagePath)
-    || isAbsoluteStoragePath(storagePath)) {
+  if (
+    typeof storagePath !== 'string' ||
+    !storagePath.trim() ||
+    /[\u0000-\u001f\u007f]/.test(storagePath) ||
+    isAbsoluteStoragePath(storagePath)
+  ) {
     throw httpError('素材存储路径不安全', 404, 'asset_not_found');
   }
   // Collector paths are persisted as POSIX-style relative paths.  Treat a
@@ -94,8 +99,13 @@ function resolveAssetFile(dataDir, storagePath) {
     candidateReal = fs.realpathSync.native(candidate);
     stat = fs.statSync(candidateReal);
     const realRelative = path.relative(rootReal, candidateReal);
-    if (!realRelative || realRelative === '..' || realRelative.startsWith(`..${path.sep}`)
-      || path.isAbsolute(realRelative) || !stat.isFile()) {
+    if (
+      !realRelative ||
+      realRelative === '..' ||
+      realRelative.startsWith(`..${path.sep}`) ||
+      path.isAbsolute(realRelative) ||
+      !stat.isFile()
+    ) {
       throw new Error('asset path outside root');
     }
   } catch (error) {
@@ -130,7 +140,9 @@ function sha256File(filePath, { keepOpen = false } = {}) {
     return result;
   } finally {
     if (!retained) {
-      try { if (descriptor != null) fs.closeSync(descriptor); } catch {}
+      try {
+        if (descriptor != null) fs.closeSync(descriptor);
+      } catch {}
     }
   }
 }
@@ -142,7 +154,11 @@ function safeAssetMimeType(value) {
   }
   // Keep the value suitable for a Node response header.  Unknown but
   // syntactically harmless media types are still useful to clients.
-  if (!/^[A-Za-z0-9][A-Za-z0-9!#$&^_.+*-]*\/[A-Za-z0-9][A-Za-z0-9!#$&^_.+*-]*(?:\s*;\s*[A-Za-z0-9_-]+=[^\r\n;]+)*$/.test(text)) {
+  if (
+    !/^[A-Za-z0-9][A-Za-z0-9!#$&^_.+*-]*\/[A-Za-z0-9][A-Za-z0-9!#$&^_.+*-]*(?:\s*;\s*[A-Za-z0-9_-]+=[^\r\n;]+)*$/.test(
+      text,
+    )
+  ) {
     return 'application/octet-stream';
   }
   return text;
@@ -156,17 +172,12 @@ function safeAssetMimeType(value) {
  * prevents a path replacement between hashing and HTTP streaming.
  */
 function readRunAsset(dbPath, runId, contentSha256, options = {}) {
-  const suppliedHash = typeof contentSha256 === 'string'
-    ? contentSha256.trim()
-    : String(contentSha256 ?? '').trim();
+  const suppliedHash = typeof contentSha256 === 'string' ? contentSha256.trim() : String(contentSha256 ?? '').trim();
   if (!ASSET_SHA256.test(suppliedHash)) {
     throw httpError('contentSha256 必须是 64 位十六进制 SHA-256');
   }
   const digest = suppliedHash.toLowerCase();
-  const requestedTextbookId = optionalExternalId(
-    options?.textbookExternalId,
-    'textbookExternalId',
-  );
+  const requestedTextbookId = optionalExternalId(options?.textbookExternalId, 'textbookExternalId');
   const dataDir = options?.dataDir;
 
   const db = openReadOnly(dbPath);
@@ -176,12 +187,13 @@ function readRunAsset(dbPath, runId, contentSha256, options = {}) {
     assertSnapshotTables(db, { all: true });
     assertApplyableSnapshotRun(db, run, { sealedForImport: options.sealedForImport === true });
     const { textbookExternalId } = resolveSnapshotTextbook(db, run, requestedTextbookId);
-    const hashValues = digest === digest.toUpperCase()
-      ? [digest]
-      : [digest, digest.toUpperCase()];
-    const assetIndexes = new Set(db.prepare(
-      `PRAGMA index_list("sync_run_question_assets")`,
-    ).all().map((index) => String(index.name)));
+    const hashValues = digest === digest.toUpperCase() ? [digest] : [digest, digest.toUpperCase()];
+    const assetIndexes = new Set(
+      db
+        .prepare(`PRAGMA index_list("sync_run_question_assets")`)
+        .all()
+        .map((index) => String(index.name)),
+    );
     // The composite index is installed by ensureRunSnapshotSchema.  Keep the
     // fallback for callers reading a legacy DB directly, while making the
     // production path deterministic even when SQLite's cost estimates prefer
@@ -189,25 +201,26 @@ function readRunAsset(dbPath, runId, contentSha256, options = {}) {
     const assetIndexHint = assetIndexes.has('idx_sync_run_question_assets_scope_hash')
       ? ' INDEXED BY idx_sync_run_question_assets_scope_hash'
       : '';
-    const row = db.prepare(`
+    const row = db
+      .prepare(
+        `
       SELECT question_external_id, asset_key, asset_type, source_url,
              content_sha256, storage_path, mime_type, byte_size,
-             ${tableColumns(db, 'sync_run_question_assets').has('observed_at')
-               ? 'observed_at' : 'NULL'} AS observed_at
+             ${tableColumns(db, 'sync_run_question_assets').has('observed_at') ? 'observed_at' : 'NULL'} AS observed_at
       FROM sync_run_question_assets${assetIndexHint}
       WHERE run_id = ? AND provider = ? AND textbook_external_id = ?
         AND content_sha256 IN (${hashValues.map(() => '?').join(', ')})
       ORDER BY question_external_id ASC, asset_key ASC, storage_path ASC
       LIMIT 1
-    `).get(run.id, PROVIDER, textbookExternalId, ...hashValues);
+    `,
+      )
+      .get(run.id, PROVIDER, textbookExternalId, ...hashValues);
     if (!row) {
       throw httpError('指定素材不存在', 404, 'asset_not_found');
     }
 
-    const declaredSize = row.byte_size == null || row.byte_size === ''
-      ? null : Number(row.byte_size);
-    if (declaredSize != null
-      && (!Number.isSafeInteger(declaredSize) || declaredSize < 0)) {
+    const declaredSize = row.byte_size == null || row.byte_size === '' ? null : Number(row.byte_size);
+    if (declaredSize != null && (!Number.isSafeInteger(declaredSize) || declaredSize < 0)) {
       throw httpError('素材大小元数据无效', 409, 'asset_unavailable');
     }
     if (declaredSize != null && declaredSize > MAX_ASSET_BYTES) {
@@ -231,7 +244,9 @@ function readRunAsset(dbPath, runId, contentSha256, options = {}) {
         throw httpError('素材文件内容摘要不匹配', 409, 'asset_integrity_error');
       }
     } catch (error) {
-      try { if (verifiedDescriptor != null) fs.closeSync(verifiedDescriptor); } catch {}
+      try {
+        if (verifiedDescriptor != null) fs.closeSync(verifiedDescriptor);
+      } catch {}
       if (error?.statusCode) throw error;
       throw httpError('素材文件不可用', 404, 'asset_not_found');
     }

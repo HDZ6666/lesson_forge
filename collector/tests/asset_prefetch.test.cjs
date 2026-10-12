@@ -66,19 +66,20 @@ test('素材预取：磁盘存储错误是致命错误，原样抛出并停止�
   const cache = new Map();
   let calls = 0;
   await assert.rejects(
-    () => prefetchAssets(
-      Array.from({ length: 10 }, (_, index) => ({ sourceUrl: `https://staticzujuan.xkw.com/${index}.png` })),
-      {
-        concurrency: 1,
-        cache,
-        download: async () => {
-          calls += 1;
-          const error = new Error('磁盘写入失败');
-          error.code = 'asset_storage_error';
-          throw error;
+    () =>
+      prefetchAssets(
+        Array.from({ length: 10 }, (_, index) => ({ sourceUrl: `https://staticzujuan.xkw.com/${index}.png` })),
+        {
+          concurrency: 1,
+          cache,
+          download: async () => {
+            calls += 1;
+            const error = new Error('磁盘写入失败');
+            error.code = 'asset_storage_error';
+            throw error;
+          },
         },
-      },
-    ),
+      ),
     (error) => error.code === 'asset_storage_error',
   );
   assert.equal(calls, 1, '第一个致命错误后不再继续下载');
@@ -88,7 +89,10 @@ test('素材预取：磁盘存储错误是致命错误，原样抛出并停止�
 test('CLI：--asset-concurrency 默认 8、可配置、超过上限拒绝', () => {
   assert.equal(parseArgs(['--textbook-id', '260617']).assetConcurrency, 8);
   assert.equal(parseArgs(['--textbook-id', '260617', '--asset-concurrency', '16']).assetConcurrency, 16);
-  assert.throws(() => parseArgs(['--textbook-id', '260617', '--asset-concurrency', '64']), /asset-concurrency 不能超过 32/);
+  assert.throws(
+    () => parseArgs(['--textbook-id', '260617', '--asset-concurrency', '64']),
+    /asset-concurrency 不能超过 32/,
+  );
 });
 
 test('服务端：部署环境变量决定采集节奏参数并透传给子进程，请求体不能覆盖', async () => {
@@ -110,7 +114,11 @@ test('服务端：部署环境变量决定采集节奏参数并透传给子进�
       child.stderr = new PassThrough();
       child.pid = 2147483647;
       child.kill = () => true;
-      queueMicrotask(() => { child.stdout.end(); child.stderr.end(); child.emit('close', 1, null); });
+      queueMicrotask(() => {
+        child.stdout.end();
+        child.stderr.end();
+        child.emit('close', 1, null);
+      });
       return child;
     },
   });
@@ -120,12 +128,19 @@ test('服务端：部署环境变量决定采集节奏参数并透传给子进�
       acknowledgeSourcePolicy: true,
       maxPages: 1,
       textbookExternalIds: ['tb1'],
-      textbookScopes: [{
-        sourceProvider: 'zujuan', externalVersionId: 'v1', externalTextbookId: 'tb1',
-        versionName: '测试版', textbookName: '教材 tb1',
-        // A request must not be able to raise pressure on the source.
-        concurrency: 16, assetConcurrency: 32, delayMin: 0,
-      }],
+      textbookScopes: [
+        {
+          sourceProvider: 'zujuan',
+          externalVersionId: 'v1',
+          externalTextbookId: 'tb1',
+          versionName: '测试版',
+          textbookName: '教材 tb1',
+          // A request must not be able to raise pressure on the source.
+          concurrency: 16,
+          assetConcurrency: 32,
+          delayMin: 0,
+        },
+      ],
     });
     const deadline = Date.now() + 3000;
     while (Date.now() < deadline && !['failed', 'blocked'].includes(manager.get(started.id)?.status)) {
@@ -146,7 +161,13 @@ test('服务端：部署环境变量决定采集节奏参数并透传给子进�
     /COLLECTOR_LIST_CONCURRENCY/,
   );
   assert.throws(
-    () => new CollectorJobManager({ dbPath: path.join(os.tmpdir(), 'x.sqlite3'), delayMinMs: '5000', delayMaxMs: '1000', store: null }),
+    () =>
+      new CollectorJobManager({
+        dbPath: path.join(os.tmpdir(), 'x.sqlite3'),
+        delayMinMs: '5000',
+        delayMaxMs: '1000',
+        store: null,
+      }),
     /COLLECTOR_DELAY_MAX_MS 不能小于/,
   );
 });
@@ -158,7 +179,10 @@ test('服务端：未配置节奏变量时不向子进程传任何节奏参数�
     dbPath: path.join(directory, 'collector.sqlite3'),
     // Explicitly model an unconfigured deployment, regardless of the test
     // runner's real operator settings.
-    listConcurrency: '', assetConcurrency: '', delayMinMs: '', delayMaxMs: '',
+    listConcurrency: '',
+    assetConcurrency: '',
+    delayMinMs: '',
+    delayMaxMs: '',
     spawnImpl(_node, args) {
       seenArgs = args;
       const { EventEmitter } = require('node:events');
@@ -168,15 +192,29 @@ test('服务端：未配置节奏变量时不向子进程传任何节奏参数�
       child.stderr = new PassThrough();
       child.pid = 2147483647;
       child.kill = () => true;
-      queueMicrotask(() => { child.stdout.end(); child.stderr.end(); child.emit('close', 1, null); });
+      queueMicrotask(() => {
+        child.stdout.end();
+        child.stderr.end();
+        child.emit('close', 1, null);
+      });
       return child;
     },
   });
   try {
     const started = manager.start({
-      runType: 'content', acknowledgeSourcePolicy: true, maxPages: 1,
+      runType: 'content',
+      acknowledgeSourcePolicy: true,
+      maxPages: 1,
       textbookExternalIds: ['tb1'],
-      textbookScopes: [{ sourceProvider: 'zujuan', externalVersionId: 'v1', externalTextbookId: 'tb1', versionName: '测试版', textbookName: '教材 tb1' }],
+      textbookScopes: [
+        {
+          sourceProvider: 'zujuan',
+          externalVersionId: 'v1',
+          externalTextbookId: 'tb1',
+          versionName: '测试版',
+          textbookName: '教材 tb1',
+        },
+      ],
     });
     const deadline = Date.now() + 3000;
     while (Date.now() < deadline && !['failed', 'blocked'].includes(manager.get(started.id)?.status)) await sleep(10);

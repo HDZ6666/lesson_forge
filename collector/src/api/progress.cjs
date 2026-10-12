@@ -65,14 +65,10 @@ function aggregateLiveProgress(scopeRecords, liveScopeValues, fallback = null) {
         continue;
       }
       const total = finiteNonnegative(
-        projection.totalQuestionCount
-          ?? projection.expectedQuestionCount
-          ?? projection.textbookExpectedTotal,
+        projection.totalQuestionCount ?? projection.expectedQuestionCount ?? projection.textbookExpectedTotal,
       );
       const collected = finiteNonnegative(
-        projection.collectedQuestionCount
-          ?? projection.uniqueQuestionCount
-          ?? projection.listSeenCount,
+        projection.collectedQuestionCount ?? projection.uniqueQuestionCount ?? projection.listSeenCount,
       );
       if (total != null) {
         add(total > 0 ? (collected == null ? 0 : (collected / total) * 100) : 100, total > 0 ? total : 1);
@@ -142,17 +138,19 @@ function liveProjectionRequests(scopes) {
 async function publicJobAsync(job, readLive) {
   const requests = liveProjectionRequests(job.scopeItems || []);
   const liveProjections = new Map();
-  await Promise.all(requests.map(async (request) => {
-    try {
-      const projection = await readLive(request.collectorRunId, {
-        textbookExternalId: request.textbookExternalId,
-        maxNodes: request.maxNodes,
-      });
-      if (projection) liveProjections.set(request.collectorRunId, projection);
-    } catch {
-      // best effort, as in publicJob
-    }
-  }));
+  await Promise.all(
+    requests.map(async (request) => {
+      try {
+        const projection = await readLive(request.collectorRunId, {
+          textbookExternalId: request.textbookExternalId,
+          maxNodes: request.maxNodes,
+        });
+        if (projection) liveProjections.set(request.collectorRunId, projection);
+      } catch {
+        // best effort, as in publicJob
+      }
+    }),
+  );
   return publicJob(job, { liveProjections });
 }
 
@@ -164,8 +162,7 @@ function publicJob(job, options = {}) {
     versionName: scope.versionName || null,
     textbookName: scope.textbookName,
     bootstrapChapterExternalId: scope.bootstrapChapterExternalId || null,
-    resumeFromCollectorRunId: scope.resumeFromCollectorRunId == null
-      ? null : Number(scope.resumeFromCollectorRunId),
+    resumeFromCollectorRunId: scope.resumeFromCollectorRunId == null ? null : Number(scope.resumeFromCollectorRunId),
     collectorRunId: scope.collectorRunId == null ? null : Number(scope.collectorRunId),
     status: scope.status,
     catalogCount: Number(scope.catalogCount || 0),
@@ -195,13 +192,14 @@ function publicJob(job, options = {}) {
     startedAt: scope.startedAt || null,
     finishedAt: scope.finishedAt || null,
   }));
-  const primaryScope = scopeRecords.find((scope) => (
-    job.currentTextbookId != null
-      && String(scope.externalTextbookId) === String(job.currentTextbookId)
-  )) || scopeRecords.find((scope) => ['running', 'cancelling'].includes(scope.status))
-    || scopeRecords.find((scope) => scope.collectorRunId != null)
-    || scopeRecords[0]
-    || null;
+  const primaryScope =
+    scopeRecords.find(
+      (scope) => job.currentTextbookId != null && String(scope.externalTextbookId) === String(job.currentTextbookId),
+    ) ||
+    scopeRecords.find((scope) => ['running', 'cancelling'].includes(scope.status)) ||
+    scopeRecords.find((scope) => scope.collectorRunId != null) ||
+    scopeRecords[0] ||
+    null;
   const liveByScope = {};
   const liveScopeValues = new Map();
   for (const request of liveProjectionRequests(scopeRecords)) {
@@ -233,14 +231,13 @@ function publicJob(job, options = {}) {
     ? liveScopeValues.get(String(primaryScope.externalTextbookId || primaryScope.collectorRunId)) || null
     : null;
   const liveAggregate = aggregateLiveProgress(scopeRecords, liveScopeValues, job.progressPercent);
-  const progressPercent = liveAggregate.available
-    ? liveAggregate.progressPercent
-    : job.progressPercent;
-  const collectorRunId = job.collectorRunId != null
-    ? Number(job.collectorRunId)
-    : (scopes.length === 1 && scopes[0].collectorRunId != null
-      ? scopes[0].collectorRunId
-      : null);
+  const progressPercent = liveAggregate.available ? liveAggregate.progressPercent : job.progressPercent;
+  const collectorRunId =
+    job.collectorRunId != null
+      ? Number(job.collectorRunId)
+      : scopes.length === 1 && scopes[0].collectorRunId != null
+        ? scopes[0].collectorRunId
+        : null;
   return {
     id: job.id,
     runType: job.runType,

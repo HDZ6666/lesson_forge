@@ -42,9 +42,7 @@ function summarizeCompleteness({ scanReasons = [], dataReasons = [], counts = {}
 function resolveFinalRunState(status, completeness) {
   const wantsSuccess = ['success', 'completed'].includes(String(status));
   const scanComplete = Boolean(completeness?.scanComplete);
-  const dataComplete = Boolean(completeness?.complete) || (
-    scanComplete && completeness?.dataComplete === true
-  );
+  const dataComplete = Boolean(completeness?.complete) || (scanComplete && completeness?.dataComplete === true);
   let effectiveStatus;
   if (!wantsSuccess) effectiveStatus = String(status);
   else if (scanComplete) effectiveStatus = String(status);
