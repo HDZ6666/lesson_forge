@@ -10,21 +10,28 @@
  *   node tests/tools/scan_undeclared.cjs [file ...]
  *
  * Defaults to every .cjs under src/, lib/ and the root entry scripts.  Uses
- * pc/node_modules/acorn (dev-only, not a collector dependency); exits 2 when
- * the parser is unavailable so CI can distinguish "skipped" from "clean".
+ * the collector's own devDependency acorn, falling back to pc/node_modules;
+ * exits 2 when the parser is unavailable so CI can distinguish "skipped"
+ * from "clean".
  */
 
 const fs = require('node:fs');
 const path = require('node:path');
 
 const ROOT = path.resolve(__dirname, '..', '..');
-const ACORN_PATH = path.resolve(ROOT, '..', 'pc', 'node_modules', 'acorn');
+const ACORN_CANDIDATES = ['acorn', path.resolve(ROOT, '..', 'pc', 'node_modules', 'acorn')];
 
 let acorn;
-try {
-  acorn = require(ACORN_PATH);
-} catch {
-  console.error(`acorn 不可用（${ACORN_PATH}），跳过未声明标识符扫描`);
+for (const candidate of ACORN_CANDIDATES) {
+  try {
+    acorn = require(candidate);
+    break;
+  } catch {
+    // try the next candidate
+  }
+}
+if (!acorn) {
+  console.error('acorn 不可用（先在 collector 目录执行 npm ci），跳过未声明标识符扫描');
   process.exit(2);
 }
 

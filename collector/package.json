@@ -14,13 +14,20 @@
     "qbpkg:build": "node qbpkg.cjs build",
     "qbpkg:verify": "node qbpkg.cjs verify",
     "test": "node --test tests/*.test.cjs",
-    "check:undeclared": "node tests/tools/scan_undeclared.cjs"
+    "check:undeclared": "node tests/tools/scan_undeclared.cjs",
+    "format": "prettier --write \"*.cjs\" \"src/**/*.cjs\" \"lib/**/*.cjs\" \"tests/**/*.cjs\"",
+    "format:check": "prettier --check \"*.cjs\" \"src/**/*.cjs\" \"lib/**/*.cjs\" \"tests/**/*.cjs\"",
+    "check": "npm run check:undeclared && npm run format:check && npm test"
   },
   "engines": {
-    "node": ">=22.5.0"
+    "node": ">=22.5.0 <25"
   },
   "dependencies": {
     "playwright-core": "^1.62.1",
     "ws": "^8.18.3"
+  },
+  "devDependencies": {
+    "acorn": "^8.19.0",
+    "prettier": "^3.9.10"
   }
 }
