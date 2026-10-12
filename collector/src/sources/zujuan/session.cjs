@@ -245,34 +245,47 @@ function clearStaleProfileLock(profileDir, { hostname = os.hostname(), isAlive =
   };
 }
 
+/**
+ * Launch options shared by every Chrome that opens the collector profile:
+ * the crawl and the manual-recovery window. One definition keeps both on the
+ * same flags, so Chrome never sees the profile opened two different ways.
+ * `minimize: false` (manual recovery) keeps the window in front for the admin.
+ */
+function collectorLaunchOptions(options = {}) {
+  const headless = options.headless === true;
+  const minimize = !headless && options.minimize !== false;
+  const launchOptions = {
+    channel: 'chrome',
+    headless,
+    locale: 'zh-CN',
+    viewport: options.viewport || { width: 1440, height: 1000 },
+    ignoreDefaultArgs: ['--enable-automation'],
+  };
+  if (!headless) {
+    launchOptions.args = [
+      ...(minimize ? ['--start-minimized'] : []),
+      '--hide-crash-restore-bubble',
+      '--disable-session-crashed-bubble',
+      '--noerrdialogs',
+    ];
+  }
+  return launchOptions;
+}
+
 async function launchCollectorContext(playwright, options) {
   const stale = clearStaleProfileLock(options.profileDir);
   if (stale.cleared) {
     console.warn(`[环境] 清除过期的 Chrome profile 锁（${stale.reason}：${stale.lockHost}-${stale.lockPid ?? '?'}）`);
   }
   markProfileCleanExit(options.profileDir);
-  const launchOptions = {
-    channel: 'chrome',
-    headless: options.headless === true,
-    locale: 'zh-CN',
-    viewport: { width: 1440, height: 1000 },
-    ignoreDefaultArgs: ['--enable-automation'],
-  };
-  if (!options.headless) {
-    launchOptions.args = [
-      '--start-minimized',
-      '--hide-crash-restore-bubble',
-      '--disable-session-crashed-bubble',
-      '--noerrdialogs',
-    ];
-  }
+  const launchOptions = collectorLaunchOptions(options);
   const context = await playwright.chromium.launchPersistentContext(options.profileDir, launchOptions);
   try {
     context.setDefaultTimeout(options.timeout);
     context.setDefaultNavigationTimeout(options.timeout);
     await dismissStaleCollectorTabs(context);
     const page = await prepareCollectorPage(context);
-    if (!options.headless) {
+    if (!options.headless && options.minimize !== false) {
       await minimizeCollectorWindowWithLog(context, options, page);
     }
     return context;
@@ -322,25 +335,12 @@ async function chooseCollectorPage(context, preferredPage = null) {
 }
 
 async function launchFreshCollectorSession(playwright, options) {
-  const launchOptions = {
-    channel: 'chrome',
-    headless: options.headless === true,
-    ignoreDefaultArgs: ['--enable-automation'],
-  };
-  if (options.headless !== true) {
-    launchOptions.args = [
-      '--start-minimized',
-      '--hide-crash-restore-bubble',
-      '--disable-session-crashed-bubble',
-      '--noerrdialogs',
-    ];
-  }
+  // Same flags as the persistent profile; locale and viewport belong to the
+  // context here rather than the browser launch.
+  const { locale, viewport, ...launchOptions } = collectorLaunchOptions(options);
   const browser = await playwright.chromium.launch(launchOptions);
   try {
-    const context = await browser.newContext({
-      locale: 'zh-CN',
-      viewport: { width: 1440, height: 1000 },
-    });
+    const context = await browser.newContext({ locale, viewport });
     context.setDefaultTimeout(options.timeout);
     context.setDefaultNavigationTimeout(options.timeout);
     const page = await context.newPage();
@@ -618,6 +618,7 @@ async function waitForVerification(page, options = {}) {
 }
 
 module.exports = {
+  collectorLaunchOptions,
   applyInitialChromeMode,
   bringVerificationPageToFront,
   canFallbackToHeaded,

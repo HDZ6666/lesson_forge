@@ -298,3 +298,21 @@ test('回收后无法重新打开页面时整轮按可续采中断，而不是�
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test('Chrome 启动参数：采集与人工验证共用一套，人工验证不最小化', () => {
+  const { collectorLaunchOptions } = require('../src/sources/zujuan/session.cjs');
+  const crawl = collectorLaunchOptions({ headless: false });
+  const manual = collectorLaunchOptions({ headless: false, minimize: false, viewport: { width: 1440, height: 900 } });
+  assert.ok(crawl.args.includes('--start-minimized'));
+  assert.ok(!manual.args.includes('--start-minimized'));
+  assert.deepEqual(
+    manual.args,
+    crawl.args.filter((arg) => arg !== '--start-minimized'),
+  );
+  assert.deepEqual(manual.ignoreDefaultArgs, ['--enable-automation']);
+  assert.equal(manual.channel, crawl.channel);
+  assert.deepEqual(manual.viewport, { width: 1440, height: 900 });
+  const headless = collectorLaunchOptions({ headless: true });
+  assert.equal(headless.args, undefined);
+  assert.equal(headless.headless, true);
+});

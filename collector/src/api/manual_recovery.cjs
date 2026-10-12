@@ -8,7 +8,7 @@ const { buildQuestionListRequest } = require('../sources/zujuan/request.cjs');
 const { evaluateFetch } = require('../sources/zujuan/list_window.cjs');
 const { classifyQuestionResponse } = require('../sources/zujuan/response_classifier.cjs');
 const { parseQuestionListPayload } = require('../sources/zujuan/question_parser.cjs');
-const { clearStaleProfileLock } = require('../sources/zujuan/session.cjs');
+const { launchCollectorContext } = require('../sources/zujuan/session.cjs');
 const { safeEqual } = require('./http.cjs');
 
 function fail(message, statusCode = 409) {
@@ -57,9 +57,49 @@ async function waitForVnc(child) {
   }
   fail('远程画面未就绪');
 }
+// Bytes queued toward the browser before VNC reads are paused. A full-screen
+// frame is a few MB. Without a cap a slow admin connection made the API
+// buffer the framebuffer stream without bound.
+const BRIDGE_HIGH_WATER = 4 * 1024 * 1024;
+const BRIDGE_LOW_WATER = 1024 * 1024;
+
+/**
+ * Pipes a WebSocket and a TCP socket in both directions with flow control.
+ * Each side pauses reading while the other side has too much queued and
+ * resumes once that queue has drained.
+ */
+function bridgeWithBackpressure(ws, tcp, { high = BRIDGE_HIGH_WATER, low = BRIDGE_LOW_WATER } = {}) {
+  const stats = { pausedTcp: 0, pausedWs: 0 };
+  const resumeTcp = () => {
+    if (tcp.isPaused() && ws.bufferedAmount <= low) tcp.resume();
+  };
+  tcp.on('data', (data) => {
+    if (ws.readyState !== 1) return;
+    ws.send(data, resumeTcp);
+    if (ws.bufferedAmount > high && !tcp.isPaused()) {
+      stats.pausedTcp += 1;
+      tcp.pause();
+    }
+  });
+  ws.on('message', (data) => {
+    if (!tcp.write(data) && !ws.isPaused) {
+      stats.pausedWs += 1;
+      ws.pause();
+    }
+  });
+  tcp.on('drain', () => {
+    if (ws.isPaused) ws.resume();
+  });
+  tcp.on('error', () => ws.close());
+  tcp.on('close', () => ws.close());
+  ws.on('error', () => tcp.destroy());
+  ws.on('close', () => tcp.destroy());
+  return stats;
+}
 class ManualRecovery {
-  constructor(manager) {
+  constructor(manager, { launch = launchCollectorContext } = {}) {
     this.manager = manager;
+    this.launch = launch;
     this.current = null;
     manager.manualRecovery = this;
   }
@@ -104,14 +144,14 @@ class ManualRecovery {
     s.timer = setTimeout(() => void this.close({ sessionId: s.id, owner: s.owner }), 30 * 60 * 1000);
     s.timer.unref();
     try {
-      clearStaleProfileLock(this.manager.profileDir);
-      const { chromium } = require('playwright-core');
-      s.context = await chromium.launchPersistentContext(this.manager.profileDir, {
-        channel: 'chrome',
+      // Same launch path as the crawl: stale-lock cleanup, clean-exit marker,
+      // shared flags, stale-tab dismissal. Only the window stays visible.
+      s.context = await this.launch(require('playwright-core'), {
+        profileDir: this.manager.profileDir,
         headless: false,
-        locale: 'zh-CN',
+        minimize: false,
         viewport: { width: 1440, height: 900 },
-        args: ['--no-sandbox', '--disable-dev-shm-usage', '--hide-crash-restore-bubble'],
+        timeout: 30000,
       });
       s.page = s.context.pages()[0] || (await s.context.newPage());
       for (const page of s.context.pages()) if (page !== s.page) await page.close();
@@ -234,13 +274,7 @@ class ManualRecovery {
         clearTimeout(s.idle);
         s.socket = ws;
         const tcp = net.connect(5901, '127.0.0.1');
-        ws.on('message', (data) => tcp.write(data));
-        tcp.on('data', (data) => {
-          if (ws.readyState === 1) ws.send(data);
-        });
-        tcp.on('error', () => ws.close());
-        tcp.on('close', () => ws.close());
-        ws.on('error', () => tcp.destroy());
+        bridgeWithBackpressure(ws, tcp);
         ws.on('close', () => {
           tcp.destroy();
           s.socket = null;
@@ -255,4 +289,4 @@ class ManualRecovery {
     });
   }
 }
-module.exports = { ManualRecovery, recoveryTarget };
+module.exports = { ManualRecovery, bridgeWithBackpressure, recoveryTarget };
