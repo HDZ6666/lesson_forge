@@ -8,10 +8,10 @@ const path = require('node:path');
 const test = require('node:test');
 const { DatabaseSync } = require('node:sqlite');
 
-const { buildPackage, QbPkgValidationError } = require('../lib/qbpkg/builder.cjs');
-const { validateArchiveLimits, verifyPackage } = require('../lib/qbpkg/validator.cjs');
-const { assetKey, checkHtmlSafety, normalizeHtml, sanitizeHtml } = require('../lib/qbpkg/normalize.cjs');
-const { sha256 } = require('../lib/qbpkg/util.cjs');
+const { buildPackage, QbPkgValidationError } = require('../src/qbpkg/builder.cjs');
+const { validateArchiveLimits, verifyPackage } = require('../src/qbpkg/validator.cjs');
+const { assetKey, checkHtmlSafety, normalizeHtml, sanitizeHtml } = require('../src/qbpkg/normalize.cjs');
+const { sha256 } = require('../src/qbpkg/util.cjs');
 
 function tempDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'qbpkg-test-'));
@@ -207,4 +207,13 @@ test('固定输入生成相同成员哈希且默认拒绝覆盖', () => {
   assert.equal(secondChecksums.status, 0);
   assert.equal(firstChecksums.stdout, secondChecksums.stdout);
   assert.throws(() => build(firstDir, sourceDb(tempDir())), /目标包已存在/);
+});
+
+test('lib/ compatibility facades re-export the src/ implementations', () => {
+  assert.equal(require('../lib/run_snapshots.cjs'), require('../src/storage/run_snapshots.cjs'));
+  assert.equal(require('../lib/api_store.cjs'), require('../src/storage/readers/index.cjs'));
+  for (const name of ['builder', 'index', 'normalize', 'schema', 'util', 'validator']) {
+    assert.equal(require(`../lib/qbpkg/${name}.cjs`), require(`../src/qbpkg/${name}.cjs`));
+  }
+  assert.equal(require('../lib/qbpkg.js'), require('../src/qbpkg/index.cjs'));
 });

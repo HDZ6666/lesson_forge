@@ -19,7 +19,7 @@ const {
 } = require('../sources/zujuan/constants.cjs');
 const { normalizeHeaders, responseHeaders, responseStatus } = require('../sources/zujuan/request.cjs');
 const { normalizeAssetType } = require('../sources/zujuan/question_parser.cjs');
-const { assetKey: canonicalAssetKey } = require('../../lib/qbpkg/normalize.cjs');
+const { assetKey: canonicalAssetKey } = require('../qbpkg/normalize.cjs');
 const { retryDelay } = require('../policies/retry.cjs');
 const { openAssetResponse } = require('./request.cjs');
 

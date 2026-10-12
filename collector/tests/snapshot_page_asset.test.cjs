@@ -13,7 +13,7 @@ const {
   MAX_SNAPSHOT_PAGE_BYTES,
   readRunAsset,
   readRunSnapshotPage,
-} = require('../lib/api_store.cjs');
+} = require('../src/storage/readers/index.cjs');
 const { SyncStore } = require('../legacy/zujuan_sync.cjs');
 
 function temporary(prefix = 'collector-page-') {

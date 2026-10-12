@@ -12,7 +12,7 @@ const test = require('node:test');
 const {
   ensureRunSnapshotSchema,
   TERMINAL_RUN_STATUSES,
-} = require('../lib/run_snapshots.cjs');
+} = require('../src/storage/run_snapshots.cjs');
 const { resolveContentRun, snapshotScopeIds } = require('../src/storage/readers/common.cjs');
 const {
   readRunCatalogs,
@@ -22,7 +22,7 @@ const {
   readRunQuestions,
   readRunSnapshotSummary,
   validateMetadataSelection,
-} = require('../lib/api_store.cjs');
+} = require('../src/storage/readers/index.cjs');
 const { CollectorJobManager, createCollectorServer } = require('../server.cjs');
 const { MetadataStore } = require('../zujuan_metadata_sync.cjs');
 const { SyncStore } = require('../legacy/zujuan_sync.cjs');

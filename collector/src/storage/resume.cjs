@@ -11,7 +11,7 @@
 const path = require('node:path');
 const { DatabaseSync } = require('node:sqlite');
 
-const { RUN_CHECKPOINT_TABLE, SNAPSHOT_TABLES } = require('../../lib/run_snapshots.cjs');
+const { RUN_CHECKPOINT_TABLE, SNAPSHOT_TABLES } = require('./run_snapshots.cjs');
 const { QuestionSyncError } = require('../shared/errors.cjs');
 const { nowIso, sha256 } = require('../shared/utils.cjs');
 const { PROVIDER } = require('../sources/zujuan/constants.cjs');

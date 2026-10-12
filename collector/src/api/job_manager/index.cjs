@@ -18,7 +18,7 @@ const {
   safeExternalId,
   validateMetadataSelection,
 } = require('../../storage/readers/index.cjs');
-const { ensureRunSnapshotSchema } = require('../../../lib/run_snapshots.cjs');
+const { ensureRunSnapshotSchema } = require('../../storage/run_snapshots.cjs');
 const { ensureMetadataSnapshotSchema } = require('../../storage/metadata_schema.cjs');
 const { publicJob } = require('../progress.cjs');
 const { JobStore, ownerIsLive, pidAlive, registerOwner } = require('../job_store.cjs');

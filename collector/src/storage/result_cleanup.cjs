@@ -3,7 +3,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { DatabaseSync } = require('node:sqlite');
-const { SNAPSHOT_TABLES } = require('../../lib/run_snapshots.cjs');
+const { SNAPSHOT_TABLES } = require('./run_snapshots.cjs');
 const { httpError, tableNames, requiredRunId, snapshotScopeIds, resolveContentRun } = require('./readers/common.cjs');
 
 // Invoked only by the authenticated Service after a settled import. No run

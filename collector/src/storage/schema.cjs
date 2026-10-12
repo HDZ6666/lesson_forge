@@ -2,11 +2,11 @@
 
 /**
  * SQLite schema for the question list collector's mutable candidate tables.
- * Additive and idempotent; run snapshot tables come from lib/run_snapshots.
+ * Additive and idempotent; run snapshot tables come from run_snapshots.cjs.
  */
 
 const { quoteIdentifier, sha256 } = require('../shared/utils.cjs');
-const { migrateRunSnapshotSchema } = require('../../lib/run_snapshots.cjs');
+const { migrateRunSnapshotSchema } = require('./run_snapshots.cjs');
 
 function ensureColumn(db, table, column, definition) {
   const columns = new Set(db.prepare(`PRAGMA table_info(${quoteIdentifier(table)})`).all().map((row) => String(row.name)));

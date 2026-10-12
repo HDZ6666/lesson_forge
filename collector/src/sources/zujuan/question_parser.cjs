@@ -31,7 +31,7 @@ const {
 const {
   assetKey: canonicalAssetKey,
   normalizeHtml: normalizePackageHtml,
-} = require('../../../lib/qbpkg/normalize.cjs');
+} = require('../../qbpkg/normalize.cjs');
 const { DEFAULT_BASE_URL } = require('./constants.cjs');
 
 function parseDifficulty(value) {

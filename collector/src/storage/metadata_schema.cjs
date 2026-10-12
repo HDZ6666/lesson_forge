@@ -5,7 +5,7 @@
  *
  * `source_metadata_runs` plus the two per-run snapshot tables are sealed by
  * triggers once a run reaches a terminal status, mirroring the content run
- * snapshot rules in lib/run_snapshots.cjs.  The migration is additive and
+ * snapshot rules in src/storage/run_snapshots.cjs.  The migration is additive and
  * idempotent so the API server can upgrade an older collector database.
  */
 

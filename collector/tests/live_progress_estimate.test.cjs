@@ -15,7 +15,7 @@ const test = require('node:test');
 
 const { QuestionSyncStore } = require('../src/storage/question_store/index.cjs');
 const { parseQuestionListPayload } = require('../src/sources/zujuan/question_parser.cjs');
-const { readLiveRunProgress } = require('../lib/api_store.cjs');
+const { readLiveRunProgress } = require('../src/storage/readers/index.cjs');
 
 const LIST_HTML = fs.readFileSync(path.join(__dirname, 'fixtures', 'zujuan', 'list-261285-p470-q26996136.card.html'), 'utf8');
 const question = (id) => parseQuestionListPayload({ code: '0', data: { total: 1, html: LIST_HTML.replaceAll('26996136', String(id)) } }).questions[0];

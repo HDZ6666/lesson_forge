@@ -42,7 +42,7 @@ const {
   SITE_PAGE_LIMIT,
   VerificationRequiredError,
 } = require('../zujuan_question_sync.cjs');
-const { readLiveRunProgress } = require('../lib/api_store.cjs');
+const { readLiveRunProgress } = require('../src/storage/readers/index.cjs');
 
 const LIST_HTML = `
 <div class="tk-quest-item quesroot new" questionid="35020603" bankid="2">

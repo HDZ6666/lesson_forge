@@ -3,8 +3,8 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
-const { buildPackage, QbPkgValidationError } = require('./lib/qbpkg/builder.cjs');
-const { verifyPackage } = require('./lib/qbpkg/validator.cjs');
+const { buildPackage, QbPkgValidationError } = require('./src/qbpkg/builder.cjs');
+const { verifyPackage } = require('./src/qbpkg/validator.cjs');
 
 function usage() {
   return `

@@ -12,7 +12,7 @@ const { QuestionSyncError } = require('../../shared/errors.cjs');
 const { jsonStringify, normalizeId, nowIso, sha256, sqliteValue } = require('../../shared/utils.cjs');
 const { DEFAULT_PAGE_CAPACITY, PAGE_RESULT, PROVIDER, SCAN_ISSUE_RESULTS } = require('../../sources/zujuan/constants.cjs');
 const { finalizeQuestion, normalizeAssetType } = require('../../sources/zujuan/question_parser.cjs');
-const { assetKey: canonicalAssetKey } = require('../../../lib/qbpkg/normalize.cjs');
+const { assetKey: canonicalAssetKey } = require('../../qbpkg/normalize.cjs');
 const { growTargetPages } = require('../../policies/pagination.cjs');
 
 class PageRepoMethods {

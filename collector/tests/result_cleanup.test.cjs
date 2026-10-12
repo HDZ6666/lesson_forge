@@ -6,7 +6,7 @@ const os = require('node:os');
 const path = require('node:path');
 const {SyncStore} = require('../legacy/zujuan_sync.cjs');
 const {reclaimRun} = require('../src/storage/result_cleanup.cjs');
-const {readRunSnapshotPage} = require('../lib/api_store.cjs');
+const {readRunSnapshotPage} = require('../src/storage/readers/index.cjs');
 
 function seed(store, questionId, assetPath) {
   const id = store.beginRun({textbookIds:['tb1'],details:false,downloadAssets:false});
