@@ -14,7 +14,7 @@ test('config registry defaults agree with the consuming modules', () => {
   const { values, errors } = validateConfig({});
   assert.deepEqual(errors, []);
   const source = (file) => fs.readFileSync(path.join(__dirname, '..', file), 'utf8');
-  const questionRun = source('src/jobs/question_run.cjs');
+  const questionRun = source('src/jobs/question/browser_session.cjs');
   assert.match(questionRun, new RegExp(`DEFAULT_BROWSER_RECYCLE_PAGES = ${values.COLLECTOR_BROWSER_RECYCLE_PAGES};`));
   assert.match(questionRun, new RegExp(`DEFAULT_BROWSER_RECYCLE_MB = ${values.COLLECTOR_BROWSER_RECYCLE_MB};`));
   assert.match(questionRun, new RegExp(`MIN_PAGES_BETWEEN_PRESSURE_RECYCLES = ${values.COLLECTOR_BROWSER_PRESSURE_MIN_PAGES};`));

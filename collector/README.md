@@ -22,7 +22,7 @@ collector/
     assets/                    素材下载与公式 SVG 回退
     storage/                   SQLite schema、运行快照与不可变触发器、题库/元数据 store、续采校验、原始页、只读 readers
     qbpkg/                     离线包构建与校验
-    jobs/                      单次运行（question_run、metadata_run）、结构化事件
+    jobs/                      单次运行（question_run、metadata_run）、结构化事件；question/ 为内容运行的浏览器会话、目录爬取、封存三个阶段
     api/                       路由、HTTP 边界、publicJob 投影、job 持久化与编排、读取线程池、/metrics
     cli/                       两个采集脚本的参数解析与入口
   legacy/                      旧页面点击采集器 zujuan_sync.cjs 及其 cron 包装脚本（仅本地与测试使用，不进入镜像）
