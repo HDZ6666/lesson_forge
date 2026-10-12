@@ -35,7 +35,7 @@ const PERSISTED_FIELDS = [
   'currentTextbookId', 'currentTextbookName', 'progressPercent',
   'errorMessage', 'errorCode', 'createdAt', 'startedAt', 'finishedAt',
   'cancelRequested', 'partialInterrupted', 'partialMessage', 'abortCode',
-  'lastErrorEvent', 'waitingReason', 'waitingSince', 'childRssMb', 'childRssPeakMb',
+  'lastErrorEvent', 'waitingReason', 'waitingSince', 'childRssMb', 'childRssPeakMb', 'childBrowserRssMb', 'childBrowserRssPeakMb',
 ];
 
 function ensureJobSchema(db) {

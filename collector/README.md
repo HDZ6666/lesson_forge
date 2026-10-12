@@ -152,8 +152,15 @@ npm start
 | `COLLECTOR_SOURCE_DAILY_DOWNLOAD_MIB` | 每 UTC 日素材响应接收字节上限，包含失败及最终被拒绝的响应块 |
 | `COLLECTOR_MIN_DISK_FREE_MIB` | 数据库、原始页/素材、浏览器配置各存储位置应保留的可用 MiB |
 | `COLLECTOR_MIN_MEMORY_FREE_MIB` | 主机/容器应保留的可用内存 MiB；Linux 使用可回收缓存后的可用估计，并受 cgroup 剩余额度约束 |
+| `COLLECTOR_MEMORY_GRACE_MS` | 内存持续低于 `COLLECTOR_MIN_MEMORY_FREE_MIB` 多少毫秒才拒绝工作；`0` 为单次采样即停止（旧行为） |
+| `COLLECTOR_SOFT_MEMORY_FREE_MIB` | 预警水位：低于它时采集子进程在下一个窗口间安全点回收浏览器，不停止运行 |
+| `COLLECTOR_BROWSER_RECYCLE_PAGES` | 同一浏览器连续采集多少页后回收（默认 400，`0` 关闭） |
+| `COLLECTOR_BROWSER_RECYCLE_MB` | Chrome 进程树（按 PSS 汇总）超过多少 MB 时回收（默认 1000，`0` 关闭） |
+| `COLLECTOR_BROWSER_PRESSURE_MIN_PAGES` | 因主机内存预警触发的两次回收之间至少间隔的页数（默认 40） |
 
 配额在 SQLite 原子领取，跨进程和重启保留；下一 UTC 日使用新的统计行，旧记录不清零。配置的教材本数是启动上限，不能理解为完成产量。请求配额统计程序明确发起的请求，素材重定向逐跳计数，不含 Chrome 自动加载的页面子资源。无人值守启动还检查时长、下载预算及资源水位配置。
+
+浏览器回收（COL-016）：同一 Chrome 上下文连续执行数万次页内请求会持续增长内存。采集子进程在窗口之间（已结算页均已落盘）检查页数、Chrome 进程树占用和主机预警水位，满足任一条件即关闭并用同一持久档案重开上下文，回到教材页后从同一目录同一页继续；回收失败时整轮以 `browser_recycle_failed` 可续采中断，不跳过知识点。心跳额外上报 `browserRssMb`，任务进度返回 `childBrowserRssMb` / `childBrowserRssPeakMb`。通过 CDP 连接的外部浏览器不回收。
 
 资源检查最多缓存一秒；已配置的水位无法测量时暂缓。新启动、主动请求前及父进程 watchdog 都检查低水位；活动任务在安全点停止，保留可封存成果。资源恢复只允许再次派发，不将已结束任务改为成功。素材请求复用浏览器 Cookie，通过流式接收逐块检查 10 MiB 上限、下载配额及资源水位，超过上限立即停止；最终只合并限额内的素材字节。
 

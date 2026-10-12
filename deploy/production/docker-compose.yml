@@ -35,7 +35,8 @@ services:
     environment:
       REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
       TZ: Asia/Shanghai
-    command: ["sh", "-c", "exec redis-server --appendonly yes --requirepass \"$$REDIS_PASSWORD\""]
+    # 只保留 AOF：关闭默认 RDB 快照，避免内存紧张时频繁 fork（COL-016）。
+    command: ["sh", "-c", "exec redis-server --appendonly yes --save '' --requirepass \"$$REDIS_PASSWORD\""]
     volumes:
       - redis_data:/data
     healthcheck:
@@ -76,6 +77,12 @@ services:
       COLLECTOR_SOURCE_DAILY_DOWNLOAD_MIB: ${COLLECTOR_SOURCE_DAILY_DOWNLOAD_MIB:-0}
       COLLECTOR_MIN_DISK_FREE_MIB: ${COLLECTOR_MIN_DISK_FREE_MIB:-0}
       COLLECTOR_MIN_MEMORY_FREE_MIB: ${COLLECTOR_MIN_MEMORY_FREE_MIB:-0}
+      # 两级内存水位（COL-016）：低于预警值先在安全点回收浏览器；低于保留值持续超过宽限期才停止。
+      COLLECTOR_SOFT_MEMORY_FREE_MIB: ${COLLECTOR_SOFT_MEMORY_FREE_MIB:-800}
+      COLLECTOR_MEMORY_GRACE_MS: ${COLLECTOR_MEMORY_GRACE_MS:-60000}
+      # 每采集多少页或 Chrome 进程树占用多少 MB 时回收浏览器（0 关闭该条件）。
+      COLLECTOR_BROWSER_RECYCLE_PAGES: ${COLLECTOR_BROWSER_RECYCLE_PAGES:-400}
+      COLLECTOR_BROWSER_RECYCLE_MB: ${COLLECTOR_BROWSER_RECYCLE_MB:-1000}
       # 采集子进程内存上限（MB）：超过即停止并封存为可续采，避免再次拖垮 3.7GB 的宿主机（COL-015）。
       COLLECTOR_CHILD_MAX_RSS_MB: "1536"
       TZ: Asia/Shanghai

@@ -77,6 +77,10 @@ class EventMethods {
         break;
       }
       case 'heartbeat':
+        if (event.browserRssMb != null) {
+          job.childBrowserRssMb = event.browserRssMb;
+          job.childBrowserRssPeakMb = Math.max(Number(job.childBrowserRssPeakMb || 0), event.browserRssMb);
+        }
         if (event.rssMb != null) {
           job.childRssMb = event.rssMb;
           job.childRssPeakMb = Math.max(Number(job.childRssPeakMb || 0), event.rssMb);

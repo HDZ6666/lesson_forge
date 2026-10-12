@@ -97,6 +97,26 @@ const { assertMathSource } = require('../sources/registry.cjs');
 const { SourceControl } = require('../policies/source_control.cjs');
 const { SourceBudget } = require('../policies/source_budget.cjs');
 const { ResourceGuard } = require('../policies/resource_guard.cjs');
+const { descendantsMemoryMb } = require('../api/process_tree.cjs');
+
+// Browser recycling (COL-016).  One Chrome context serving tens of thousands
+// of in-page fetches grows steadily (about 10 MiB/min in production) until the
+// host watermark stops the whole run.  Closing and reopening the persistent
+// context at a window boundary returns that memory while keeping the profile
+// session and the page checkpoint, so the run continues instead of sealing.
+const DEFAULT_BROWSER_RECYCLE_PAGES = 400;
+const DEFAULT_BROWSER_RECYCLE_MB = 1000;
+const MIN_PAGES_BETWEEN_PRESSURE_RECYCLES = 40;
+const PRESSURE_WAIT_STEP_MS = 5000;
+
+function recycleSetting(value, envName, fallback) {
+  const raw = value ?? process.env[envName];
+  if (raw == null || raw === '') return fallback;
+  if (!/^\d+$/.test(String(raw)) || !Number.isSafeInteger(Number(raw))) {
+    throw new QuestionSyncError(`${envName} 必须是非负整数，0 表示关闭`, 'invalid_option');
+  }
+  return Number(raw);
+}
 
 async function runSync(options, dependencies = {}) {
   const opts = { ...options };
@@ -119,6 +139,13 @@ async function runSync(options, dependencies = {}) {
   let ownedPage = false;
   let ownedBrowser = null;
   let cookieWaitCycles = 0;
+  const recycle = {
+    pages: recycleSetting(opts.browserRecyclePages, 'COLLECTOR_BROWSER_RECYCLE_PAGES', DEFAULT_BROWSER_RECYCLE_PAGES),
+    browserMb: recycleSetting(opts.browserRecycleMb, 'COLLECTOR_BROWSER_RECYCLE_MB', DEFAULT_BROWSER_RECYCLE_MB),
+    pressureMinPages: recycleSetting(opts.browserPressureMinPages, 'COLLECTOR_BROWSER_PRESSURE_MIN_PAGES', MIN_PAGES_BETWEEN_PRESSURE_RECYCLES),
+    pagesSince: 0,
+    count: 0,
+  };
   const counters = {
     pagesOk: 0,
     questionsSeen: 0,
@@ -175,6 +202,8 @@ async function runSync(options, dependencies = {}) {
     throw new QuestionSyncError(`收到 ${stopSignal}，采集在安全点停止`, 'stop_requested');
   };
   const rssMb = () => Math.round(process.memoryUsage().rss / (1024 * 1024));
+  const browserMb = dependencies.browserMemoryMb || (() => descendantsMemoryMb(process.pid));
+  const heartbeat = (stage) => events.emit('heartbeat', { runId, stage, rssMb: rssMb(), browserRssMb: browserMb() });
 
   // Assets dominate per-page time (tens of CDN downloads per page).  Fetch a
   // whole window's assets with a bounded pool before settling its pages, so
@@ -201,9 +230,79 @@ async function runSync(options, dependencies = {}) {
       },
     });
     if (summary.requested > 0) {
-      events.emit('heartbeat', { runId, stage: `assets:${summary.downloaded}/${summary.requested}`, rssMb: rssMb() });
+      heartbeat(`assets:${summary.downloaded}/${summary.requested}`);
     }
     return summary;
+  }
+
+  // Only a browser this run launched itself can be recycled.  A CDP-attached
+  // browser belongs to someone else, and injected test contexts opt in
+  // through `dependencies.reopenBrowser`.
+  const canRecycleBrowser = () => typeof dependencies.reopenBrowser === 'function'
+    || (!dependencies.context && !dependencies.page && !connectedOverCDP && context != null);
+
+  async function recycleBrowser(reason) {
+    const before = browserMb();
+    heartbeat('browser_recycle');
+    if (typeof dependencies.reopenBrowser === 'function') {
+      const reopened = await dependencies.reopenBrowser({ context, page, reason });
+      context = reopened?.context ?? context;
+      page = reopened?.page ?? page;
+    } else {
+      await closeCollectorContext(context);
+      context = null;
+      page = null;
+      context = await launchCollectorContext(playwrightRef, { ...opts, headless: opts.headless === true });
+      page = context.pages?.()[0] || await context.newPage();
+    }
+    recycle.pagesSince = 0;
+    recycle.count += 1;
+    // List requests are built from options, not page state, but they run
+    // inside the page origin, so return to the textbook page first.
+    await navigateToTextbook(page, initialTextbookUrl(opts), opts);
+    const after = browserMb();
+    console.log(`[浏览器] 第 ${recycle.count} 次回收（${reason}）：Chrome ${before ?? '?'}MB → ${after ?? '?'}MB`);
+    heartbeat('browser_recycled');
+  }
+
+  function recycleReason() {
+    if (recycle.pages > 0 && recycle.pagesSince >= recycle.pages) return `已连续采集 ${recycle.pagesSince} 页`;
+    const current = recycle.browserMb > 0 ? browserMb() : null;
+    if (current != null && current >= recycle.browserMb) return `Chrome 占用 ${current}MB`;
+    const pressure = opts.resourceGuard.status({ fresh: true }).pressure;
+    if ((pressure === 'soft' || pressure === 'low') && recycle.pagesSince >= recycle.pressureMinPages) {
+      return pressure === 'low' ? '主机内存低于保留水位' : '主机内存低于预警水位';
+    }
+    return null;
+  }
+
+  // Called between windows, where every fetched page is already settled and
+  // the checkpoint is durable.  After recycling, a host still under the hard
+  // watermark gets the guard's grace period to recover; if it does not, the
+  // next guarded request raises resource_pressure exactly as before.
+  async function browserSafePoint() {
+    if (!canRecycleBrowser()) return;
+    const reason = recycleReason();
+    if (!reason) return;
+    try {
+      await recycleBrowser(reason);
+    } catch (error) {
+      if (isTextbookFatalError(error) || isCookieSwitchError(error)) throw error;
+      // Never let a reopen failure fall into the per-catalog "skip this
+      // point" handler: stop the run as a resumable interrupt instead.
+      const failure = new QuestionSyncError(`浏览器回收后无法恢复采集页面：${error.message}`, 'browser_recycle_failed', error);
+      failure.recycleFailure = true;
+      throw failure;
+    }
+    const waitLimit = Number(opts.resourceGuard.limits?.memoryGraceMs || 0);
+    const wait = opts.sleepFn || sleep;
+    let waited = 0;
+    while (waited < waitLimit && opts.resourceGuard.status({ fresh: true }).pressure === 'low') {
+      assertNotStopped();
+      heartbeat('memory_wait');
+      await wait(PRESSURE_WAIT_STEP_MS);
+      waited += PRESSURE_WAIT_STEP_MS;
+    }
   }
 
   async function disposeCollectorSession() {
@@ -698,7 +797,7 @@ async function runSync(options, dependencies = {}) {
     }
 
     async function fetchWindow(state, pageNumbers) {
-      events.emit('heartbeat', { runId, stage: `fetch_window:${state.catalog.externalId}:${pageNumbers[0]}`, rssMb: rssMb() });
+      heartbeat(`fetch_window:${state.catalog.externalId}:${pageNumbers[0]}`);
       const rows = await Promise.all(pageNumbers.map(async (pageNumber) => {
         try {
           const parsed = await postQuestionList(page, opts, state.catalog, pageNumber, {
@@ -831,9 +930,11 @@ async function runSync(options, dependencies = {}) {
             break;
           }
           assertNotStopped();
+          await browserSafePoint();
           beginFetchWindow(state, pageNumbers);
           await requestGate(opts.sleepFn || sleep);
           const rows = await fetchWindow(state, pageNumbers);
+          recycle.pagesSince += pageNumbers.length;
           let sourcePause = rows.find((row) => row.error?.blocked)?.error;
           if (!sourcePause) {
             try { await prefetchWindowAssets(rows); }
@@ -921,7 +1022,7 @@ async function runSync(options, dependencies = {}) {
           }
         }
       } catch (error) {
-        if (isCookieSwitchError(error) || isTextbookFatalError(error)) throw error;
+        if (error?.recycleFailure || isCookieSwitchError(error) || isTextbookFatalError(error)) throw error;
         console.warn(`[列表] catalog=${state.catalog.externalId} 跳过当前知识点：${error.message}`);
         try {
           finishCatalogScan(state, {
@@ -967,7 +1068,7 @@ async function runSync(options, dependencies = {}) {
       }
     }
     if (error instanceof VerificationRequiredError || error.code === 'waiting_verification') finalStatus = 'blocked';
-    else if (['network_error', 'navigation_error', 'tree_network_error', 'stop_requested'].includes(String(error.code || ''))
+    else if (['network_error', 'navigation_error', 'tree_network_error', 'stop_requested', 'browser_recycle_failed'].includes(String(error.code || ''))
       || /^http_(408|429|5\d\d)$/.test(String(error.code || ''))) finalStatus = 'interrupted';
     else finalStatus = error instanceof StopCrawlError ? 'blocked' : 'failed';
     let completeness = null;

@@ -85,6 +85,8 @@ function normalizeEvent(raw) {
       {
         const rss = boundedInt(raw.rssMb);
         if (rss != null && rss >= 0) event.rssMb = rss;
+        const browserRss = boundedInt(raw.browserRssMb);
+        if (browserRss != null && browserRss >= 0) event.browserRssMb = browserRss;
       }
       break;
     case 'verification_wait':

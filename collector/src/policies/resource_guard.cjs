@@ -55,17 +55,24 @@ class ResourcePressureError extends StopCrawlError {
 }
 
 class ResourceGuard {
-  constructor({ paths = {}, minDiskMiB, minMemoryMiB, clock = Date.now,
+  constructor({ paths = {}, minDiskMiB, minMemoryMiB, softMemoryMiB, memoryGraceMs, clock = Date.now,
     diskReader = availableDisk, memoryReader = availableMemory } = {}) {
     this.paths = paths;
     this.limits = {
       minDiskMiB: nonnegativeLimit(minDiskMiB ?? process.env.COLLECTOR_MIN_DISK_FREE_MIB, 'COLLECTOR_MIN_DISK_FREE_MIB'),
       minMemoryMiB: nonnegativeLimit(minMemoryMiB ?? process.env.COLLECTOR_MIN_MEMORY_FREE_MIB, 'COLLECTOR_MIN_MEMORY_FREE_MIB'),
+      // Soft watermark: below it the crawler recycles its browser at the next
+      // safe point instead of stopping.  0 disables the soft tier.
+      softMemoryMiB: nonnegativeLimit(softMemoryMiB ?? process.env.COLLECTOR_SOFT_MEMORY_FREE_MIB, 'COLLECTOR_SOFT_MEMORY_FREE_MIB'),
+      // Hard watermark grace: memory must stay below minMemoryMiB for this
+      // long before work is refused.  0 keeps the historical instant stop.
+      memoryGraceMs: nonnegativeLimit(memoryGraceMs ?? process.env.COLLECTOR_MEMORY_GRACE_MS, 'COLLECTOR_MEMORY_GRACE_MS'),
     };
     this.clock = clock;
     this.diskReader = diskReader;
     this.memoryReader = memoryReader;
     this.cached = null;
+    this.memoryLowSince = null;
   }
 
   status({ fresh = false } = {}) {
@@ -78,7 +85,14 @@ class ResourceGuard {
       const free = this.memoryReader();
       if (!Number.isFinite(free) || free < 0) throw new Error('unknown');
       memoryMiB = Math.floor(free / MIB);
-      if (memoryMiB < this.limits.minMemoryMiB) reasons.push('采集主机可用内存低于保留水位');
+      if (memoryMiB < this.limits.minMemoryMiB) {
+        if (this.memoryLowSince == null) this.memoryLowSince = now;
+        // A single low sample (Chrome GC, an import burst) must not end a
+        // multi-hour run; only a sustained shortage does.
+        if (now - this.memoryLowSince >= this.limits.memoryGraceMs) reasons.push('采集主机可用内存低于保留水位');
+      } else {
+        this.memoryLowSince = null;
+      }
     } catch { if (this.limits.minMemoryMiB > 0) reasons.push('无法确认采集主机可用内存'); }
     for (const [kind, target] of Object.entries(this.paths)) {
       let freeMiB = null;
@@ -91,8 +105,16 @@ class ResourceGuard {
       // Never expose a host filesystem path in the API projection.
       disks.push({ kind, freeMiB });
     }
+    const memoryLow = memoryMiB != null && memoryMiB < this.limits.minMemoryMiB;
+    const memorySoft = memoryMiB != null && (memoryLow
+      || (this.limits.softMemoryMiB > 0 && memoryMiB < this.limits.softMemoryMiB));
     const state = {
       paused: reasons.length > 0, reason: reasons.join('；') || null,
+      // `pressure` lets the crawler react before `paused`: soft means
+      // recycle the browser at the next safe point; low means the hard
+      // watermark is crossed but its grace period has not yet elapsed.
+      pressure: reasons.length > 0 ? 'paused' : (memoryLow ? 'low' : (memorySoft ? 'soft' : 'ok')),
+      memoryLowSince: this.memoryLowSince == null ? null : new Date(this.memoryLowSince).toISOString(),
       manualRequired: false, notBefore: reasons.length ? new Date(now + 30000).toISOString() : null,
       limits: this.limits, memoryMiB, disks,
       diskAndMemoryLimitsConfigured: this.limits.minDiskMiB > 0 && this.limits.minMemoryMiB > 0,

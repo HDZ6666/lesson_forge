@@ -33,4 +33,31 @@ function killOwned(rows = []) {
   }
 }
 
-module.exports = { descendants, killOwned, processInfo };
+// Proportional set size (falls back to RSS) of one process, in bytes.  PSS
+// splits shared pages between the processes that map them, so summing it over
+// a Chrome process tree does not count the shared renderer/GPU pages N times.
+function processMemoryBytes(pid) {
+  try {
+    const rollup = fs.readFileSync(`/proc/${pid}/smaps_rollup`, 'utf8');
+    const pss = rollup.match(/^Pss:\s+(\d+)\s+kB$/m);
+    if (pss) return Number(pss[1]) * 1024;
+  } catch {} // Older kernels or a process that just exited.
+  try {
+    const statm = fs.readFileSync(`/proc/${pid}/statm`, 'utf8').trim().split(/\s+/);
+    const pages = Number(statm[1]);
+    if (Number.isFinite(pages)) return pages * 4096;
+  } catch {}
+  return 0;
+}
+
+// Memory of every descendant of `root` (the browser started by a collector
+// child), excluding `root` itself.  Returns null where /proc is unavailable so
+// callers can tell "unknown" from "zero".
+function descendantsMemoryMb(root = process.pid, { list = descendants, read = processMemoryBytes } = {}) {
+  if (process.platform !== 'linux' && list === descendants) return null;
+  let total = 0;
+  for (const row of list(root)) total += Number(read(row.pid)) || 0;
+  return Math.round(total / (1024 * 1024));
+}
+
+module.exports = { descendants, descendantsMemoryMb, killOwned, processInfo, processMemoryBytes };
