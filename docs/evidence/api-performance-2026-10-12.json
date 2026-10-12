@@ -39,5 +39,19 @@
     "mysqlPassed": 61,
     "frontendTestGroups": 17,
     "frontendBuildSeconds": 17.57
+  },
+  "whileCollectingSeconds": {
+    "planBooksFirst": 4.757,
+    "planBooksRepeated": 0.114,
+    "overview": 2.436
+  },
+  "restoredPlan": {
+    "planId": 1,
+    "revision": 23,
+    "state": "active",
+    "collectingTaskId": 16,
+    "retainedExecutionId": 15,
+    "retainedCollectorRunId": 14,
+    "resumePending": true
   }
 }
