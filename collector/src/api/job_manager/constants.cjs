@@ -15,7 +15,11 @@ const DEFAULT_STALL_TIMEOUT_MS = 20 * 60 * 1000;
 const KILL_GRACE_MS = 60000;
 const WATCHDOG_MAX_TICK_MS = 5000;
 const HEARTBEAT_WRITE_MS = 10000;
-const PERSIST_INTERVAL_MS = 1000;
+// Non-forced progress writes are coalesced to one per interval.  Status
+// changes, errors and seals always write immediately (force: true), and the
+// in-memory job is what the API serves, so a longer interval only bounds how
+// much counter progress a crash can lose.
+const PERSIST_INTERVAL_MS = 5000;
 // A row whose owner process is alive but has not written a heartbeat for this
 // long is treated as abandoned (hung API process or reused pid).
 const ORPHAN_HEARTBEAT_MS = 3 * 60 * 1000;

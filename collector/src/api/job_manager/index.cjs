@@ -87,6 +87,12 @@ class CollectorJobManager {
     this.nodeBin = options.nodeBin || process.execPath;
     this.spawnImpl = options.spawnImpl || spawn;
     this.killGraceMs = positiveDuration(options.killGraceMs, 60000, 'killGraceMs');
+    this.persistIntervalMs = positiveDuration(
+      options.persistIntervalMs ?? process.env.COLLECTOR_PERSIST_INTERVAL_MS,
+      PERSIST_INTERVAL_MS,
+      'persistIntervalMs',
+    );
+    this.persistStats = { writes: 0, failures: 0 };
     // Headful is an operator/deployment setting only.  It is intentionally
     // read once here and never taken from a request payload.
     this.headful = deploymentBoolean(
@@ -164,19 +170,36 @@ class CollectorJobManager {
   persist(job, { force = false } = {}) {
     if (!this.store || !job) return;
     const now = Date.now();
-    if (!force && job._persistedAt && now - job._persistedAt < PERSIST_INTERVAL_MS) {
+    const interval = this.persistIntervalMs;
+    if (!force && job._persistedAt && now - job._persistedAt < interval) {
       job._persistDirty = true;
+      // Trailing write so the last progress before a quiet spell still
+      // reaches SQLite within one interval instead of waiting for the next
+      // event or the watchdog heartbeat.
+      if (!job._persistTimer) {
+        job._persistTimer = setTimeout(() => {
+          job._persistTimer = null;
+          if (job._persistDirty) this.persist(job, { force: true });
+        }, interval - (now - job._persistedAt));
+        job._persistTimer.unref?.();
+      }
       return;
+    }
+    if (job._persistTimer) {
+      clearTimeout(job._persistTimer);
+      job._persistTimer = null;
     }
     try {
       this.store.save(job, this.owner);
       job._persistedAt = now;
       job._persistDirty = false;
+      this.persistStats.writes += 1;
     } catch (error) {
       // Persistence is a durability layer over the in-memory job.  A locked
       // SQLite must never turn a running crawl into a failed API request.
       job._persistDirty = true;
       job._persistError = String(error?.message || error);
+      this.persistStats.failures += 1;
     }
   }
 

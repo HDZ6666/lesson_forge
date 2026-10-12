@@ -149,6 +149,8 @@ class JobStore {
   constructor(dbPath) {
     this.dbPath = path.resolve(dbPath);
     this.db = new DatabaseSync(this.dbPath);
+    this._lastSaved = new Map();
+    this._updateStatements = new Map();
     this.db.exec('PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;');
     ensureJobSchema(this.db);
     this.closed = false;
@@ -190,6 +192,7 @@ class JobStore {
     if (this.closed) return;
     const values = this._rowValues(job, owner);
     values.active_slot = 1;
+    this._lastSaved.delete(values.id);
     const columns = Object.keys(values);
     try {
       this.db.exec('BEGIN IMMEDIATE');
@@ -215,15 +218,32 @@ class JobStore {
     this.trim();
   }
 
+  /**
+   * Write the job row.  Returns false when nothing but the heartbeat would
+   * change: progress events often re-send identical counters, and the
+   * watchdog refreshes `heartbeat_at` on its own, so an identical row is not
+   * rewritten (the payload is up to 512 KB).
+   */
   save(job, owner) {
-    if (this.closed) return;
+    if (this.closed) return false;
     const values = this._rowValues(job, owner);
     const columns = Object.keys(values).filter((column) => column !== 'id');
-    this.db.prepare(`
-      UPDATE ${JOB_TABLE}
-      SET ${columns.map((column) => `${column} = ?`).join(', ')}
-      WHERE id = ?
-    `).run(...columns.map((column) => values[column]), values.id);
+    const fingerprint = JSON.stringify(columns.filter((column) => column !== 'heartbeat_at').map((column) => values[column]));
+    if (this._lastSaved.get(values.id) === fingerprint) return false;
+    const sqlKey = columns.join(',');
+    let statement = this._updateStatements.get(sqlKey);
+    if (!statement) {
+      statement = this.db.prepare(`
+        UPDATE ${JOB_TABLE}
+        SET ${columns.map((column) => `${column} = ?`).join(', ')}
+        WHERE id = ?
+      `);
+      this._updateStatements.set(sqlKey, statement);
+    }
+    statement.run(...columns.map((column) => values[column]), values.id);
+    this._lastSaved.set(values.id, fingerprint);
+    if (this._lastSaved.size > 256) this._lastSaved.delete(this._lastSaved.keys().next().value);
+    return true;
   }
 
   heartbeat(jobId) {
@@ -234,6 +254,7 @@ class JobStore {
 
   release(jobId) {
     if (this.closed) return;
+    this._lastSaved.delete(String(jobId));
     this.db.prepare(`UPDATE ${JOB_TABLE} SET active_slot = NULL WHERE id = ?`).run(String(jobId));
   }
 

@@ -104,6 +104,58 @@ function aggregateLiveProgress(scopeRecords, liveScopeValues, fallback = null) {
   };
 }
 
+/**
+ * The live-progress reads a job status response needs, one per scope with a
+ * collector run.  Keep the aggregate multi-textbook response bounded while
+ * allowing the UI to switch to any selected scope: typical one-to-four-
+ * textbook tasks receive the full ~220-node tree per scope; unusually large
+ * selections receive a clearly marked, smaller projection.
+ */
+function liveProjectionRequests(scopes) {
+  const records = Array.isArray(scopes) ? scopes : [];
+  const maxNodes = Math.max(
+    1,
+    Math.min(
+      1000,
+      Math.floor(MAX_LIVE_PROJECTION_TREE_NODES / Math.max(1, Math.min(MAX_LIVE_PROJECTION_SCOPES, records.length))),
+    ),
+  );
+  const requests = [];
+  for (const scope of records.slice(0, MAX_LIVE_PROJECTION_SCOPES)) {
+    const collectorRunId = Number(scope.collectorRunId || 0);
+    if (!Number.isSafeInteger(collectorRunId) || collectorRunId < 1) continue;
+    requests.push({
+      collectorRunId,
+      textbookExternalId: scope.externalTextbookId,
+      maxNodes,
+      scopeKey: String(scope.externalTextbookId || scope.collectorRunId),
+    });
+  }
+  return requests;
+}
+
+/**
+ * Same projection as publicJob(job, { dbPath }), with the live-progress
+ * reads done through `readLive(collectorRunId, options)` (normally the
+ * off-thread ReaderPool) instead of on the calling thread.
+ */
+async function publicJobAsync(job, readLive) {
+  const requests = liveProjectionRequests(job.scopeItems || []);
+  const liveProjections = new Map();
+  await Promise.all(requests.map(async (request) => {
+    try {
+      const projection = await readLive(request.collectorRunId, {
+        textbookExternalId: request.textbookExternalId,
+        maxNodes: request.maxNodes,
+      });
+      if (projection) liveProjections.set(request.collectorRunId, projection);
+    } catch {
+      // best effort, as in publicJob
+    }
+  }));
+  return publicJob(job, { liveProjections });
+}
+
 function publicJob(job, options = {}) {
   const scopeRecords = (job.scopeItems || []).map((scope) => ({
     sourceProvider: scope.sourceProvider || null,
@@ -152,41 +204,26 @@ function publicJob(job, options = {}) {
     || null;
   const liveByScope = {};
   const liveScopeValues = new Map();
-  if (options.dbPath) {
-    // Keep the aggregate multi-textbook response bounded while allowing the
-    // UI to switch to any selected scope. Typical one-to-four-textbook tasks
-    // therefore receive the full ~220-node tree per scope; unusually large
-    // selections receive a clearly marked, smaller projection.
-    const maxNodesPerScope = Math.max(
-      1,
-      Math.min(
-        1000,
-        Math.floor(MAX_LIVE_PROJECTION_TREE_NODES / Math.max(1, Math.min(
-          MAX_LIVE_PROJECTION_SCOPES,
-          scopeRecords.length,
-        ))),
-      ),
-    );
-    for (const scope of scopeRecords.slice(0, MAX_LIVE_PROJECTION_SCOPES)) {
-      const collectorRunId = Number(scope.collectorRunId || 0);
-      if (!Number.isSafeInteger(collectorRunId) || collectorRunId < 1) continue;
-      let projection = null;
+  for (const request of liveProjectionRequests(scopeRecords)) {
+    let projection = null;
+    if (options.liveProjections) {
+      projection = options.liveProjections.get(request.collectorRunId) || null;
+    } else if (options.dbPath) {
       try {
-        projection = readLiveRunProgress(options.dbPath, collectorRunId, {
-          textbookExternalId: scope.externalTextbookId,
-          maxNodes: maxNodesPerScope,
+        projection = readLiveRunProgress(options.dbPath, request.collectorRunId, {
+          textbookExternalId: request.textbookExternalId,
+          maxNodes: request.maxNodes,
         });
       } catch {
         // Live progress is best effort.  A locked/corrupt snapshot must not
         // turn a normal job status request into a failed collector task.
         projection = null;
       }
-      if (!projection?.available) continue;
-      projection.treeAvailable = projection.treeTruncated !== true;
-      const scopeKey = String(scope.externalTextbookId || scope.collectorRunId);
-      liveByScope[scopeKey] = projection;
-      liveScopeValues.set(scopeKey, projection);
     }
+    if (!projection?.available) continue;
+    projection = { ...projection, treeAvailable: projection.treeTruncated !== true };
+    liveByScope[request.scopeKey] = projection;
+    liveScopeValues.set(request.scopeKey, projection);
   }
   // Keep the canonical scope rows compact. Live trees are exposed through
   // the top-level projection and liveProgressByScope map, avoiding one large
@@ -257,5 +294,7 @@ module.exports = {
   aggregateLiveProgress,
   clampPercent,
   finiteNonnegative,
+  liveProjectionRequests,
   publicJob,
+  publicJobAsync,
 };

@@ -7,22 +7,10 @@
 
 const http = require('node:http');
 
-const {
-  readCandidates,
-  readCatalogProgress,
-  readMetadataSnapshot,
-  readRunAsset,
-  readRunCatalogs,
-  readRunQuestion,
-  readRunQuestions,
-  readRunSnapshot,
-  readRunSnapshotPage,
-  readRunSnapshotSummary,
-  validateMetadataSelection,
-} = require('../storage/readers/index.cjs');
+const { ReaderPool } = require('./reader_pool.cjs');
 const { readJson, safeEqual, sendAssetResponse, sendJson } = require('./http.cjs');
 const { CollectorJobManager, intInRange } = require('./job_manager.cjs');
-const { publicJob } = require('./progress.cjs');
+const { publicJobAsync } = require('./progress.cjs');
 const { collectorReadiness } = require('../policies/collector_readiness.cjs');
 const { reclaimRun } = require('../storage/result_cleanup.cjs');
 const { readFailurePage } = require('../storage/failure_pages.cjs');
@@ -40,6 +28,13 @@ function createCollectorServer(options = {}) {
   const manager = options.manager || new CollectorJobManager(options);
   const {ManualRecovery}=require('./manual_recovery.cjs');
   const recovery=new ManualRecovery(manager);
+  // SQLite reads run off the event loop so /health and job status stay
+  // responsive while a large snapshot page is being read.
+  const readers = options.readerPool || new ReaderPool({
+    threads: options.readerThreads ?? manager.config?.readerThreads ?? 2,
+    timeoutMs: options.readerTimeoutMs ?? manager.config?.readerTimeoutMs ?? 30000,
+  });
+  const read = (name, ...args) => readers.call(name, ...args);
   const server = http.createServer(async (request, response) => {
     try {
       const url = new URL(request.url || '/', 'http://collector.local');
@@ -99,7 +94,7 @@ function createCollectorServer(options = {}) {
           sendJson(response, 404, { error: { code: 'job_not_found', message: '采集任务不存在' } });
           return;
         }
-        sendJson(response, 200, publicJob(job, { dbPath: manager.dbPath }));
+        sendJson(response, 200, await publicJobAsync(job, (runId, readOptions) => read('readLiveRunProgress', manager.dbPath, runId, readOptions)));
         return;
       }
       const failurePageMatch = url.pathname.match(/^\/v1\/metadata\/runs\/(\d+)\/failure-page$/);
@@ -117,11 +112,11 @@ function createCollectorServer(options = {}) {
       const runCatalogMatch = url.pathname.match(/^\/v1\/runs\/([^/]+)\/catalogs\/?$/i);
       const catalogPreviewMatch = url.pathname.match(/^\/v1\/runs\/([^/]+)\/catalogs-preview\/?$/i);
       if (request.method === 'POST' && catalogPreviewMatch) {
-        sendJson(response, 200, readRunCatalogs(manager.dbPath, decodeURIComponent(catalogPreviewMatch[1]), await readJson(request, 8 * 1024 * 1024)));
+        sendJson(response, 200, await read('readRunCatalogs', manager.dbPath, decodeURIComponent(catalogPreviewMatch[1]), await readJson(request, 8 * 1024 * 1024)));
         return;
       }
       if (request.method === 'GET' && runCatalogMatch) {
-        sendJson(response, 200, readRunCatalogs(manager.dbPath, decodeURIComponent(runCatalogMatch[1]), {
+        sendJson(response, 200, await read('readRunCatalogs', manager.dbPath, decodeURIComponent(runCatalogMatch[1]), {
           textbookExternalId: url.searchParams.get('textbookExternalId'),
           page: url.searchParams.get('page'),
           pageSize: url.searchParams.get('pageSize'),
@@ -130,8 +125,7 @@ function createCollectorServer(options = {}) {
       }
       const runSnapshotPageMatch = url.pathname.match(/^\/v1\/runs\/([^/]+)\/snapshot-page\/?$/i);
       if (request.method === 'GET' && runSnapshotPageMatch) {
-        sendJson(response, 200, readRunSnapshotPage(
-          manager.dbPath,
+        sendJson(response, 200, await read('readRunSnapshotPage', manager.dbPath,
           decodeURIComponent(runSnapshotPageMatch[1]),
           {
             collection: url.searchParams.get('collection'),
@@ -145,8 +139,7 @@ function createCollectorServer(options = {}) {
       }
       const runAssetMatch = url.pathname.match(/^\/v1\/runs\/([^/]+)\/assets\/([^/]+)\/?$/i);
       if (request.method === 'GET' && runAssetMatch) {
-        const asset = readRunAsset(
-          manager.dbPath,
+        const asset = await read('readRunAsset', manager.dbPath,
           decodeURIComponent(runAssetMatch[1]),
           decodeURIComponent(runAssetMatch[2]),
           {
@@ -160,8 +153,7 @@ function createCollectorServer(options = {}) {
       }
       const runSnapshotMatch = url.pathname.match(/^\/v1\/runs\/([^/]+)\/snapshot\/?$/i);
       if (request.method === 'GET' && runSnapshotMatch) {
-        sendJson(response, 200, readRunSnapshot(
-          manager.dbPath,
+        sendJson(response, 200, await read('readRunSnapshot', manager.dbPath,
           decodeURIComponent(runSnapshotMatch[1]),
           { textbookExternalId: url.searchParams.get('textbookExternalId') },
         ));
@@ -174,8 +166,7 @@ function createCollectorServer(options = {}) {
           throw new Error('allowIncomplete 必须是 true 或 false');
         }
         const allowIncomplete = rawAllowIncomplete?.toLowerCase() === 'true';
-        sendJson(response, 200, readRunSnapshotSummary(
-          manager.dbPath,
+        sendJson(response, 200, await read('readRunSnapshotSummary', manager.dbPath,
           decodeURIComponent(runSnapshotSummaryMatch[1]),
           {
             textbookExternalId: url.searchParams.get('textbookExternalId'),
@@ -187,8 +178,7 @@ function createCollectorServer(options = {}) {
       }
       const runQuestionDetailMatch = url.pathname.match(/^\/v1\/runs\/([^/]+)\/questions\/([^/]+)\/?$/i);
       if (request.method === 'GET' && runQuestionDetailMatch) {
-        sendJson(response, 200, readRunQuestion(
-          manager.dbPath,
+        sendJson(response, 200, await read('readRunQuestion', manager.dbPath,
           decodeURIComponent(runQuestionDetailMatch[1]),
           decodeURIComponent(runQuestionDetailMatch[2]),
           { textbookExternalId: url.searchParams.get('textbookExternalId') },
@@ -199,11 +189,11 @@ function createCollectorServer(options = {}) {
       const previewMatch = url.pathname.match(/^\/v1\/runs\/([^/]+)\/questions-preview\/?$/i);
       if (request.method === 'POST' && previewMatch) {
         const body = await readJson(request, 8 * 1024 * 1024);
-        sendJson(response, 200, readRunQuestions(manager.dbPath, decodeURIComponent(previewMatch[1]), body));
+        sendJson(response, 200, await read('readRunQuestions', manager.dbPath, decodeURIComponent(previewMatch[1]), body));
         return;
       }
       if (request.method === 'GET' && runQuestionsMatch) {
-        sendJson(response, 200, readRunQuestions(manager.dbPath, decodeURIComponent(runQuestionsMatch[1]), {
+        sendJson(response, 200, await read('readRunQuestions', manager.dbPath, decodeURIComponent(runQuestionsMatch[1]), {
           textbookExternalId: url.searchParams.get('textbookExternalId'),
           page: url.searchParams.get('page'),
           pageSize: url.searchParams.get('pageSize'),
@@ -230,20 +220,20 @@ function createCollectorServer(options = {}) {
       if (request.method === 'POST' && url.pathname === '/v1/metadata/validate') {
         const body = await readJson(request);
         const runId = intInRange(body.metadataRunId, 'metadataRunId', 1, Number.MAX_SAFE_INTEGER);
-        sendJson(response, 200, validateMetadataSelection(manager.dbPath, runId, body.textbookExternalIds));
+        sendJson(response, 200, await read('validateMetadataSelection', manager.dbPath, runId, body.textbookExternalIds));
         return;
       }
       if (request.method === 'GET' && url.pathname === '/v1/metadata/snapshot') {
         const rawRunId = url.searchParams.get('metadataRunId');
         const runId = rawRunId == null ? null : intInRange(rawRunId, 'metadataRunId', 1, Number.MAX_SAFE_INTEGER);
-        sendJson(response, 200, readMetadataSnapshot(manager.dbPath, runId));
+        sendJson(response, 200, await read('readMetadataSnapshot', manager.dbPath, runId));
         return;
       }
       if (request.method === 'GET' && url.pathname === '/v1/candidates') {
         const entityType = url.searchParams.get('entityType') || '';
         const rawRunId = url.searchParams.get('metadataRunId');
         const metadataRunId = rawRunId == null ? null : intInRange(rawRunId, 'metadataRunId', 1, Number.MAX_SAFE_INTEGER);
-        sendJson(response, 200, readCandidates(manager.dbPath, entityType, {
+        sendJson(response, 200, await read('readCandidates', manager.dbPath, entityType, {
           provider: url.searchParams.get('provider'),
           textbookExternalId: url.searchParams.get('textbookExternalId'),
           metadataRunId,
@@ -251,7 +241,7 @@ function createCollectorServer(options = {}) {
         return;
       }
       if (request.method === 'GET' && url.pathname === '/v1/catalog-progress') {
-        sendJson(response, 200, readCatalogProgress(manager.dbPath));
+        sendJson(response, 200, await read('readCatalogProgress', manager.dbPath));
         return;
       }
       sendJson(response, 404, { error: { code: 'not_found', message: 'API 路由不存在' } });
@@ -268,6 +258,8 @@ function createCollectorServer(options = {}) {
     }
   });
   server.collectorManager = manager;
+  server.readerPool = readers;
+  server.once('close', () => { if (!options.readerPool) readers.close(); });
   recovery.attach(server,token);
   return server;
 }
