@@ -1,5 +1,7 @@
 'use strict';
 
+const diagnostics = require('../shared/diagnostics.cjs');
+
 const { QuestionSyncError } = require('../shared/errors.cjs');
 const { ALLOWED_ASSET_HOSTS, assertAllowedUrl } = require('../shared/url_policy.cjs');
 const { responseStatus, responseHeaders } = require('../sources/zujuan/request.cjs');
@@ -48,6 +50,7 @@ async function openAssetResponse(context, url, options) {
     for (let redirects = 0; ; redirects += 1) {
       beforeRequest(options);
       const cookies = await context.cookies(url);
+      const started=performance.now();
       response = await (options.assetFetch || fetch)(url, {
         redirect: 'manual', signal: controller.signal,
         headers: {
@@ -56,6 +59,7 @@ async function openAssetResponse(context, url, options) {
           cookie: cookies.map((cookie) => `${cookie.name}=${cookie.value}`).join('; '),
         },
       });
+      diagnostics.write('asset_http_response',{url:diagnostics.safeUrl(url),redirects,status:response.status,retryAfter:response.headers.get('retry-after'),elapsedMs:Math.round(performance.now()-started)});
       options.sourceControl?.observe(response.status, Object.fromEntries(response.headers), { verification: false });
       if (![301, 302, 303, 307, 308].includes(response.status)) break;
       const location = response.headers.get('location');

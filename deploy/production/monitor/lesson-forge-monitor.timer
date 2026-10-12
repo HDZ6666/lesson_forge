@@ -1,0 +1,11 @@
+[Unit]
+Description=Observe lesson collection once per minute
+
+[Timer]
+OnBootSec=30s
+OnUnitInactiveSec=60s
+AccuracySec=1s
+Unit=lesson-forge-monitor.service
+
+[Install]
+WantedBy=timers.target

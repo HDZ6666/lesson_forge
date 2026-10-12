@@ -1,5 +1,7 @@
 'use strict';
 
+const diagnostics = require('../../shared/diagnostics.cjs');
+
 /**
  * Chrome session management shared by every zujuan collector.
  *
@@ -275,6 +277,7 @@ async function launchCollectorContext(playwright, options) {
   }
   const context = await playwright.chromium.launchPersistentContext(options.profileDir, launchOptions);
   try {
+    diagnostics.instrumentBrowser(context);
     context.setDefaultTimeout(options.timeout);
     context.setDefaultNavigationTimeout(options.timeout);
     await dismissStaleCollectorTabs(context);
@@ -312,6 +315,7 @@ async function connectCollectorOverCDP(playwright, options) {
     // Do not call browser.close(): the CDP browser belongs to the operator.
     throw new QuestionSyncError('CDP Chrome 没有可用的浏览器上下文。', 'cdp_context');
   }
+  diagnostics.instrumentBrowser(context);
   return { browser, context };
 }
 
@@ -346,6 +350,7 @@ async function launchFreshCollectorSession(playwright, options) {
       locale: 'zh-CN',
       viewport: { width: 1440, height: 1000 },
     });
+    diagnostics.instrumentBrowser(context);
     context.setDefaultTimeout(options.timeout);
     context.setDefaultNavigationTimeout(options.timeout);
     const page = await context.newPage();
@@ -445,6 +450,7 @@ async function safeGoto(page, url, gate, options, label) {
       if (retryableStatuses.has(status)) {
         const retryMs = retryAfterMsFromResponse(response) ?? 1000 * (2 ** attempt) + randomBetween(0, 1000);
         if (attempt === 3) throw new StopCrawlError(`HTTP ${status}，重试耗尽。`, `http_${status}`);
+        diagnostics.write('request_retry_scheduled',{url:diagnostics.safeUrl(target),attempt,delayMs:retryMs,status});
         console.warn(`[重试] ${label} 返回 HTTP ${status}，等待 ${(retryMs / 1000).toFixed(1)} 秒`);
         await sleep(retryMs);
         continue;
@@ -458,6 +464,7 @@ async function safeGoto(page, url, gate, options, label) {
       lastError = error;
       if (attempt === 3) break;
       const backoff = 1000 * (2 ** attempt) + randomBetween(0, 1000);
+      diagnostics.write('request_retry_scheduled',{url:diagnostics.safeUrl(target),attempt,delayMs:backoff,message:error.message});
       console.warn(`[重试] ${label} 失败：${error.message}；等待 ${(backoff / 1000).toFixed(1)} 秒`);
       await sleep(backoff);
     }
@@ -515,7 +522,7 @@ async function bringVerificationPageToFront(page) {
   }
 }
 
-async function waitForVerification(page, options = {}) {
+async function waitForVerificationInner(page, options = {}) {
   const timeoutValue = Number(options.verificationTimeout ?? DEFAULT_VERIFICATION_TIMEOUT);
   const timeout = Number.isFinite(timeoutValue) && timeoutValue >= 0
     ? timeoutValue : DEFAULT_VERIFICATION_TIMEOUT;
@@ -530,7 +537,9 @@ async function waitForVerification(page, options = {}) {
   const startedAt = Date.now();
   // Structured hook for the job manager: a human-verification wait is
   // legitimate inactivity, so the caller can keep its stall detector alive.
+  let waitLogged=false;
   const notifyWait = (state) => {
+    if(!waitLogged){waitLogged=true;diagnostics.write('verification_wait_enter',{episodeId:options.diagnosticEpisodeId,reason:options.verificationReason || 'verification'});}
     if (typeof options.onVerificationWait !== 'function') return;
     let url = '';
     try { url = state?.url || (typeof page?.url === 'function' ? String(page.url()) : ''); } catch {}
@@ -604,6 +613,21 @@ async function waitForVerification(page, options = {}) {
     }
     const remaining = Math.max(0, timeout - (Date.now() - startedAt));
     await wait(Math.min(Math.max(100, poll), remaining));
+  }
+}
+
+async function waitForVerification(page, options = {}) {
+  const started=performance.now();
+  const episodeId=require('node:crypto').randomUUID();
+  const detail={episodeId,reason:options.verificationReason || 'verification',requiresProbe:options.requireProbe===true};
+  diagnostics.write('verification_check_started',detail);
+  try {
+    const result=await waitForVerificationInner(page,{...options,diagnosticEpisodeId:episodeId});
+    diagnostics.write('verification_page_clear',{...detail,elapsedMs:Math.round(performance.now()-started)});
+    return result;
+  } catch(error) {
+    diagnostics.write('verification_wait_failed',{...detail,elapsedMs:Math.round(performance.now()-started),code:error.code,message:error.message});
+    throw error;
   }
 }
 

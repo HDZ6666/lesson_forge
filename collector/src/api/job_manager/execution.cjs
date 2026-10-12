@@ -233,7 +233,7 @@ class ExecutionMethods {
         // The fourth fd is the structured event channel (process.send in the
         // child).  Free-text stdout/stderr remain diagnostic logTail only.
         stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
-        env: process.env,
+        env: { ...process.env, COLLECTOR_DIAGNOSTIC_JOB_ID: job.id },
       });
     } catch (error) {
       if (scope) {

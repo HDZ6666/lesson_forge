@@ -1,5 +1,7 @@
 'use strict';
 
+const diagnostics = require('../shared/diagnostics.cjs');
+
 /**
  * HTTP routes of the collector API.  Only fixed job types and bounded
  * read-only snapshot queries are exposed; see collector/README.md.
@@ -41,6 +43,14 @@ function createCollectorServer(options = {}) {
   const {ManualRecovery}=require('./manual_recovery.cjs');
   const recovery=new ManualRecovery(manager);
   const server = http.createServer(async (request, response) => {
+    const started=performance.now();
+    const supplied=String(request.headers['x-lesson-request-id'] || '');
+    const requestId=/^[a-f0-9-]{32,36}$/i.test(supplied)?supplied:require('node:crypto').randomUUID();
+    const detail={requestId,method:request.method,url:diagnostics.safeUrl(request.url)};
+    diagnostics.write('collector_api_started',detail);
+    let finished=false;
+    response.once('finish',()=>{finished=true;diagnostics.write('collector_api_finished',{...detail,status:response.statusCode,elapsedMs:Math.round(performance.now()-started)});});
+    response.once('close',()=>{if(!finished)diagnostics.write('collector_api_aborted',{...detail,status:response.statusCode,elapsedMs:Math.round(performance.now()-started)});});
     try {
       const url = new URL(request.url || '/', 'http://collector.local');
       if (request.method === 'GET' && url.pathname === '/health') {

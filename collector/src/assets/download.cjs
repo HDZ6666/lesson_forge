@@ -1,5 +1,7 @@
 'use strict';
 
+const diagnostics = require('../shared/diagnostics.cjs');
+
 /**
  * Question asset (image / formula) download with allow-listed hosts, size
  * cap, SHA-256 content addressing and the formula PNG -> SVG fallback.
@@ -114,11 +116,16 @@ async function downloadAsset(context, options, asset) {
   const downloadOne = async (requestUrl) => {
     let lastHeaders = {};
     for (let retryIndex = 0; retryIndex <= MAX_RETRIES; retryIndex += 1) {
+      const started=performance.now();
+      const requestId=require('node:crypto').randomUUID();
+      const detail={requestId,attempt:retryIndex+1,url:diagnostics.safeUrl(requestUrl)};
+      diagnostics.write('asset_attempt_started',detail);
       let response = null;
       try {
         response = await openAssetResponse(context, requestUrl, options);
         const status = responseStatus(response);
         const headers = responseHeaders(response);
+        detail.status=status;
         options.sourceControl?.observe(status, headers, { verification: false });
         lastHeaders = headers;
         if (status < 200 || status >= 300) {
@@ -153,8 +160,10 @@ async function downloadAsset(context, options, asset) {
         if (body.length > MAX_ASSET_BYTES) {
           throw new QuestionSyncError(`素材超过 10MB：${requestUrl}`, 'asset_too_large');
         }
+        diagnostics.write('asset_attempt_finished',{...detail,elapsedMs:Math.round(performance.now()-started),bytes:body.length,outcome:'success'});
         return { body, mimeType, requestUrl };
       } catch (error) {
+        diagnostics.write('asset_attempt_finished',{...detail,elapsedMs:Math.round(performance.now()-started),outcome:'error',code:error.code,message:error.message});
         await disposeResponse(response);
         response = null;
         if (error.blocked) throw error;
@@ -163,6 +172,7 @@ async function downloadAsset(context, options, asset) {
         );
         if (!retryable || retryIndex >= MAX_RETRIES) throw error;
         const delay = retryDelay('normal', retryIndex, lastHeaders, options.randomFn || Math.random);
+        diagnostics.write('request_retry_scheduled',{...detail,delayMs:delay,reason:error.code});
         console.warn(`[素材重试] ${requestUrl} 第 ${retryIndex + 1}/${MAX_RETRIES} 次，等待 ${(delay / 1000).toFixed(1)} 秒：${error.message}`);
         await wait(delay);
       }
