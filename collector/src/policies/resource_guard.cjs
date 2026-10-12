@@ -7,27 +7,59 @@ const { StopCrawlError } = require('../shared/errors.cjs');
 const { nonnegativeLimit } = require('./source_budget.cjs');
 const MIB = 1024 * 1024;
 
-function availableMemory() {
-  let available = os.freemem();
+function readText(file) {
+  return fs.readFileSync(file, 'utf8');
+}
+
+function statValue(text, key) {
+  const match = new RegExp(`^${key}\\s+(\\d+)$`, 'm').exec(String(text || ''));
+  return match ? Number(match[1]) : 0;
+}
+
+/**
+ * Memory the collector may still use, in bytes.
+ *
+ * Host: /proc/meminfo MemAvailable, which already counts reclaimable cache.
+ *
+ * Container: the cgroup limit minus the working set. memory.current (v1:
+ * usage_in_bytes) also counts page cache, and a crawl that writes raw pages,
+ * assets and SQLite fills that cache up to the limit, so `limit - current`
+ * drifts toward zero while the kernel could free most of it on demand. That
+ * would trigger browser recycles and then a memory stop for no reason. As
+ * `docker stats` and the kubelet do, inactive_file (v1:
+ * total_inactive_file) is subtracted first.
+ */
+function availableMemory({ read = readText, platform = process.platform, freemem = os.freemem } = {}) {
+  let available = freemem();
   // Linux free pages exclude reclaimable cache. Match the kernel's available
   // estimate so normal filesystem caching does not create a false pause.
-  if (process.platform === 'linux') {
+  if (platform === 'linux') {
     try {
-      const value = fs.readFileSync('/proc/meminfo', 'utf8').match(/^MemAvailable:\s+(\d+)\s+kB$/m);
+      const value = read('/proc/meminfo').match(/^MemAvailable:\s+(\d+)\s+kB$/m);
       if (value && Number.isSafeInteger(Number(value[1]) * 1024)) available = Number(value[1]) * 1024;
     } catch {} // Keep os.freemem() as the conservative fallback.
   }
   // Container memory may be far smaller than the host's os.freemem().
-  for (const [limitPath, usedPath] of [
-    ['/sys/fs/cgroup/memory.max', '/sys/fs/cgroup/memory.current'],
-    ['/sys/fs/cgroup/memory/memory.limit_in_bytes', '/sys/fs/cgroup/memory/memory.usage_in_bytes'],
+  for (const [limitPath, usedPath, statPath, inactiveKey] of [
+    ['/sys/fs/cgroup/memory.max', '/sys/fs/cgroup/memory.current', '/sys/fs/cgroup/memory.stat', 'inactive_file'],
+    [
+      '/sys/fs/cgroup/memory/memory.limit_in_bytes',
+      '/sys/fs/cgroup/memory/memory.usage_in_bytes',
+      '/sys/fs/cgroup/memory/memory.stat',
+      'total_inactive_file',
+    ],
   ]) {
     try {
-      const limit = Number(fs.readFileSync(limitPath, 'utf8').trim());
-      const used = Number(fs.readFileSync(usedPath, 'utf8').trim());
-      if (Number.isSafeInteger(limit) && limit > 0 && Number.isSafeInteger(used) && used >= 0) {
-        available = Math.min(available, Math.max(0, limit - used));
-      }
+      const limit = Number(read(limitPath).trim());
+      const used = Number(read(usedPath).trim());
+      if (!Number.isSafeInteger(limit) || limit <= 0 || !Number.isSafeInteger(used) || used < 0) continue;
+      let inactive = 0;
+      try {
+        inactive = statValue(read(statPath), inactiveKey);
+      } catch {} // Without memory.stat, fall back to the raw usage.
+      const workingSet = Math.max(0, used - Math.min(inactive, used));
+      available = Math.min(available, Math.max(0, limit - workingSet));
+      break;
     } catch {} // macOS or an unrestricted/non-cgroup host.
   }
   return available;
