@@ -10,9 +10,9 @@
  * pool runs the read-only reader functions in `worker_threads` so the event
  * loop only parses requests and writes responses.
  *
- * Only the reader names in READER_NAMES can be called.  A call that exceeds
- * its timeout terminates that worker (the next call spawns a fresh one) and
- * rejects with HTTP 504, so one runaway query cannot wedge the pool.
+ * Only the reader names in READER_NAMES can be called. The deadline includes
+ * queue time. An expired queued call is removed; an expired running call
+ * terminates its worker. Both reject with HTTP 504 within the same budget.
  *
  * `threads: 0` runs the readers inline on the calling thread.  That keeps the
  * old behaviour available for debugging and for hosts where threads are not
@@ -108,14 +108,25 @@ class ReaderPool {
       }
     }
     return new Promise((resolve, reject) => {
-      this.queue.push({ id: this.nextId++, name, args, resolve, reject });
+      const task = {
+        id: this.nextId++,
+        name,
+        args,
+        resolve,
+        reject,
+        deadline: performance.now() + this.timeoutMs,
+        timeoutMs: this.timeoutMs,
+      };
+      task.timer = setTimeout(() => this._timeout(task), this.timeoutMs);
+      task.timer.unref?.();
+      this.queue.push(task);
       this._drain();
     });
   }
 
   _spawn() {
     const worker = new Worker(this.workerScript);
-    const slot = { worker, task: null, timer: null };
+    const slot = { worker, task: null };
     worker.unref();
     worker.on('message', (message) => this._settle(slot, message));
     worker.on('error', (error) => this._fail(slot, error));
@@ -130,6 +141,10 @@ class ReaderPool {
 
   _drain() {
     while (this.queue.length) {
+      if (performance.now() >= this.queue[0].deadline) {
+        this._timeout(this.queue[0]);
+        continue;
+      }
       let slot = this.workers.find((candidate) => !candidate.task);
       if (!slot && this.workers.length < this.threads) slot = this._spawn();
       if (!slot) return;
@@ -137,16 +152,13 @@ class ReaderPool {
       slot.task = task;
       // Keep the process alive while a request waits on a reader.
       slot.worker.ref();
-      slot.timer = setTimeout(() => this._timeout(slot), this.timeoutMs);
-      slot.timer.unref?.();
       slot.worker.postMessage({ id: task.id, name: task.name, args: task.args });
     }
   }
 
   _release(slot) {
-    clearTimeout(slot.timer);
-    slot.timer = null;
     const task = slot.task;
+    clearTimeout(task.timer);
     slot.task = null;
     slot.worker.unref();
     return task;
@@ -154,6 +166,10 @@ class ReaderPool {
 
   _settle(slot, message) {
     if (!slot.task || message?.id !== slot.task.id) return;
+    if (performance.now() >= slot.task.deadline) {
+      this._timeout(slot.task);
+      return;
+    }
     const task = this._release(slot);
     if (message.ok) task.resolve(unpackResult(task.name, message.result));
     else {
@@ -170,20 +186,27 @@ class ReaderPool {
     task.reject(Object.assign(new Error(String(error?.message || error)), { statusCode: 500, code: 'reader_failed' }));
   }
 
-  _timeout(slot) {
-    if (!slot.task) return;
-    const task = this._release(slot);
+  _timeout(task) {
+    const slot = this.workers.find((candidate) => candidate.task === task);
+    if (slot) {
+      this._release(slot);
+      this.stats.restarts += 1;
+      this.workers = this.workers.filter((candidate) => candidate !== slot);
+      slot.worker.terminate().catch(() => {});
+    } else {
+      const index = this.queue.indexOf(task);
+      if (index < 0) return;
+      this.queue.splice(index, 1);
+      clearTimeout(task.timer);
+    }
     this.stats.timeouts += 1;
-    this.stats.restarts += 1;
-    this.workers = this.workers.filter((candidate) => candidate !== slot);
-    slot.worker.terminate().catch(() => {});
     task.reject(
-      Object.assign(new Error(`读取超过 ${Math.round(this.timeoutMs / 1000)} 秒，已中止`), {
+      Object.assign(new Error(`读取（含排队）超过 ${Math.round(task.timeoutMs / 1000)} 秒，已中止`), {
         statusCode: 504,
         code: 'reader_timeout',
       }),
     );
-    this._drain();
+    if (slot) this._drain();
   }
 
   status() {
@@ -199,7 +222,10 @@ class ReaderPool {
     if (this.closed) return;
     this.closed = true;
     const pending = this.queue.splice(0);
-    for (const task of pending) task.reject(Object.assign(new Error('采集器正在停止'), { statusCode: 503 }));
+    for (const task of pending) {
+      clearTimeout(task.timer);
+      task.reject(Object.assign(new Error('采集器正在停止'), { statusCode: 503 }));
+    }
     const workers = this.workers.splice(0);
     await Promise.all(
       workers.map(async (slot) => {

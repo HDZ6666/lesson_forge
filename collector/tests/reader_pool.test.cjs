@@ -91,6 +91,46 @@ test('calls beyond the thread count queue instead of failing', async () => {
   }
 });
 
+test('reader deadline includes time waiting for a free thread', async () => {
+  const pool = new ReaderPool({ threads: 2, timeoutMs: 1000, workerScript: FAKE_WORKER });
+  try {
+    await Promise.all([pool.call('readCandidates', 0), pool.call('readCandidates', 0)]);
+    const started = Date.now();
+    const first = pool.call('readCandidates', 700);
+    const second = pool.call('readCandidates', 700);
+    const third = assert.rejects(pool.call('readCandidates', 700), (error) => {
+      assert.equal(error.statusCode, 504);
+      assert.equal(error.code, 'reader_timeout');
+      return true;
+    });
+    await Promise.all([first, second, third]);
+    assert.ok(Date.now() - started < 1400);
+    assert.equal(pool.status().timeouts, 1);
+    assert.equal(pool.status().queued, 0);
+    assert.equal((await pool.call('readCandidates', 1)).slept, 1);
+  } finally {
+    await pool.close();
+  }
+});
+
+test('expired queued reads never start or interrupt the active reader', async () => {
+  const pool = new ReaderPool({ threads: 1, timeoutMs: 3000, workerScript: FAKE_WORKER });
+  try {
+    await pool.call('readCandidates', 0);
+    const active = pool.call('readCandidates', 1500);
+    // A shorter budget for subsequent calls exercises queue-only expiry.
+    pool.timeoutMs = 1000;
+    const results = await Promise.allSettled([pool.call('readCandidates', 5000), pool.call('readCandidates', 5000)]);
+    assert.ok(results.every((result) => result.status === 'rejected' && result.reason.code === 'reader_timeout'));
+    assert.equal(pool.status().timeouts, 2);
+    assert.equal(pool.status().restarts, 0);
+    assert.equal(pool.status().queued, 0);
+    assert.equal((await active).slept, 1500);
+  } finally {
+    await pool.close();
+  }
+});
+
 test('asset descriptor survives the thread hop and stays out of JSON', async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'reader-pool-asset-'));
   const filePath = path.join(directory, 'a.txt');

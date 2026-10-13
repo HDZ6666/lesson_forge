@@ -14,7 +14,8 @@
  * - A repeated request for the same task joins the one in flight, so a
  *   service retry after its own HTTP timeout never starts a second delete.
  * - A different task while one runs gets 409 `maintenance_busy`.
- * - Crawl jobs cannot start while a task runs (`assertIdle`), and maintenance
+ * - Crawl jobs get 423 while a task runs (`assertIdle`), so the Service keeps
+ *   them queued using its existing temporary-pause handling. Maintenance
  *   refuses to run while a job is active.
  * - No timeout: reclaim is one transaction and stopping it midway only rolls
  *   it back. On shutdown an unfinished task is terminated. SQLite rolls back
@@ -76,10 +77,10 @@ class Maintenance {
     return Boolean(this.current);
   }
 
-  /** Throws 409 while a maintenance task holds the database. */
+  /** 423 is a temporary dispatch pause; 409 would fail the Service task. */
   assertIdle() {
     if (this.current) {
-      throw httpError('采集器正在回收或整理数据库，请稍后再启动', 409, 'maintenance_busy');
+      throw httpError('采集器正在回收或整理数据库，请稍后再启动', 423, 'maintenance_busy');
     }
   }
 

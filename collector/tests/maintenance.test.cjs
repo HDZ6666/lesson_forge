@@ -10,7 +10,7 @@ const { checkpointDatabase } = require('../src/storage/maintenance.cjs');
 
 const SLOW = path.join(__dirname, 'fixtures', 'workers', 'slow_maintenance_worker.cjs');
 
-test('维护任务：同一任务重复请求合并，不同任务 409，启动采集被拦截', async () => {
+test('维护任务：同一任务重复请求合并，不同维护任务 409，启动采集暂缓为 423', async () => {
   const m = new Maintenance({ workerScript: SLOW });
   const first = m.run('reclaimRun', '7', 150);
   const again = m.run('reclaimRun', '7', 150);
@@ -18,7 +18,7 @@ test('维护任务：同一任务重复请求合并，不同任务 409，启动�
   assert.equal(m.busy, true);
   assert.throws(
     () => m.assertIdle(),
-    (error) => error.code === 'maintenance_busy' && error.statusCode === 409,
+    (error) => error.code === 'maintenance_busy' && error.statusCode === 423,
   );
   await assert.rejects(m.run('reclaimRun', '8', 1), (error) => error.code === 'maintenance_busy');
   assert.deepEqual(await first, { name: 'reclaimRun', ms: 150 });

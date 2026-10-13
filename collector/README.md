@@ -110,8 +110,8 @@ npm start
 - 任务持久化在同一 SQLite 的 `collector_jobs` 表：`active_slot` 唯一索引是跨进程互斥（第二个活动任务得到 409）；重启后前一进程遗留的活动任务被封存为 `interrupted`/`failed`、`errorCode=collector_restarted`，对应 run 同时封存，`GET /v1/jobs/:id` 仍能查到历史任务。
 - 直接运行 CLI 时可加隐藏参数 `--events-stdout`，把同样的事件打印为 `@@event` 行。
 - 进度类写入按 `COLLECTOR_PERSIST_INTERVAL_MS`（默认 5000 ms）合并，并在间隔结束时补写最后一次；状态变化、错误和封存总是立即写入。内容没有变化的行不重写。
-- API 的 SQLite 读取（快照分页、运行汇总、实时进度等）在 `COLLECTOR_READER_THREADS` 个工作线程中执行（默认 2，`0` 回到主线程读取），单次超过 `COLLECTOR_READER_TIMEOUT_MS`（默认 25000，需小于 Service 的 30 秒请求超时）返回 504 并替换该线程。大查询不再阻塞 `/health` 和任务状态轮询。
-- 成果回收（`POST /v1/runs/{id}/reclaim`）和 WAL 整理在独立维护线程中执行，同一时间只跑一个：同一 run 的重复请求合并到进行中的任务，其他维护请求返回 409 `maintenance_busy`，维护期间启动采集同样返回 409。每次回收后以及每个任务结束后，会执行 `wal_checkpoint(TRUNCATE)`，把 -wal 文件截回 0；空闲页留给后续采集复用，不做 VACUUM。
+- API 的 SQLite 读取（快照分页、运行汇总、实时进度等）在 `COLLECTOR_READER_THREADS` 个工作线程中执行（默认 2，`0` 回到主线程读取），从入队开始计算 `COLLECTOR_READER_TIMEOUT_MS`（默认 25000，需小于 Service 的 30 秒请求超时），包含排队和执行时间；超时返回 504，尚未开始的请求移出队列，已执行的请求中止并替换线程。大查询不再阻塞 `/health` 和任务状态轮询。
+- 成果回收（`POST /v1/runs/{id}/reclaim`）和 WAL 整理在独立维护线程中执行，同一时间只跑一个：同一 run 的重复请求合并到进行中的任务，其他维护请求返回 409 `maintenance_busy`，维护期间启动采集返回 423 `maintenance_busy`，Service 保持任务排队并在 30 秒后重试。每次回收后以及每个任务结束后，会执行 `wal_checkpoint(TRUNCATE)`，把 -wal 文件截回 0；空闲页留给后续采集复用，不做 VACUUM。
 
 ### 新建、重试与续采
 

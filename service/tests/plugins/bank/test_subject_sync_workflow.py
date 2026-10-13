@@ -130,19 +130,20 @@ async def test_discovery_source_pause_keeps_waiting_and_can_cancel(bank_db):
 
 
 @pytest.mark.asyncio
-async def test_explicit_pause_racing_dispatch_is_waiting_not_failed(bank_db, monkeypatch):
+@pytest.mark.parametrize('reason', ['来源等待恢复', '采集器正在回收或整理数据库，请稍后再启动'])
+async def test_explicit_pause_racing_dispatch_is_waiting_not_failed(bank_db, monkeypatch, reason):
     task = await SyncTaskService.create_textbook(bank_db, {'acknowledgeSourcePolicy': True}, 'teacher')
     claim = await dispatch.claim_next(bank_db)
     factory = async_sessionmaker(bank_db.bind, expire_on_commit=False)
     monkeypatch.setattr(runs.DataSourceRegistry, 'session', factory)
     class Paused:
         def start_job(self, *args, **kwargs):
-            raise ServiceException(message='来源等待恢复') from HTTPError('http://collector/v1/jobs', 423, 'paused', {}, None)
+            raise ServiceException(message=reason) from HTTPError('http://collector/v1/jobs', 423, 'paused', {}, None)
     monkeypatch.setattr(runs, 'CollectorClient', Paused)
     await bank_db.rollback()
     await runs._execute(task['taskId'], runs._WorkerHandle(token=claim['token'], task_module='textbook', run_type='metadata', workflow_version=2))
     row = await bank_db.get(QbSyncJob, task['taskId'], populate_existing=True)
-    assert row.status == 'queued' and row.active_slot is None and row.dispatch_error == '来源等待恢复'
+    assert row.status == 'queued' and row.active_slot is None and row.dispatch_error == reason
     assert row.error_message is None
 
 

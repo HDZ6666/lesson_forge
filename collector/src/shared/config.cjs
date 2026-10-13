@@ -82,7 +82,7 @@ const SETTINGS = [
     min: 1000,
     max: 600000,
     scope: 'api',
-    doc: '单次读取时限，超时返回 504；需小于 Service 的 30 秒请求超时',
+    doc: '读取总时限（含排队），超时返回 504；需小于 Service 的 30 秒请求超时',
   },
   // Crawl pacing (passed to the child as CLI flags)
   {
@@ -199,6 +199,20 @@ const SETTINGS = [
     doc: '每日下载量，0 不限',
   },
   // Debugging
+  {
+    name: 'COLLECTOR_DIAGNOSTICS_DIR',
+    kind: 'path',
+    fallback: null,
+    scope: 'debug',
+    doc: '事件日志目录，默认使用 COLLECTOR_DATA_DIR/diagnostics',
+  },
+  {
+    name: 'COLLECTOR_DIAGNOSTIC_JOB_ID',
+    kind: 'string',
+    fallback: '',
+    scope: 'debug',
+    doc: '管理器传给采集子进程的日志关联任务 ID',
+  },
   {
     name: 'COLLECTOR_EVENT_CHANNEL',
     kind: 'enum',

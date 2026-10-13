@@ -97,6 +97,31 @@ async function waitFor(predicate, timeoutMs = 2000) {
   assert.fail('等待采集任务状态超时');
 }
 
+test('starting collection during maintenance returns a temporary dispatch pause', async () => {
+  const { Maintenance } = require('../src/api/maintenance.cjs');
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'collector-maintenance-api-'));
+  const maintenance = new Maintenance({
+    workerScript: path.join(__dirname, 'fixtures/workers/slow_maintenance_worker.cjs'),
+  });
+  const server = createCollectorServer({ dbPath: fixtureDb(directory), token: 'test-token', maintenance });
+  const baseUrl = await listen(server);
+  const running = maintenance.run('reclaimRun', '1', 1500);
+  try {
+    const response = await fetch(`${baseUrl}/v1/jobs`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer test-token', 'content-type': 'application/json' },
+      body: JSON.stringify({ runType: 'metadata', acknowledgeSourcePolicy: true }),
+    });
+    assert.equal(response.status, 423);
+    assert.equal((await response.json()).error.code, 'maintenance_busy');
+    assert.equal((await fetch(`${baseUrl}/health`)).status, 200);
+  } finally {
+    await running;
+    await close(server);
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test('collector API exposes authenticated bounded snapshots and scoped candidates', async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'collector-api-'));
   const server = createCollectorServer({ dbPath: fixtureDb(directory), token: 'test-token' });
