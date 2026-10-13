@@ -74,6 +74,7 @@ function buildScope(options, catalogCount = 0, selectedCount = 0, summaryInfo = 
     maxPages: options.maxPages,
     maxPagesProvided: options.maxPagesProvided,
     limitTo1000Pages: options.limitTo1000Pages === true,
+    catalogPageLimit: options.catalogPageLimit ?? null,
     limit: options.limit,
     downloadAssets: options.downloadAssets,
     contentSource: 'list_api',

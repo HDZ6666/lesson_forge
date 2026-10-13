@@ -151,6 +151,7 @@ class _WorkerHandle:
     # A per-task question collection policy. Rehydrate this from options_json
     # so retries/resumes keep the same page-limit mode.
     list_concurrency: int | None = None
+    catalog_page_limit: int | None = None
     limit_to_1000_pages: bool = False
     workflow_version: int = 1
     dispatch_job_id: str | None = None
@@ -2157,6 +2158,8 @@ async def _execute_remote(  # noqa: PLR0912, PLR0915
             start_kwargs['limit_to_1000_pages'] = True
         if handle.task_module == 'question' and handle.list_concurrency is not None:
             start_kwargs['list_concurrency'] = handle.list_concurrency
+        if handle.task_module == 'question' and handle.catalog_page_limit is not None:
+            start_kwargs['catalog_page_limit'] = handle.catalog_page_limit
         if handle.workflow_version >= 2:
             start_kwargs['workflow_version'] = 2
         dispatch_id = handle.dispatch_job_id
@@ -2567,6 +2570,7 @@ async def _execute(run_id: int, handle: _WorkerHandle) -> None:  # noqa: PLR0912
                         options = {}
                 options = options if isinstance(options, Mapping) else {}
                 handle.list_concurrency = options.get('listConcurrency')
+                handle.catalog_page_limit = options.get('catalogPageLimit')
                 handle.workflow_version = int(options.get('workflowVersion', 1))
                 handle.resumed = handle.resumed or bool(options.get('resumeTask') or options.get('resume_task'))
                 handle.limit_to_1000_pages = _status_flag(
@@ -3122,6 +3126,11 @@ class SyncRunService:
         if run_type == 'content' and options.get('workflowVersion', 2) >= 2 and len(selected) != 1:
             raise ServiceException(message='新同步任务必须且只能选择一本教材')
         plan_id=options.get('autoPlanId') or options.get('manualPlanId')
+        if plan_id and task_module == 'question':
+            from plugins.bank.entity.do.bank_do import QbSyncPlan
+            page_plan = await db.get(QbSyncPlan, plan_id)
+            if page_plan is not None:
+                options.update(catalogPageLimit=page_plan.catalog_page_limit, limitTo1000Pages=False)
         rank=0
         if plan_id:
             from plugins.bank.entity.do.bank_do import QbSyncPlan
@@ -3262,6 +3271,7 @@ class SyncRunService:
             textbook_scopes=resolved_textbook_scopes,
             workflow_version=int(options.get('workflowVersion', 1)),
             limit_to_1000_pages=bool(options.get('limitTo1000Pages', False)),
+            catalog_page_limit=options.get('catalogPageLimit'),
         )
         task = asyncio.create_task(_execute(run_id, handle))
         handle.task = task

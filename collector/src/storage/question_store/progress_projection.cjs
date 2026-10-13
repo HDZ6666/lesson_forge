@@ -49,7 +49,7 @@ class ProgressProjectionMethods {
       parseErrorCount: Number(row.parse_error_count || 0),
       assetErrorCount: Number(row.asset_error_count || 0),
       stallReason: row.stall_reason || null,
-      pageLimitReached: row.stall_reason === 'page_limit_1000',
+      pageLimitReached: ['page_limit_1000', 'configured_page_limit'].includes(row.stall_reason),
       scanPercentHighWater: row.scan_percent_high_water == null ? null : Number(row.scan_percent_high_water),
     };
   }

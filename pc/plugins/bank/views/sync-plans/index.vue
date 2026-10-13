@@ -68,7 +68,7 @@ import PlanSettingsFields from '../../components/PlanSettingsFields.vue'
 import {planBookStage,planProgress,planPhase} from '../../utils/sync-plan.js'
 import '../../styles/sync-center.scss'
 const route=useRoute(),router=useRouter(),subjectId=ref(Number(route.query.subjectId)||1),books=ref([]),plan=ref({}),control=ref({}),loading=ref(true),saving=ref(false),error=ref('')
-const form=ref({planName:'',enabled:true,autoUpdate:true,refreshDays:7,listConcurrency:8}),settingsVisible=ref(false),endVisible=ref(false),keepUpdates=ref(true)
+const form=ref({planName:'',enabled:true,autoUpdate:true,refreshDays:7,listConcurrency:8,catalogPageLimit:1000}),settingsVisible=ref(false),endVisible=ref(false),keepUpdates=ref(true)
 const orderVisible=ref(false),orderBooks=ref([]),orderRevision=ref(),singleVisible=ref(false),singleBook=ref(),singleConcurrency=ref(0),allowPaused=ref(false)
 const bookForm=ref({}),bookDialog=ref(false),bookSearch=ref(''),bookStatus=ref(''),historyVisible=ref(false),historyRows=ref([]),historyCursor=ref()
 const progress=computed(()=>planProgress(books.value)),phase=computed(()=>control.value.source?.manualRequired ? '等待人工处理来源验证，后续采集已暂停' : planPhase(plan.value,progress.value))
@@ -97,7 +97,7 @@ async function load(silent=false) {
     const b=current.planId?data(await request({url:`/bank/sync/plans/${current.planId}/books`})) : []
     if(id!==epoch)return
     plan.value=current;books.value=b;control.value=data(c);loadedSubjectId.value=requestedSubject
-    if(!silent&&!settingsVisible.value)form.value={planName:current.planName||'',enabled:current.planId?current.enabled:true,autoUpdate:current.autoUpdate ?? true,refreshDays:current.refreshDays||7,listConcurrency:current.listConcurrency||8}
+    if(!silent&&!settingsVisible.value)form.value={planName:current.planName||'',enabled:current.planId?current.enabled:true,autoUpdate:current.autoUpdate ?? true,refreshDays:current.refreshDays||7,listConcurrency:current.listConcurrency||8,catalogPageLimit:current.catalogPageLimit ?? 1000}
   } catch(e) {
     if(id===epoch)error.value=e.message || '计划加载失败，请点击刷新重试'
   } finally {

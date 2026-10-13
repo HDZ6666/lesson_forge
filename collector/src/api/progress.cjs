@@ -252,6 +252,7 @@ function publicJob(job, options = {}) {
     maxPages: job.maxPages,
     listConcurrency: job.listConcurrency ?? null,
     limitTo1000Pages: job.limitTo1000Pages === true,
+    catalogPageLimit: job.catalogPageLimit ?? null,
     catalogCount: job.catalogCount,
     questionCount: job.questionCount,
     questionCatalogCount: Number(job.questionCatalogCount || 0),

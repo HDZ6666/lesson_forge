@@ -448,6 +448,7 @@ class ExecutionMethods {
       // checkpoint switch passed to the child.
       if (job.maxPages < SITE_PAGE_LIMIT) childArgs.push('--max-pages', String(job.maxPages));
       if (job.limitTo1000Pages === true) childArgs.push('--limit-to-1000-pages');
+      if (job.catalogPageLimit != null) childArgs.push('--catalog-page-limit', String(job.catalogPageLimit));
       childArgs.push(
         ...crawlTuningArgs({
           ...this.crawlTuning,

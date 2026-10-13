@@ -325,6 +325,13 @@ class CollectorJobManager {
       throw new Error('listConcurrency 仅接受题目任务的 1 到 16 整数');
     }
     const limitTo1000Pages = requestBoolean(payload.limitTo1000Pages, 'limitTo1000Pages', false);
+    const catalogPageLimit = payload.catalogPageLimit ?? null;
+    if (
+      catalogPageLimit !== null &&
+      (runType !== 'content' || !Number.isInteger(catalogPageLimit) || catalogPageLimit < 1 || catalogPageLimit > 10000)
+    ) {
+      throw new Error('catalogPageLimit 仅接受题目任务的 1 到 10000 整数');
+    }
     const hasIndependentScopes =
       runType === 'content' && Object.prototype.hasOwnProperty.call(payload, 'textbookScopes');
     if (runType === 'content' && Object.prototype.hasOwnProperty.call(payload, 'resumeFromCollectorRunId')) {
@@ -368,6 +375,7 @@ class CollectorJobManager {
           independentScopes,
           sourceNamespace: 'zujuan:junior:math',
           ...(listConcurrency == null ? {} : { listConcurrency }),
+          ...(catalogPageLimit == null ? {} : { catalogPageLimit }),
         }),
       )
       .digest('hex');
@@ -453,6 +461,7 @@ class CollectorJobManager {
           : [],
       maxPages,
       limitTo1000Pages,
+      catalogPageLimit,
       totalVersions: 0,
       completedVersions: 0,
       totalTextbooks: textbookExternalIds.length,

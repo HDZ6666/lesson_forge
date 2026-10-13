@@ -829,7 +829,7 @@ test('部署浏览器模式统一传递给教材发现和内容子进程', async
   }
 });
 
-test('单任务分页并发覆盖部署值，持久保存且派发重放不能换参数', async () => {
+test('单任务分页并发和数字页上限持久保存，派发重放不能换参数', async () => {
   const { directory, dbPath } = temporaryDb('task-concurrency-');
   seedMetadata(dbPath);
   let args;
@@ -843,11 +843,23 @@ test('单任务分页并发覆盖部署值，持久保存且派发重放不能�
       return child;
     },
   });
-  const payload = { ...contentPayload(), jobId: 'ac4102a1-8237-4ef8-a56a-6611df50c9c8', listConcurrency: 4 };
+  const payload = {
+    ...contentPayload(),
+    jobId: 'ac4102a1-8237-4ef8-a56a-6611df50c9c8',
+    listConcurrency: 4,
+    catalogPageLimit: 1500,
+  };
   try {
     const result = manager.start(payload);
     await waitFor(() => args != null);
     assert.equal(args[args.indexOf('--concurrency') + 1], '4');
+    assert.equal(args[args.indexOf('--catalog-page-limit') + 1], '1500');
+    assert.equal(parseArgs(args.slice(1)).catalogPageLimit, 1500);
+    assert.equal(manager.store.load(result.id).catalogPageLimit, 1500);
+    assert.equal(manager.start(payload).catalogPageLimit, 1500);
+    assert.throws(() => manager.start({ ...payload, catalogPageLimit: 1000 }), /不同采集范围/);
+    for (const value of [0, 10001, 1.5, true, '1500'])
+      assert.throws(() => manager.start({ ...payload, catalogPageLimit: value }), /catalogPageLimit/);
     assert.equal(manager.store.load(result.id).listConcurrency, 4);
     assert.equal(manager.start(payload).listConcurrency, 4);
     assert.throws(() => manager.start({ ...payload, listConcurrency: 2 }), /不同采集范围/);

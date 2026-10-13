@@ -19,6 +19,11 @@ const {
 const { QuestionSyncError } = require('../src/shared/errors.cjs');
 
 describe('pagination policy', () => {
+  it('数字目录上限支持 1000 和 1500，并优先于旧布尔开关', () => {
+    assert.equal(catalogLastPage({ catalogPageLimit: 1000 }), 1000);
+    assert.equal(catalogLastPage({ catalogPageLimit: 1500, limitTo1000Pages: true }), 1500);
+    assert.equal(catalogLastPage({ catalogPageLimit: 1500, maxPagesProvided: true, maxPages: 50 }), 50);
+  });
   it('total 增大只扩展目标页数，减小或缺失不收缩', () => {
     assert.equal(growTargetPages(10, 10013, 10), 1002);
     assert.equal(growTargetPages(1002, 10012, 10), 1002);

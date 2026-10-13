@@ -500,6 +500,7 @@ def task_payload(row: object, scopes: list[object] | None = None) -> dict[str, A
         'discoveryResult': options.get('discoveryResult'),
         'discoveryError': options.get('discoveryError'),
         'workflowVersion': options.get('workflowVersion', 1),
+        'catalogPageLimit': options.get('catalogPageLimit'),
         'resumeFromCollectorRunId': normalized_row_resume,
         'resumeAvailable': bool(resume_ids)
         if int(options.get('workflowVersion', 1)) >= 2

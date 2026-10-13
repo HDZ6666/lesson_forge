@@ -39,6 +39,7 @@ const PERSISTED_FIELDS = [
   'scopeItems',
   'maxPages',
   'limitTo1000Pages',
+  'catalogPageLimit',
   'totalVersions',
   'completedVersions',
   'totalTextbooks',

@@ -720,6 +720,7 @@ export function normalizeSyncTask(response, kind = '') {
     retryOfTaskId: firstTaskField(value, ['retryOfTaskId', 'retry_of_task_id', 'retryOfRunId', 'retry_of_run_id'], ''),
     collectorJobId: firstTaskField(value, ['collectorJobId', 'collector_job_id'], ''),
     limitTo1000Pages: booleanValue(firstTaskField(value, ['limitTo1000Pages', 'limit_to_1000_pages'], false), false),
+    catalogPageLimit: numberOrNull(firstTaskField(value, ['catalogPageLimit', 'catalog_page_limit'], null)),
     pageLimitReached: booleanValue(firstTaskField(value, ['pageLimitReached', 'page_limit_reached'], false), false),
     resumeAvailable: booleanValue(firstTaskField(value, ['resumeAvailable', 'resume_available'], undefined), undefined),
     resumeFromCollectorRunId: firstTaskField(value, ['resumeFromCollectorRunId', 'resume_from_collector_run_id'], ''),

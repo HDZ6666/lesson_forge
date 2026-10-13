@@ -74,6 +74,19 @@ def test_client_sends_bearer_auth_and_server_owned_job_shape(
     }
 
 
+def test_client_sends_numeric_catalog_page_limit(monkeypatch, configured):
+    captured = {}
+    def request(self, method, path, *, payload=None):
+        captured.update(payload)
+        return {'id': 'page-limit-test'}
+    monkeypatch.setattr(module.CollectorClient, '_request', request)
+    module.CollectorClient().start_job('content', max_pages=1000, catalog_page_limit=1500)
+    assert captured['catalogPageLimit'] == 1500
+    for value in [0, 10001, 1.5, True, '1500']:
+        with pytest.raises(ServiceException):
+            module.CollectorClient().start_job('content', max_pages=1000, catalog_page_limit=value)
+
+
 def test_client_encodes_candidate_scope(monkeypatch: pytest.MonkeyPatch, configured: None) -> None:
     urls: list[str] = []
 

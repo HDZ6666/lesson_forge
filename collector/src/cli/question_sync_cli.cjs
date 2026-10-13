@@ -53,6 +53,7 @@ function usage() {
   --start-page <n>        每个目录起始页，默认 1
   --max-pages <n>         每个目录最多页数；不传则按来源 total 动态扩展
   --limit-to-1000-pages   每个目录最多请求 1000 页，达到边界后按策略正常结束
+  --catalog-page-limit <n> 每个目录的页数上限（1～10000），到达后保留未完整标记并继续其他目录
   --safety-page-limit <n> 分页安全上限，默认 10000，只防止无限非空页
   --limit <n>             本次最多保存题数，便于验收；0 表示不限
   --concurrency <n>       同一 Cookie 列表并发路数，默认 8，最大 16
@@ -100,6 +101,7 @@ function parseArgs(argv = []) {
     maxPages: SITE_PAGE_LIMIT,
     maxPagesProvided: false,
     limitTo1000Pages: false,
+    catalogPageLimit: null,
     safetyPageLimit: DEFAULT_PAGINATION_SAFETY_LIMIT,
     limit: 0,
     headless: false,
@@ -177,6 +179,12 @@ function parseArgs(argv = []) {
         break;
       case '--limit-to-1000-pages':
         options.limitTo1000Pages = true;
+        break;
+      case '--catalog-page-limit':
+        options.catalogPageLimit = parsePositiveInt(needValue(index, flag), flag);
+        if (options.catalogPageLimit > DEFAULT_PAGINATION_SAFETY_LIMIT)
+          throw new Error('--catalog-page-limit 必须为 1 到 10000 的整数');
+        index += 1;
         break;
       case '--safety-page-limit':
         options.safetyPageLimit = parsePositiveInt(needValue(index, flag), flag);

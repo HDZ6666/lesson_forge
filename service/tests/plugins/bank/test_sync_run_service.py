@@ -236,6 +236,7 @@ async def test_recovered_worker_rehydrates_page_policy_from_durable_options(
         task_module='question',
         collector_job_id=None,
         options_json={
+            'catalogPageLimit': 1500,
             'limitTo1000Pages': True,
             'textbookExternalIds': ['tb-1'],
             'textbookScopes': [
@@ -269,6 +270,7 @@ async def test_recovered_worker_rehydrates_page_policy_from_durable_options(
         ]
 
     async def execute_remote(_run_id: int, handle: object, _max_pages: int) -> None:
+        observed['catalogPageLimit'] = getattr(handle, 'catalog_page_limit', None)
         observed['limitTo1000Pages'] = getattr(handle, 'limit_to_1000_pages', False)
         observed['resumed'] = getattr(handle, 'resumed', False)
 
@@ -285,7 +287,7 @@ async def test_recovered_worker_rehydrates_page_policy_from_durable_options(
     )
     await module._execute(73, handle)
 
-    assert observed == {'limitTo1000Pages': True, 'resumed': False}
+    assert observed == {'catalogPageLimit': 1500, 'limitTo1000Pages': True, 'resumed': False}
 
 
 @pytest.mark.asyncio

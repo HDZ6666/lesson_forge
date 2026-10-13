@@ -89,6 +89,7 @@ def plan_dump(row):
         'subjectId': row.subject_id,
         'planName': row.plan_name,
         'listConcurrency': row.list_concurrency,
+        'catalogPageLimit': row.catalog_page_limit,
         'cycleName': row.cycle_name,
         'enabled': bool(row.enabled),
         'autoUpdate': bool(row.auto_update),
@@ -158,6 +159,7 @@ async def save_plan(db, payload):
     if row.cycle_state in ('completed','stopped') and row.cycle_finished_at:
         row.next_cycle_at=row.cycle_finished_at+timedelta(days=payload.refresh_days) if row.auto_update else None
     row.list_concurrency = payload.list_concurrency
+    row.catalog_page_limit = payload.catalog_page_limit
     row.plan_name = name
     row.enabled = int(payload.enabled)
     row.refresh_days, row.refill_hours, row.discovery_days = (
@@ -167,6 +169,19 @@ async def save_plan(db, payload):
     )
     row.next_check_at = None
     row.update_time = await _clock(db)
+    await db.flush()
+    # Only rewrite requests which have never been sent. A dispatched UUID
+    # must retain its original settings even if its acknowledgement was lost.
+    waiting = (await db.scalars(select(QbSyncJob).where(
+        QbSyncJob.task_module == 'question', QbSyncJob.status == 'queued',
+        QbSyncJob.active_slot.is_(None), QbSyncJob.worker_token.is_(None),
+        QbSyncJob.collector_job_id.is_(None), QbSyncJob.started_at.is_(None),
+        (QbSyncJob.options_json['autoPlanId'].as_integer() == row.plan_id)
+        | (QbSyncJob.options_json['manualPlanId'].as_integer() == row.plan_id),
+    ).with_for_update())).all()
+    for task in waiting:
+        task.options_json = {**(task.options_json or {}),
+                             'catalogPageLimit': row.catalog_page_limit, 'limitTo1000Pages': False}
     await db.commit()
     await db.refresh(row)
     return plan_dump(row)

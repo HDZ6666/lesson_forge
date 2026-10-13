@@ -291,6 +291,14 @@ async def claim_next(db, *, task_id=None) -> dict | None:
             row.dispatch_not_before = due_now + timedelta(seconds=30)
             await db.commit()
             return None
+    # Existing queues also inherit the migrated default at their first claim.
+    # Never alter a previously dispatched request or its replay identity.
+    options = row.options_json or {}
+    plan_id = options.get('autoPlanId') or options.get('manualPlanId')
+    if row.task_module == 'question' and plan_id and row.started_at is None and not row.collector_job_id:
+        plan = await db.get(QbSyncPlan, plan_id, populate_existing=True)
+        if plan is not None:
+            row.options_json = {**options, 'catalogPageLimit': plan.catalog_page_limit, 'limitTo1000Pages': False}
     token = secrets.token_hex(32)
     row.active_slot = '1'
     row.worker_token = token

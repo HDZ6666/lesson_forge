@@ -1046,6 +1046,52 @@ test('未遇到空页就达到 --max-pages 或 --limit 时任务仍不完整', a
   }
 });
 
+for (const pageLimit of [3, 1000, 1500]) {
+  test(`计划数字上限 ${pageLimit} 不请求下一页，继续其他目录并保留不完整证据`, async () => {
+    const { directory, dbPath } = tempDb();
+    const requested = new Map([
+      ['261285', []],
+      ['261286', []],
+    ]);
+    const page = mockSyncPage(({ curPage, categoryId }) => {
+      if (!requested.has(categoryId)) return { status: 200, headers: {}, text: listApiText(104269, ['35020603']) };
+      requested.get(categoryId).push(curPage);
+      if (categoryId === '261285')
+        return { status: 200, headers: {}, text: listApiText(104269, [String(97000000 + curPage)]) };
+      return { status: 200, headers: {}, text: listApiText(1, curPage === 1 ? ['98000001'] : []) };
+    });
+    try {
+      const result = await runSync(baseSyncOptions(directory, dbPath, { catalogPageLimit: pageLimit }), {
+        context: {},
+        page,
+        catalogTree: {
+          id: '260617',
+          title: '测试教材',
+          children: [
+            { id: '261285', title: '大目录', children: [] },
+            { id: '261286', title: '下一目录', children: [] },
+          ],
+        },
+      });
+      assert.equal(Math.max(...requested.get('261285')), pageLimit);
+      assert.ok(!requested.get('261285').includes(pageLimit + 1));
+      assert.ok(requested.get('261286').length > 0);
+      assert.equal(result.completeness.complete, false);
+      const store = new QuestionSyncStore(dbPath, { dataDir: directory });
+      try {
+        const progress = store.getRunCatalogProgress(result.runId, '260617', '261285');
+        assert.equal(progress.pageLimitReached, true);
+        assert.equal(progress.dataComplete, false);
+        assert.equal(progress.stallReason, 'configured_page_limit');
+      } finally {
+        store.close();
+      }
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+}
+
 test('最多 1000 页策略不请求第 1001 页、继续其他目录且按策略正常完成', async () => {
   const { directory, dbPath } = tempDb();
   const requested = new Map([

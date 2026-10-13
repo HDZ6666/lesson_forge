@@ -833,6 +833,7 @@ class QbSyncPlan(Base):
     next_cycle_at = Column(DateTime, nullable=True)
     textbook_order = Column(JSON, nullable=True)
     list_concurrency = Column(Integer, nullable=False, server_default='8')
+    catalog_page_limit = Column(Integer, nullable=False, server_default='1000')
     plan_name = Column(String(100), nullable=False, server_default='')
     cycle_name = Column(String(180), nullable=True)
     enabled = Column(SmallInteger, nullable=False, server_default='0')

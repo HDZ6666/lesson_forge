@@ -556,6 +556,12 @@ function createCatalogCrawler(ctx) {
           await verifyResumeFrontier(state);
           if (state.finished) break;
           if (opts.limit > 0 && counters.questionsSeen >= opts.limit) break;
+          if (opts.catalogPageLimit != null && state.nextPage > explicitLastPage) {
+            // Finish this directory, then move on. A bounded traversal is
+            // not evidence that every source question has been collected.
+            finishCatalogScan(state, { stalled: true, stallReason: 'configured_page_limit' });
+            break;
+          }
           // Check the task policy boundary before the generic safety ceiling.
           // This keeps an explicitly configured safetyPageLimit of 1000 from
           // turning the intentional policy stop into a stalled catalog.

@@ -268,7 +268,7 @@ function readLiveRunProgress(dbPath, runId, options = {}) {
             Number(row.scan_complete || 0) === 1 || ['completed', 'stalled'].includes(String(row.status || '')),
           dataComplete: Number(row.data_complete || 0) === 1,
           completionQuality: row.completion_quality || null,
-          pageLimitReached: row.stall_reason === 'page_limit_1000',
+          pageLimitReached: ['page_limit_1000', 'configured_page_limit'].includes(row.stall_reason),
           failedPageCount: Number(row.failed_page_count || 0),
           duplicatePageCount: Number(row.duplicate_page_count || 0),
           emptyPageCount: Number(row.empty_page_count || 0),

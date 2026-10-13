@@ -442,7 +442,7 @@ const summaryProgressBasis = computed(() => {
   }
   if (live.estimateComplete === false && !live.scanComplete) parts.push('部分层级尚无估算依据，总页数会随采集调整')
   if (live.scanComplete) parts.push(live.dataComplete === false ? '扫描已完成，存在异常页或素材问题' : '扫描已完成')
-  if (live.pageLimitReached || task.value?.pageLimitReached) parts.push('已达到每目录 1000 页策略上限（不代表网站全量）')
+  if (live.pageLimitReached || task.value?.pageLimitReached) parts.push(`已达到每目录 ${task.value?.catalogPageLimit ?? 1000} 页策略上限（不代表网站全量）`)
   return parts.join(' · ')
 })
 const summaryTotalQuestionText = computed(() => {
