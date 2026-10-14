@@ -34,6 +34,13 @@ async def _lock_plan(db, plan_id, revision):
 async def action(db, plan_id, payload, operator):
     from plugins.bank.service.sync_plans import plan_dump
     from plugins.bank.service.sync_run_service import SyncRunService
+    if payload.action=='start':
+        # A repeated start (double click, retry, stale page) returns the
+        # active session instead of creating an overlapping one (S01, A02).
+        current=await db.get(QbSyncPlan,plan_id,with_for_update=True,populate_existing=True)
+        if current is not None and current.control_state=='active' and current.cycle_state in ('running','discovering'):
+            await db.commit()
+            return plan_dump(current)
     plan=await _lock_plan(db,plan_id,payload.expected_revision)
     now=await _clock(db)
     active=[]

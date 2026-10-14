@@ -186,3 +186,21 @@ async def test_session_log_lists_rounds_with_stage_counts(bank_db, monkeypatch):
     assert first['decision'] == 'continue' and first['newQuestionCount'] == 7 and first['newRelationCount'] == 9
     assert sum(first['collection'].values()) == 2 and first['imports']['count'] == 2
     assert log['newQuestionCount'] == 7 and log['rounds'][1]['status'] == 'running'
+
+
+@pytest.mark.asyncio
+async def test_repeated_start_returns_active_session_without_overlap(bank_db, monkeypatch):
+    """A02/S01: a duplicate start (even with a stale revision) returns the active session."""
+    from plugins.bank.controller.sync_plan_controller import PlanAction
+    from plugins.bank.service import plan_control
+    monkeypatch.setenv('BANK_AUTOMATIC_SYNC_ENABLED', '1')
+    plan_id, _ = await registered_plan(bank_db)
+    plan = await bank_db.get(QbSyncPlan, plan_id, populate_existing=True)
+    before = (plan.session_no, plan.session_round, plan.cycle_no, plan.revision)
+    jobs_before = len((await bank_db.scalars(select(QbSyncJob).where(QbSyncJob.task_module == 'question'))).all())
+    for revision in (plan.revision, plan.revision + 7):
+        dumped = await plan_control.action(bank_db, plan_id, PlanAction(action='start', expectedRevision=revision), 'teacher')
+        assert dumped['planId'] == plan_id
+    plan = await bank_db.get(QbSyncPlan, plan_id, populate_existing=True)
+    assert (plan.session_no, plan.session_round, plan.cycle_no, plan.revision) == before
+    assert len((await bank_db.scalars(select(QbSyncJob).where(QbSyncJob.task_module == 'question'))).all()) == jobs_before
