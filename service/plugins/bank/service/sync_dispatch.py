@@ -260,6 +260,19 @@ async def claim_next(db, *, task_id=None) -> dict | None:
     from plugins.bank.service.sync_plans import automatic_task_reason, control_status
     control = await control_status(db)
     reason = (control['reason'] or '同步已紧急暂停') if control['paused'] else await automatic_task_reason(db, row)
+    if not reason and row.task_module == 'question':
+        # Check host resources before starting a heavy collection, so a
+        # shortage waits instead of piling up new results (spec 7.2).
+        from plugins.bank.service.resource_guard import resource_status
+        try:
+            host = resource_status()
+        except ServiceException as exc:
+            host = {'paused': True, 'reason': exc.message}
+        if host.get('paused'):
+            row.dispatch_error = host.get('reason') or '主机资源不足，等待恢复'
+            row.dispatch_not_before = due_now + timedelta(seconds=60)
+            await db.commit()
+            return None
     if reason:
         row.dispatch_error = reason
         row.dispatch_not_before = due_now + timedelta(seconds=30)

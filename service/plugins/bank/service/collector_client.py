@@ -228,10 +228,13 @@ class CollectorClient:
     def health(self) -> dict[str, Any]:
         return self._request('GET', '/v1/health')
 
-    def reclaim_run(self, *, runId, textbookExternalId, snapshotLockedAt):
-        return self._request('POST', f'/v1/runs/{int(runId)}/reclaim', payload={
-            'textbookExternalId': textbookExternalId, 'snapshotLockedAt': snapshotLockedAt,
-        })
+    def reclaim_run(self, *, runId, textbookExternalId, snapshotLockedAt, allowLatest=False):
+        payload = {'textbookExternalId': textbookExternalId, 'snapshotLockedAt': snapshotLockedAt}
+        if allowLatest:
+            # The collector still verifies baselines before releasing a
+            # textbook's newest snapshot.
+            payload['allowLatest'] = True
+        return self._request('POST', f'/v1/runs/{int(runId)}/reclaim', payload=payload)
 
     def source_budget(self):
         return self._request('GET', '/v1/source-budget')
@@ -261,6 +264,7 @@ class CollectorClient:
         job_id: str | None = None,
         list_concurrency: int | None = None,
         catalog_page_limit: int | None = None,
+        sync_mode: str | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             'runType': run_type,
@@ -287,6 +291,10 @@ class CollectorClient:
             if type(catalog_page_limit) is not int or not 1 <= catalog_page_limit <= 10000:
                 raise ServiceException(message='每个目录最多采集页数必须为1到10000的整数')
             payload['catalogPageLimit'] = catalog_page_limit
+        if sync_mode is not None:
+            if sync_mode not in ('incremental', 'full'):
+                raise ServiceException(message='同步模式无效')
+            payload['syncMode'] = sync_mode
         if list_concurrency is not None:
             if type(list_concurrency) is not int or not 1 <= list_concurrency <= 16:
                 raise ServiceException(message='题目分页并发数无效')

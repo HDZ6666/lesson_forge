@@ -94,11 +94,17 @@ async def action(db, plan_id, payload, operator):
             raise ServiceException(message='已有一轮正在执行，请先处理当前轮次')
         from plugins.bank.service.sync_plans import begin_session
         begin_session(plan,now)
+        # An explicit full scan applies to this session's first round only;
+        # "resume" never turns into a full scan implicitly.
+        plan.session_mode='full' if payload.full else None
         plan.enabled=1;plan.control_state='active';plan.cycle_state='discovering'
         plan.discovery_next_at=None;plan.discovery_error=None;plan.next_cycle_at=None
     else:
         raise ServiceException(message='不支持的计划操作')
     plan.revision+=1;plan.next_check_at=None;plan.update_time=now
+    from plugins.bank.service import diagnostics
+    diagnostics.event('plan_action', stage='plan', planId=plan_id, action=payload.action, operator=operator,
+                      sessionNo=plan.session_no, roundNo=plan.session_round, full=bool(getattr(payload, 'full', False)))
     await db.commit()
     # Network cancellation happens only after durable gates are visible.
     for task_id in active:
@@ -181,7 +187,7 @@ async def resume_stopped_collections(session_factory):
                 if scope.collector_run_id and scope.snapshot_locked_at:
                     extra={k:v for k,v in options.items() if k in (
                         'autoPlanId','autoPlanName','autoCycleNo','autoCycleName','manualPlanId','manualSingle',
-                        'manualDispatchRequested','allowWhilePlanPaused','listConcurrency','concurrencySource','inheritedConcurrency')}
+                        'manualDispatchRequested','allowWhilePlanPaused','listConcurrency','concurrencySource','inheritedConcurrency','syncMode')}
                     extra['resumeFirst']=True
                     if options.get('concurrencySource')!='task':
                         from plugins.bank.service import task_concurrency
@@ -240,7 +246,8 @@ async def sync_book_once(db, plan_id, textbook_id, payload, operator):
             from plugins.bank.service.task_concurrency import set_waiting
             await set_waiting(db,existing,payload.list_concurrency)
             existing.options_json={**(existing.options_json or {}),'manualDispatchRequested':True,
-                                   'planWorkPaused':False,'allowWhilePlanPaused':bool(payload.allow_paused)}
+                                   'planWorkPaused':False,'allowWhilePlanPaused':bool(payload.allow_paused),
+                                   **({'syncMode':'full'} if payload.full else {})}
             existing.dispatch_priority=(await db.scalar(select(func.max(QbSyncJob.dispatch_priority))) or 0)+1
             if existing.dispatch_error=='学科计划已暂停':
                 existing.dispatch_not_before=None;existing.dispatch_error=None
@@ -260,7 +267,11 @@ async def sync_book_once(db, plan_id, textbook_id, payload, operator):
     previous_id = previous.run_id if previous else None
     options = {'manualPlanId': plan_id, 'manualSingle': True, 'manualDispatchRequested': True,
                'allowWhilePlanPaused': bool(payload.allow_paused), 'autoPlanId': plan_id,
-               'autoPlanName': plan.plan_name, 'autoCycleNo': plan.cycle_no, 'autoCycleName': plan.cycle_name}
+               'autoPlanName': plan.plan_name, 'autoCycleNo': plan.cycle_no, 'autoCycleName': plan.cycle_name,
+               'syncMode': 'full' if payload.full else 'incremental',
+               # Between sessions this is a one-book supplement: it never
+               # wakes the whole subject or moves the scheduled wake-up.
+               'supplementRun': plan.cycle_state in ('completed', 'stopped', 'idle')}
     await db.commit()
     if previous_id:
         result = await SyncTaskService.retry_question(db, previous_id, operator, settings=payload, execution_options=options)
@@ -279,3 +290,57 @@ async def sync_book_once(db, plan_id, textbook_id, payload, operator):
     state.last_task_id=task_id
     await db.commit()
     return {'taskId':task_id,'existing':False}
+
+
+def _plan_jobs_query(plan_id):
+    return (select(QbSyncJob, QbSyncJobScope.local_textbook_id)
+            .join(QbSyncJobScope, QbSyncJobScope.run_id == QbSyncJob.run_id)
+            .where(owned_condition(plan_id), QbSyncJob.task_module == 'question'))
+
+
+async def pin_book(db, plan_id, textbook_id, revision):
+    """Run this book next after the current one, without changing plan order.
+
+    One-off: only the queued execution's priority changes, so later rounds
+    keep the saved textbook order (spec 4.2, A03/A04). The running book is
+    never interrupted and no second execution is queued.
+    """
+    plan=await _lock_plan(db,plan_id,revision)
+    rows=(await db.execute(_plan_jobs_query(plan_id).where(
+        QbSyncJobScope.local_textbook_id==textbook_id,QbSyncJob.status=='queued',QbSyncJob.active_slot.is_(None))
+        .with_for_update())).all()
+    if not rows:
+        raise ServiceException(message='该教材当前没有待执行任务，可使用“再同步一次”')
+    top=(await db.scalar(select(func.max(QbSyncJob.dispatch_priority))) or 0)+1
+    for job,_ in rows:
+        job.dispatch_priority=top
+        job.options_json={**(job.options_json or {}),'pinnedOnce':True}
+    plan.revision+=1
+    await db.commit()
+    return {'revision':plan.revision,'taskIds':[job.run_id for job,_ in rows]}
+
+
+async def plan_queue(db, plan_id):
+    """Actual dispatch order: current, next, then the waiting queue."""
+    from plugins.bank.entity.do.bank_do import QbTextbook
+    from plugins.bank.service.sync_dispatch import queue_fields
+    plan=await db.get(QbSyncPlan,plan_id)
+    if plan is None:
+        raise ServiceException(message='计划不存在')
+    rows=(await db.execute(_plan_jobs_query(plan_id).where(
+        or_(QbSyncJob.active_slot.is_not(None),QbSyncJob.status=='queued'))
+        .order_by(QbSyncJob.active_slot.is_(None),QbSyncJob.dispatch_priority.desc(),QbSyncJob.dispatch_rank,QbSyncJob.run_id))).all()
+    names=dict((await db.execute(select(QbTextbook.textbook_id,QbTextbook.textbook_name)
+        .where(QbTextbook.textbook_id.in_([book for _,book in rows])))).all()) if rows else {}
+    items=[]
+    for job,book in rows:
+        options=job.options_json or {}
+        items.append({'taskId':job.run_id,'textbookId':book,'textbookName':names.get(book),
+                      'status':job.status,'running':job.active_slot is not None,
+                      'cycleNo':options.get('autoCycleNo'),'pinned':bool(options.get('pinnedOnce')),
+                      'syncMode':options.get('syncMode') or 'incremental',
+                      'waitReason':queue_fields(job).get('queueReason') or job.dispatch_error})
+    current=[i for i in items if i['running']]
+    waiting=[i for i in items if not i['running']]
+    return {'current':current[0] if current else None,'next':waiting[0] if waiting else None,
+            'queue':waiting,'sessionNo':plan.session_no,'roundNo':plan.session_round}

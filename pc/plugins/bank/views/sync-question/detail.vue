@@ -302,6 +302,7 @@ import {
   emptySnapshotHint,
   isActiveIncrementalImport,
   isActiveImportIntake,
+  stopReasonLabel,
 } from '../../utils/sync-task'
 
 const QuestionSnapshot = defineComponent({
@@ -579,7 +580,8 @@ function liveNodeCountText(node) {
     ? (node?.dataComplete === false || node?.completionQuality === 'completed_with_issues' ? ' · 数据不完整' : '')
     : ''
   const countPart = expected == null ? `${unique} / 统计中` : `${unique} / ${formatLiveCount(expected)}`
-  return `${countPart}${pagePart}${issuePart}${integrity}`
+  const stop = node?.stopReason && node?.scanComplete ? ` · ${stopReasonLabel(node.stopReason)}` : ''
+  return `${countPart}${pagePart}${issuePart}${integrity}${stop}`
 }
 
 function summaryProgressFormat() { return summaryProgressLabel.value }

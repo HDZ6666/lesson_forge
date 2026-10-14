@@ -27,6 +27,8 @@ const {
 } = require('../../sources/zujuan/constants.cjs');
 const {
   classifyListPageContent,
+  closedContextError,
+  isClosedContextError,
   isCookieSwitchError,
   isTextbookFatalError,
   pageResultFromError,
@@ -37,6 +39,13 @@ const { catalogLastPage, catalogSafetyPageLimit, growTargetPages } = require('..
 const { listWindow, postQuestionList } = require('../../sources/zujuan/list_window.cjs');
 const { downloadAsset, prefetchAssets } = require('../../assets/download.cjs');
 const { saveRawPage } = require('../../storage/raw_pages.cjs');
+const {
+  createJoinTracker,
+  nextBaseline,
+  planAfterJoin,
+  tuning: incrementalTuning,
+  usableBaseline,
+} = require('../../policies/incremental_window.cjs');
 
 /**
  * @param {object} ctx
@@ -112,6 +121,11 @@ function createCatalogCrawler(ctx) {
   const consecutiveEmptyPages =
     Number(opts.consecutiveEmptyPages) > 0 ? Number(opts.consecutiveEmptyPages) : DEFAULT_CONSECUTIVE_EMPTY_PAGES;
   const stallWindows = Number(opts.stallWindows) > 0 ? Number(opts.stallWindows) : DEFAULT_STALL_WINDOWS;
+  // Full mode rescans each catalog's window and never stops early on an old
+  // range; incremental (default) joins the saved head and skips it.
+  const fullMode = opts.syncMode === 'full';
+  const incremental = incrementalTuning(opts);
+  const baselines = typeof store.getCatalogBaseline === 'function';
   const catalogStates = selectedCatalogs.map((catalog) => {
     const filterJson = '{}';
     const scopeKey = sha256(`${PROVIDER}|${opts.textbookId}|${catalog.externalId}|${filterJson}`);
@@ -131,7 +145,19 @@ function createCatalogCrawler(ctx) {
       savedPages.find((entry) => entry.resultType === PAGE_RESULT.SUCCESS && Number(entry.questionCount || 0) > 0) ||
       null;
     const maxObserved = Number(savedProgress?.maxObservedTotal || savedProgress?.expectedTotal || 0);
+    // Only a scan that starts at page 1 in this run can confirm a new
+    // baseline; resumed runs keep their own frontier logic.
+    const trackBaseline = baselines && !hasPageOne;
+    const stored = trackBaseline ? store.getCatalogBaseline(scopeKey) : null;
+    const baseline = !fullMode && usableBaseline(stored?.confirmed) ? stored.confirmed : null;
     return {
+      trackBaseline,
+      baseline,
+      joinTracker: createJoinTracker(baseline, opts),
+      joinPlan: null,
+      gapPages: [],
+      successPages: new Map(),
+      duplicateStreak: 0,
       catalog,
       filterJson,
       scopeKey,
@@ -200,6 +226,7 @@ function createCatalogCrawler(ctx) {
       pageLimitReached,
     });
     state.finished = true;
+    saveBaseline(state, { stalled, stallReason, pageLimitReached });
     const id = String(state.catalog.externalId);
     if (resumeHints[id]) resumeHints[id].finished = !stalled && !pageLimitReached;
     persistResumeScope();
@@ -219,6 +246,88 @@ function createCatalogCrawler(ctx) {
         ` target=${state.targetPages || 0}`,
     );
   };
+
+  function saveBaseline(state, { stalled = false, stallReason = null, pageLimitReached = false } = {}) {
+    if (!state.trackBaseline) return;
+    const windowReason = ['configured_page_limit', 'page_limit_1000'].includes(String(stallReason || ''));
+    const joined = state.joinPlan ? state.joinTracker.joined : null;
+    const { confirmed, candidate } = nextBaseline({
+      previous: state.baseline,
+      join: joined,
+      successPages: state.successPages,
+      windowEnd: explicitLastPage,
+      reachedEnd: !stalled && !pageLimitReached && !windowReason && stallReason !== 'incremental_joined' && !joined,
+      reachedWindowEnd: pageLimitReached || windowReason,
+      opts,
+    });
+    try {
+      store.saveCatalogBaseline({
+        scopeKey: state.scopeKey,
+        textbookExternalId: opts.textbookId,
+        catalogExternalId: state.catalog.externalId,
+        runId,
+        confirmed: confirmed === state.baseline ? undefined : confirmed,
+        candidate,
+      });
+    } catch (error) {
+      console.warn(`[增量] catalog=${state.catalog.externalId} 基线写入失败：${error.message}`);
+    }
+  }
+
+  /** Track one settled page for the baseline, the head join and duplicate stops. */
+  function trackPage(state, row, saved) {
+    const page = Number(row.pageNumber);
+    const type = saved?.resultType;
+    if (type === PAGE_RESULT.SUCCESS || type === PAGE_RESULT.NO_NEW_QUESTIONS) {
+      const ids = (row.parsed?.questionIds || []).map((value) => normalizeId(value)).filter(Boolean);
+      state.successPages.set(page, ids);
+      if (type === PAGE_RESULT.SUCCESS) state.duplicateStreak = 0;
+      if (!state.joinPlan && state.joinTracker.enabled) {
+        const join = state.joinTracker.observe(page, ids);
+        if (join) {
+          const plan = planAfterJoin(state.baseline, join, {
+            windowEnd: explicitLastPage,
+            nextPage: state.nextPage,
+            ...opts,
+          });
+          state.joinPlan = plan;
+          state.gapPages = plan.gapPages.filter((gap) => !state.successPages.has(gap));
+          if (!plan.covered) state.nextPage = Math.max(state.nextPage, plan.resumeFrom);
+          console.log(
+            `[增量] catalog=${state.catalog.externalId} 已在 page=${join.confirmedAtPage} 接上历史保存范围（位移 ${plan.shift} 页），` +
+              (plan.covered
+                ? `当前窗口已覆盖，补 ${state.gapPages.length} 个缺口后结束`
+                : `跳过 ${plan.skippedRange[0]}～${plan.skippedRange[1]} 页，从 ${plan.resumeFrom} 页续采`),
+          );
+        }
+      }
+    } else if (type === PAGE_RESULT.DUPLICATE_PAGE) {
+      state.duplicateStreak += 1;
+    }
+  }
+
+  function saveCandidate(state) {
+    if (!state.trackBaseline || state.joinPlan || state.successPages.size === 0) return;
+    const { candidate } = nextBaseline({
+      previous: state.baseline,
+      successPages: state.successPages,
+      windowEnd: explicitLastPage,
+      opts,
+    });
+    if (!candidate) return;
+    try {
+      store.saveCatalogBaseline({
+        scopeKey: state.scopeKey,
+        textbookExternalId: opts.textbookId,
+        catalogExternalId: state.catalog.externalId,
+        runId,
+        confirmed: undefined,
+        candidate,
+      });
+    } catch (error) {
+      console.warn(`[增量] catalog=${state.catalog.externalId} 候选基线写入失败：${error.message}`);
+    }
+  }
 
   const persistCatalogPage = async (state, pageNumber, parsed, { allowRetry = true } = {}) => {
     const { catalog, filterJson, scopeKey } = state;
@@ -336,7 +445,8 @@ function createCatalogCrawler(ctx) {
               result = await downloadAsset(session.context, opts, asset);
               if (result.contentSha256) counters.assetsDownloaded += 1;
             } catch (error) {
-              if (error.blocked || String(error?.code || '') === 'asset_storage_error') throw error;
+              if (error.blocked || error.contextClosed || String(error?.code || '') === 'asset_storage_error')
+                throw error;
               result = {
                 ...asset,
                 sourceUrl,
@@ -418,6 +528,7 @@ function createCatalogCrawler(ctx) {
   };
 
   const windowForState = (state) => {
+    if (state.gapPages.length) return state.gapPages.splice(0, listConcurrency);
     const start = Math.max(1, Number(state.nextPage) || 1);
     if (start > explicitLastPage) return [];
     if (start > safetyPageLimit) return [];
@@ -459,6 +570,17 @@ function createCatalogCrawler(ctx) {
         }
       }),
     );
+    const closed = rows.find((row) => isClosedContextError(row.error));
+    if (closed) {
+      // Stop this window: later pages on the same closed context can only
+      // fail, and recording them would fake per-page source failures.
+      for (const row of rows.filter((item) => item.parsed)) {
+        const saved = await settleFetchedPage(state, row);
+        noteFetchSlot(state, row.pageNumber, saved);
+        trackPage(state, row, saved);
+      }
+      throw closedContextError(closed.error);
+    }
     return rows.sort((left, right) => left.pageNumber - right.pageNumber);
   }
 
@@ -559,7 +681,7 @@ function createCatalogCrawler(ctx) {
           if (opts.catalogPageLimit != null && state.nextPage > explicitLastPage) {
             // Finish this directory, then move on. A bounded traversal is
             // not evidence that every source question has been collected.
-            finishCatalogScan(state, { stalled: true, stallReason: 'configured_page_limit' });
+            finishCatalogScan(state, { pageLimitReached: true, stallReason: 'configured_page_limit' });
             break;
           }
           // Check the task policy boundary before the generic safety ceiling.
@@ -633,6 +755,7 @@ function createCatalogCrawler(ctx) {
             for (const row of rows.filter((item) => item.parsed)) {
               const saved = await settleFetchedPage(state, row);
               noteFetchSlot(state, row.pageNumber, saved);
+              trackPage(state, row, saved);
             }
             for (const row of rows.filter((item) => item.error)) {
               store.recordPageAttempt({
@@ -659,6 +782,7 @@ function createCatalogCrawler(ctx) {
               if (sessionPages.has(row.pageNumber)) continue;
               const saved = await settleFetchedPage(state, row);
               noteFetchSlot(state, row.pageNumber, saved);
+              trackPage(state, row, saved);
               if (saved.newCount > 0) cookieWaitCycles = 0;
               newCount += Number(saved.newCount || 0);
               if (opts.limit > 0 && counters.questionsSeen >= opts.limit) break catalogPages;
@@ -671,9 +795,24 @@ function createCatalogCrawler(ctx) {
           for (const row of rows) {
             const saved = await settleFetchedPage(state, row);
             noteFetchSlot(state, row.pageNumber, saved);
+            trackPage(state, row, saved);
             if (saved.newCount > 0) cookieWaitCycles = 0;
             newCount += Number(saved.newCount || 0);
             if (opts.limit > 0 && counters.questionsSeen >= opts.limit) break catalogPages;
+          }
+          saveCandidate(state);
+          if (state.duplicateStreak >= incremental.duplicateStopPages) {
+            // Different page numbers keep returning one page: stop paging
+            // with the real reason instead of walking to the window end.
+            finishCatalogScan(state, { stalled: true, stallReason: 'duplicate_pages' });
+            break;
+          }
+          if (state.joinPlan) {
+            if (state.joinPlan.covered && state.gapPages.length === 0) {
+              finishCatalogScan(state, { stallReason: 'incremental_joined' });
+              break;
+            }
+            if (state.gapPages.length) continue;
           }
           if (newCount > 0) {
             state.zeroNewWindows = 0;

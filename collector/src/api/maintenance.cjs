@@ -121,10 +121,10 @@ class Maintenance {
   }
 
   /** Checkpoint and truncate the WAL; skipped quietly when busy. */
-  async checkpoint(dbPath) {
+  async checkpoint(dbPath, dataDir = null) {
     if (!dbPath || this.current || this.isJobActive() || this.closed) return null;
     try {
-      return await this.run('checkpointDatabase', dbPath, dbPath);
+      return await this.run('checkpointDatabase', dbPath, dbPath, dataDir);
     } catch (error) {
       console.warn(`[维护] WAL 整理跳过：${String(error.message).slice(0, 200)}`);
       return null;

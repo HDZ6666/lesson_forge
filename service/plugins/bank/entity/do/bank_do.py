@@ -817,6 +817,8 @@ class QbSyncControl(Base):
     reason = Column(String(500), nullable=True)
     revision = Column(Integer, nullable=False, server_default='1')
     issue_cursor = Column(BigInteger, nullable=False, server_default='0')
+    # The one public host-resource wait (reason, since, nextCheckAt).
+    resource_wait_json = Column(JSON, nullable=True)
     updated_by = Column(String(64), nullable=True)
     update_time = Column(DateTime, nullable=False)
 
@@ -853,6 +855,7 @@ class QbSyncPlan(Base):
     max_rounds = Column(Integer, nullable=True)
     session_started_at = Column(DateTime, nullable=True)
     session_end_reason = Column(String(30), nullable=True)
+    session_mode = Column(String(20), nullable=True)
     worker_token = Column(CHAR(32), nullable=True)
     lease_until = Column(DateTime, nullable=True)
     revision = Column(Integer, nullable=False, server_default='1')

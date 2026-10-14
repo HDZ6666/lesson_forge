@@ -92,6 +92,9 @@ class PlanAction(BankModel):
     expected_revision: int = Field(gt=0)
     action: Literal['pause','resume','end','start']
     keep_updates: bool = True
+    # Only with action=start: run this session's first round as a full
+    # window scan. Never implied by resume.
+    full: bool = False
 
 
 class PlanOrder(BankModel):
@@ -103,6 +106,12 @@ class SingleBook(BankModel):
     expected_revision: int = Field(gt=0)
     list_concurrency: int | None = Field(default=None,strict=True,ge=1,le=8)
     allow_paused: bool = False
+    # Explicit full window rescan for this one book; never implied.
+    full: bool = False
+
+
+class PinBook(BankModel):
+    expected_revision: int = Field(gt=0)
 
 
 @sync_plan_controller.post('/plans/{plan_id}/action',dependencies=[UserInterfaceAuthDependency('bank:sync:plans:edit')])
@@ -121,6 +130,18 @@ async def plan_order(plan_id:int,payload:PlanOrder,db:DB)->Response:
 async def sync_book_once(plan_id:int,textbook_id:int,payload:SingleBook,db:DB,user:USER)->Response:
     from plugins.bank.service.plan_control import sync_book_once
     return ResponseUtil.success(data=await sync_book_once(db,plan_id,textbook_id,payload,user.user.user_name))
+
+
+@sync_plan_controller.post('/plans/{plan_id}/books/{textbook_id}/pin',dependencies=[UserInterfaceAuthDependency('bank:sync:plans:edit')])
+async def pin_plan_book(plan_id:int,textbook_id:int,payload:PinBook,db:DB)->Response:
+    from plugins.bank.service.plan_control import pin_book
+    return ResponseUtil.success(data=await pin_book(db,plan_id,textbook_id,payload.expected_revision))
+
+
+@sync_plan_controller.get('/plans/{plan_id}/queue',dependencies=[READ])
+async def plan_queue_view(plan_id:int,db:DB)->Response:
+    from plugins.bank.service.plan_control import plan_queue
+    return ResponseUtil.success(data=await plan_queue(db,plan_id))
 
 
 @sync_plan_controller.get('/plans/{plan_id}/history',dependencies=[READ])

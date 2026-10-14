@@ -6,6 +6,32 @@ const { DatabaseSync } = require('node:sqlite');
 const { SNAPSHOT_TABLES } = require('./run_snapshots.cjs');
 const { httpError, tableNames, requiredRunId, snapshotScopeIds, resolveContentRun } = require('./readers/common.cjs');
 
+/**
+ * The newest run of a textbook may be reclaimed only once nothing depends on
+ * its heavy snapshot (spec 7.3, A32): the Service confirmed a fully accepted
+ * import (allowLatest), the run sealed successfully, and every catalog it
+ * scanned already has a durable incremental baseline at or after this run,
+ * so the next increment can still locate its position.
+ */
+function latestReleasable(db, id, textbookId, payload) {
+  if (payload?.allowLatest !== true) return false;
+  const run = db.prepare('SELECT status FROM sync_runs WHERE id=?').get(id);
+  if (!run || !['success', 'completed'].includes(String(run.status))) return false;
+  const names = tableNames(db);
+  if (!names.has('catalog_baselines') || !names.has('sync_run_catalog_progress')) return false;
+  const catalogs = db
+    .prepare(
+      'SELECT DISTINCT catalog_external_id AS id FROM sync_run_catalog_progress WHERE run_id=? AND textbook_external_id=?',
+    )
+    .all(id, String(textbookId));
+  if (catalogs.length === 0) return false;
+  const covered = db.prepare(
+    `SELECT 1 FROM catalog_baselines WHERE textbook_external_id=? AND catalog_external_id=?
+       AND confirmed_json IS NOT NULL AND confirmed_run_id>=? LIMIT 1`,
+  );
+  return catalogs.every((row) => covered.get(String(textbookId), String(row.id), id));
+}
+
 // Invoked only by the authenticated Service after a settled import. No run
 // header is rewritten: the tombstone explains why historical content is gone.
 function reclaimRun(dbPath, dataDir, runId, payload) {
@@ -48,7 +74,9 @@ function reclaimRun(dbPath, dataDir, runId, payload) {
           WHERE run_id>? AND textbook_external_id=? LIMIT 1`,
           )
           .get(id, scope[0]);
-        if (!newer) throw httpError('保留本教材最新成果供补采使用', 409, 'cleanup_latest');
+        if (!newer && !latestReleasable(db, id, scope[0], payload)) {
+          throw httpError('保留本教材最新成果供补采使用', 409, 'cleanup_latest');
+        }
         const names = tableNames(db);
         const files = new Set(
           db

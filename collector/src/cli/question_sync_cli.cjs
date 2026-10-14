@@ -54,6 +54,7 @@ function usage() {
   --max-pages <n>         每个目录最多页数；不传则按来源 total 动态扩展
   --limit-to-1000-pages   每个目录最多请求 1000 页，达到边界后按策略正常结束
   --catalog-page-limit <n> 每个目录的页数上限（1～10000），到达后保留未完整标记并继续其他目录
+  --sync-mode <m>        incremental（默认，接上历史头部后跳过已保存范围）或 full（窗口内全量扫描）
   --safety-page-limit <n> 分页安全上限，默认 10000，只防止无限非空页
   --limit <n>             本次最多保存题数，便于验收；0 表示不限
   --concurrency <n>       同一 Cookie 列表并发路数，默认 8，最大 16
@@ -102,6 +103,7 @@ function parseArgs(argv = []) {
     maxPagesProvided: false,
     limitTo1000Pages: false,
     catalogPageLimit: null,
+    syncMode: 'incremental',
     safetyPageLimit: DEFAULT_PAGINATION_SAFETY_LIMIT,
     limit: 0,
     headless: false,
@@ -186,6 +188,13 @@ function parseArgs(argv = []) {
           throw new Error('--catalog-page-limit 必须为 1 到 10000 的整数');
         index += 1;
         break;
+      case '--sync-mode': {
+        const mode = needValue(index, flag);
+        if (!['incremental', 'full'].includes(mode)) throw new Error('--sync-mode 只接受 incremental 或 full');
+        options.syncMode = mode;
+        index += 1;
+        break;
+      }
       case '--safety-page-limit':
         options.safetyPageLimit = parsePositiveInt(needValue(index, flag), flag);
         index += 1;

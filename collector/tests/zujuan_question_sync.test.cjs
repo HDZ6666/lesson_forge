@@ -1048,7 +1048,7 @@ test('未遇到空页就达到 --max-pages 或 --limit 时任务仍不完整', a
 });
 
 for (const pageLimit of [3, 1000, 1500]) {
-  test(`计划数字上限 ${pageLimit} 不请求下一页，继续其他目录并保留不完整证据`, async () => {
+  test(`计划数字上限 ${pageLimit} 不请求下一页，继续其他目录，到达窗口上限按正常结束`, async () => {
     const { directory, dbPath } = tempDb();
     const requested = new Map([
       ['261285', []],
@@ -1079,12 +1079,13 @@ for (const pageLimit of [3, 1000, 1500]) {
       assert.equal(Math.max(...requested.get('261285')), effective);
       assert.ok(!requested.get('261285').includes(effective + 1));
       assert.ok(requested.get('261286').length > 0);
-      assert.equal(result.completeness.complete, false);
+      // Reaching the configured window is a normal end (spec 5.1), not a gap.
+      assert.equal(result.completeness.scanComplete, true);
       const store = new QuestionSyncStore(dbPath, { dataDir: directory });
       try {
         const progress = store.getRunCatalogProgress(result.runId, '260617', '261285');
         assert.equal(progress.pageLimitReached, true);
-        assert.equal(progress.dataComplete, false);
+        assert.equal(progress.dataComplete, true);
         assert.equal(progress.stallReason, 'configured_page_limit');
       } finally {
         store.close();
@@ -2132,6 +2133,78 @@ test('跨章节重复知识点持久化两处目录关系，各自保存页码�
     assert.deepEqual(relations.map((r) => r.catalog_external_id).sort(), nodes.map((n) => n.externalId).sort());
   } finally {
     store.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('增量：第二次运行接上历史头部后结束，只请求新增页和少量重叠页；全量模式仍扫描到窗口末尾', async () => {
+  const { directory, dbPath } = tempDb();
+  const tree = {
+    id: '260617',
+    title: '测试教材',
+    children: [{ id: '261285', title: '大目录', children: [] }],
+  };
+  // One question id per page keeps the mock small; matching needs min(3, ids).
+  const pageIds = (offset) => (curPage) => [String(70000000 + curPage - offset)];
+  let current = pageIds(0);
+  const requested = [];
+  const page = mockSyncPage(({ curPage, categoryId }) => {
+    if (categoryId !== '261285') return { status: 200, headers: {}, text: listApiText(104269, ['35020603']) };
+    requested.push(curPage);
+    return { status: 200, headers: {}, text: listApiText(400, current(curPage)) };
+  });
+  const options = (extra = {}) => baseSyncOptions(directory, dbPath, { catalogPageLimit: 40, ...extra });
+  try {
+    await runSync(options(), { context: {}, page, catalogTree: tree });
+    assert.equal(Math.max(...requested), 40);
+    // Five new pages at the head: old page p is now page p + 5.
+    requested.length = 0;
+    current = (curPage) => (curPage <= 5 ? [String(80000000 + curPage)] : pageIds(5)(curPage));
+    const second = await runSync(options(), { context: {}, page, catalogTree: tree });
+    assert.ok(Math.max(...requested) <= 8 + 8, `incremental stopped early, requested ${Math.max(...requested)}`);
+    assert.ok(requested.includes(1) && requested.includes(8));
+    const store = new QuestionSyncStore(dbPath, { dataDir: directory });
+    try {
+      const progress = store.getRunCatalogProgress(second.runId, '260617', '261285');
+      assert.equal(progress.stallReason, 'incremental_joined');
+      const scopeKey = store.db.prepare('SELECT scope_key FROM catalog_baselines').get().scope_key;
+      const baseline = store.getCatalogBaseline(scopeKey).confirmed;
+      assert.equal(baseline.headPages[0].ids[0], '80000001');
+      assert.equal(baseline.reliableEnd, 40);
+    } finally {
+      store.close();
+    }
+    requested.length = 0;
+    await runSync(options({ syncMode: 'full' }), { context: {}, page, catalogTree: tree });
+    assert.equal(Math.max(...requested), 40, 'full mode never stops on an old range');
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('不同页码连续返回同一页时有界停止并保留真实原因', async () => {
+  const { directory, dbPath } = tempDb();
+  const requested = [];
+  const page = mockSyncPage(({ curPage, categoryId }) => {
+    if (categoryId !== '261285') return { status: 200, headers: {}, text: listApiText(104269, ['35020603']) };
+    requested.push(curPage);
+    const ids = curPage <= 2 ? [String(71000000 + curPage)] : ['71009999'];
+    return { status: 200, headers: {}, text: listApiText(100000, ids) };
+  });
+  try {
+    const result = await runSync(baseSyncOptions(directory, dbPath, { catalogPageLimit: 1000 }), {
+      context: {},
+      page,
+      catalogTree: { id: '260617', title: '测试教材', children: [{ id: '261285', title: '大目录', children: [] }] },
+    });
+    assert.ok(Math.max(...requested) < 40, `stopped after ${Math.max(...requested)} pages`);
+    const store = new QuestionSyncStore(dbPath, { dataDir: directory });
+    try {
+      assert.equal(store.getRunCatalogProgress(result.runId, '260617', '261285').stallReason, 'duplicate_pages');
+    } finally {
+      store.close();
+    }
+  } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });

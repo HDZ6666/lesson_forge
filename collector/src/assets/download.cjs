@@ -24,6 +24,7 @@ const { normalizeAssetType } = require('../sources/zujuan/question_parser.cjs');
 const { assetKey: canonicalAssetKey } = require('../qbpkg/normalize.cjs');
 const { retryDelay } = require('../policies/retry.cjs');
 const { openAssetResponse } = require('./request.cjs');
+const { closedContextError, isClosedContextError } = require('../sources/zujuan/response_classifier.cjs');
 
 const assertAllowedUrl = (value, hosts) =>
   assertAllowedUrlShared(value, hosts, (message, code, cause) => new QuestionSyncError(message, code, cause));
@@ -181,6 +182,8 @@ async function downloadAsset(context, options, asset) {
         await disposeResponse(response);
         response = null;
         if (error.blocked) throw error;
+        // A closed context cannot serve any later request: no retries.
+        if (isClosedContextError(error)) throw closedContextError(error);
         const retryable = ![
           'host_not_allowed',
           'asset_redirect',
@@ -321,7 +324,7 @@ async function prefetchAssets(
         if (result?.contentSha256) downloaded += 1;
         if (onSuccess) onSuccess(result, asset);
       } catch (error) {
-        if (error.blocked || String(error?.code || '') === 'asset_storage_error') {
+        if (error.blocked || error.contextClosed || String(error?.code || '') === 'asset_storage_error') {
           fatal = fatal || error;
           break;
         }

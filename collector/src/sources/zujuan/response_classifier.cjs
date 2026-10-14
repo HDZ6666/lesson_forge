@@ -7,7 +7,7 @@
  * takes already-fetched text/status or an Error and returns a verdict.
  */
 
-const { StopCrawlError, VerificationRequiredError } = require('../../shared/errors.cjs');
+const { QuestionSyncError, StopCrawlError, VerificationRequiredError } = require('../../shared/errors.cjs');
 const { normalizeId } = require('../../shared/utils.cjs');
 const {
   BLOCK_TEXT_MARKERS,
@@ -104,9 +104,33 @@ function isCookieSwitchError(error) {
   return /^http_(401|403|429)$/.test(code);
 }
 
+const CLOSED_CONTEXT =
+  /target page, context or browser has been closed|browser has been closed|context (?:has been |was )?closed|page has been closed|browser_context_closed/i;
+
+/**
+ * The browser context this run used is gone.  Every later request on it can
+ * only fail, so callers stop instead of retrying (spec E10).
+ */
+function isClosedContextError(error) {
+  if (!error) return false;
+  if (error.contextClosed === true || String(error.code || '') === 'browser_context_closed') return true;
+  return CLOSED_CONTEXT.test(String(error.message || error));
+}
+
+function closedContextError(cause) {
+  const error = new QuestionSyncError(
+    '浏览器上下文已关闭，已停止旧请求；已保存成果保留，按运行状态决定是否重建后继续。',
+    'browser_context_closed',
+    { cause: String(cause?.message || cause || '') },
+  );
+  error.contextClosed = true;
+  return error;
+}
+
 function isTextbookFatalError(error) {
   if (!error) return false;
   if (error instanceof StopCrawlError) return true;
+  if (isClosedContextError(error)) return true;
   const code = String(error.code || '');
   if (TEXTBOOK_FATAL_CODES.has(code)) return true;
   if (code.startsWith('tree_http_')) return true;
@@ -186,6 +210,8 @@ module.exports = {
   classifyListPageContent,
   classifyProtectionState,
   classifyQuestionResponse,
+  closedContextError,
+  isClosedContextError,
   isCookieSwitchError,
   isPageLevelError,
   isExplicitChallengeText,

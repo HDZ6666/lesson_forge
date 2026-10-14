@@ -17,6 +17,7 @@ const INTERRUPTED_CODES = new Set([
   'tree_network_error',
   'stop_requested',
   'browser_recycle_failed',
+  'browser_context_closed',
 ]);
 
 /**

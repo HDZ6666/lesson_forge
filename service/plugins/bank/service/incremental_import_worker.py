@@ -180,6 +180,11 @@ async def dispatch_incremental_imports_once(
     *, session_factory: Any = None, client: Any = None, root: Path | None = None,
 ):
     session_factory = session_factory or DataSourceRegistry.session
+    from plugins.bank.service.resource_wait import IMPORT_RESOURCE_WAIT
+    # Check public host resources before claiming or downloading anything;
+    # short resources leave imports queued with one persisted wait.
+    if not await IMPORT_RESOURCE_WAIT.allow(session_factory, root=root):
+        return
     async with session_factory() as db:
         ids = await pending_incremental_import_ids(db)
     for import_id in ids:
@@ -210,7 +215,9 @@ async def _run():
         try:
             await dispatch_incremental_imports_once()
             from plugins.bank.service.import_intake_worker import dispatch_import_intakes_once
-            await dispatch_import_intakes_once()
+            from plugins.bank.service.resource_wait import IMPORT_RESOURCE_WAIT
+            if not IMPORT_RESOURCE_WAIT.waiting:
+                await dispatch_import_intakes_once()
         except asyncio.CancelledError:
             raise
         except Exception as exc:

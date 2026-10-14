@@ -16,6 +16,7 @@ async def run(db):
         'max_rounds': 'INT NULL',
         'session_started_at': 'DATETIME NULL',
         'session_end_reason': 'VARCHAR(30) NULL',
+        'session_mode': 'VARCHAR(20) NULL',
     })
     await _add(db, 'qb_sync_cycle', {
         'session_no': 'INT NULL',
@@ -23,6 +24,7 @@ async def run(db):
         'legacy': 'SMALLINT NOT NULL DEFAULT 0',
         'end_reason': 'VARCHAR(30) NULL',
     })
+    await _add(db, 'qb_sync_control', {'resource_wait_json': 'JSON NULL'})
     # Old cycles were single passes. Map each to its own historical session
     # with one round and mark it legacy; no multi-round history is inferred.
     await db.execute(text(

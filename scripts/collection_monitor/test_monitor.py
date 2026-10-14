@@ -39,6 +39,19 @@ class MonitorTest(unittest.TestCase):
         self.assertEqual(result['counts'], {'collecting':1,'partial_imported':1,'fully_imported':1,'no_task':1})
         self.assertFalse(result['allFullyImported'])
 
+    def test_session_summary_counts_rounds_and_real_new_counts(self):
+        data = {'cycles':[
+            {'plan_id':1,'cycle_no':1,'session_no':1,'round_no':1,'legacy':1,'end_reason':None,'summary_json':None},
+            {'plan_id':1,'cycle_no':2,'session_no':2,'round_no':1,'legacy':0,'end_reason':None,
+             'summary_json':'{"newQuestionCount":5000,"newRelationCount":5100,"decision":"continue"}'},
+            {'plan_id':1,'cycle_no':3,'session_no':2,'round_no':2,'legacy':0,'end_reason':'no_new',
+             'summary_json':{'newQuestionCount':0,'newRelationCount':0}},
+        ]}
+        sessions = monitor.session_summaries(data)
+        self.assertEqual([(s['sessionNo'], s['rounds'], s['endReason']) for s in sessions], [(1,1,None),(2,2,'no_new')])
+        self.assertEqual(sessions[1]['newQuestionCount'], 5000)
+        self.assertTrue(sessions[0]['legacy'])
+
     def test_read_errors_are_visible_and_do_not_fake_recovery(self):
         data = self.fixture()
         monitor.ingest(self.db, data)

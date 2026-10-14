@@ -207,6 +207,22 @@ const SETTINGS = [
     doc: '事件日志目录，默认使用 COLLECTOR_DATA_DIR/diagnostics',
   },
   {
+    name: 'COLLECTOR_DIAGNOSTICS_RETENTION_DAYS',
+    kind: 'int',
+    fallback: 7,
+    min: 0,
+    scope: 'debug',
+    doc: '诊断日志保留天数，0 不自动删除',
+  },
+  {
+    name: 'COLLECTOR_RAW_RETENTION_DAYS',
+    kind: 'int',
+    fallback: 3,
+    min: 0,
+    scope: 'debug',
+    doc: '原始页面保留天数；只删除已回收或干净封存运行的原始页，0 不自动删除',
+  },
+  {
     name: 'COLLECTOR_DIAGNOSTIC_JOB_ID',
     kind: 'string',
     fallback: '',

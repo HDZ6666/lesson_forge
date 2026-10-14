@@ -152,6 +152,8 @@ class _WorkerHandle:
     # so retries/resumes keep the same page-limit mode.
     list_concurrency: int | None = None
     catalog_page_limit: int | None = None
+    # 'full' rescans each catalog window; anything else is incremental.
+    sync_mode: str | None = None
     limit_to_1000_pages: bool = False
     workflow_version: int = 1
     dispatch_job_id: str | None = None
@@ -758,7 +760,7 @@ def _bound_live_node(value: Any, budget: list[int]) -> dict[str, Any] | None:
         'lastContiguousSuccessfulPage', 'highestAttemptedPage',
         'failedPageCount', 'duplicatePageCount', 'emptyPageCount',
         'parseErrorCount', 'assetErrorCount', 'scanComplete', 'dataComplete',
-        'completionQuality', 'pageLimitReached', 'current',
+        'completionQuality', 'pageLimitReached', 'stopReason', 'current',
     ):
         if key in value and value[key] is not None:
             output[key] = _jsonable(value[key])
@@ -2162,6 +2164,8 @@ async def _execute_remote(  # noqa: PLR0912, PLR0915
             # Stored legacy limits above 1000 never request outside the window.
             from plugins.bank.service.sync_plans import effective_page_limit
             start_kwargs['catalog_page_limit'] = effective_page_limit(handle.catalog_page_limit)
+        if handle.task_module == 'question' and handle.sync_mode == 'full':
+            start_kwargs['sync_mode'] = 'full'
         if handle.workflow_version >= 2:
             start_kwargs['workflow_version'] = 2
         dispatch_id = handle.dispatch_job_id
@@ -2573,6 +2577,7 @@ async def _execute(run_id: int, handle: _WorkerHandle) -> None:  # noqa: PLR0912
                 options = options if isinstance(options, Mapping) else {}
                 handle.list_concurrency = options.get('listConcurrency')
                 handle.catalog_page_limit = options.get('catalogPageLimit')
+                handle.sync_mode = options.get('syncMode')
                 handle.workflow_version = int(options.get('workflowVersion', 1))
                 handle.resumed = handle.resumed or bool(options.get('resumeTask') or options.get('resume_task'))
                 handle.limit_to_1000_pages = _status_flag(
@@ -3274,6 +3279,7 @@ class SyncRunService:
             workflow_version=int(options.get('workflowVersion', 1)),
             limit_to_1000_pages=bool(options.get('limitTo1000Pages', False)),
             catalog_page_limit=options.get('catalogPageLimit'),
+            sync_mode=options.get('syncMode'),
         )
         task = asyncio.create_task(_execute(run_id, handle))
         handle.task = task

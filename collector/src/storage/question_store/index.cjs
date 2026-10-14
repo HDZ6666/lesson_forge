@@ -18,6 +18,7 @@ const { CatalogRepoMethods } = require('./catalog_repo.cjs');
 const { PageRepoMethods } = require('./page_repo.cjs');
 const { ProgressProjectionMethods } = require('./progress_projection.cjs');
 const { ErrorLogMethods } = require('./error_log.cjs');
+const { BaselineMethods, ensureBaselineSchema } = require('./baseline_repo.cjs');
 const { assertMathSource } = require('../../sources/registry.cjs');
 
 class QuestionSyncStore {
@@ -27,6 +28,7 @@ class QuestionSyncStore {
     this.db = new DatabaseSync(path.resolve(dbPath));
     this.db.exec('PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;');
     ensureCollectorSchema(this.db);
+    ensureBaselineSchema(this.db);
     this.lastBeginMeta = null;
   }
 
@@ -137,5 +139,6 @@ mixin(QuestionSyncStore, CatalogRepoMethods);
 mixin(QuestionSyncStore, PageRepoMethods);
 mixin(QuestionSyncStore, ProgressProjectionMethods);
 mixin(QuestionSyncStore, ErrorLogMethods);
+mixin(QuestionSyncStore, BaselineMethods);
 
 module.exports = { QuestionSyncStore };

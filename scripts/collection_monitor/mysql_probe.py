@@ -13,9 +13,17 @@ QUERIES = {
     'imports': 'SELECT import_id,task_id,scope_id,collector_run_id,status,stage,question_count,committed_cursor,accepted_count,quarantined_count,error_message,finished_at,update_time FROM qb_question_import',
     'issues': 'SELECT issue_id,latest_task_id,status,reason FROM qb_sync_issue',
 }
+# Session/round columns arrive with service migration 029; older databases
+# fall back to the base queries so the monitor keeps working during rollout.
+SESSION_QUERIES = {
+    'plans': QUERIES['plans'].replace(' FROM qb_sync_plan', ',session_no,session_round,max_rounds,session_end_reason,session_mode FROM qb_sync_plan'),
+    'cycles': QUERIES['cycles'].replace(' FROM qb_sync_cycle', ',session_no,round_no,legacy,end_reason,summary_json FROM qb_sync_cycle'),
+    'control': 'SELECT resource_wait_json FROM qb_sync_control WHERE control_id=1',
+}
 OPTION_KEYS = ('autoPlanId', 'manualPlanId', 'autoCycleNo', 'autoCycleName', 'textbookIds',
                'textbookExternalIds', 'versionName', 'textbookNames', 'listConcurrency',
-               'autoResumePending', 'planResumePending', 'snapshotReclaimed')
+               'autoResumePending', 'planResumePending', 'snapshotReclaimed', 'syncMode',
+               'supplementRun', 'pinnedOnce')
 SETTINGS = ('BANK_COLLECTION_START_MEMORY_MIB', 'BANK_IMPORT_MIN_MEMORY_MIB',
             'BANK_MIN_MEMORY_FREE_MIB', 'BANK_MIN_DISK_FREE_MIB', 'BANK_RESULT_RETENTION_HOURS')
 
@@ -30,8 +38,16 @@ def main():
         data = {'settings': {k: os.environ.get(k) for k in SETTINGS}}
         with db.cursor() as cursor:
             for name, query in QUERIES.items():
-                cursor.execute(query)
+                try:
+                    cursor.execute(SESSION_QUERIES.get(name, query))
+                except pymysql.MySQLError:
+                    cursor.execute(query)
                 data[name] = cursor.fetchall()
+            try:
+                cursor.execute(SESSION_QUERIES['control'])
+                data['control'] = cursor.fetchall()
+            except pymysql.MySQLError:
+                data['control'] = []
         for job in data['jobs']:
             options = json.loads(job.pop('options_json') or '{}')
             job['options'] = {k: options[k] for k in OPTION_KEYS if k in options}

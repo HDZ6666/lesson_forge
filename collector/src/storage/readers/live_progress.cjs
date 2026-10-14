@@ -269,6 +269,9 @@ function readLiveRunProgress(dbPath, runId, options = {}) {
           dataComplete: Number(row.data_complete || 0) === 1,
           completionQuality: row.completion_quality || null,
           pageLimitReached: ['page_limit_1000', 'configured_page_limit'].includes(row.stall_reason),
+          // The real reason paging stopped (window end, joined history,
+          // repeated pages, an error code), never a permanent "complete".
+          stopReason: row.stall_reason || null,
           failedPageCount: Number(row.failed_page_count || 0),
           duplicatePageCount: Number(row.duplicate_page_count || 0),
           emptyPageCount: Number(row.empty_page_count || 0),

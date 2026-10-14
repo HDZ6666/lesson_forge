@@ -15,7 +15,9 @@ DEFAULT_ROOTS = [
 KEEP = {'resource_guard_triggered','source_cooldown_enter','source_manual_enter','source_manual_resume',
         'verification_detected','verification_wait_enter','verification_wait_failed','verification_api_recovered',
         'request_retry_scheduled','collector_api_aborted','intake_failed','intake_started','intake_execution_finished',
-        'import_execution_started','import_execution_finished','import_deferred','stage_started','stage_finished'}
+        'import_execution_started','import_execution_finished','import_deferred','stage_started','stage_finished',
+        'resource_wait_entered','resource_wait_changed','resource_wait_recovered',
+        'sync_session_started','sync_round_started','sync_round_settled','sync_session_sleeping','plan_action'}
 
 
 def read_members(path, offset, budget, consume=None):

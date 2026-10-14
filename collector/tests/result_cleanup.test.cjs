@@ -146,3 +146,67 @@ test('HTTP 回收在维护线程执行，期间 /health 正常、重复请求幂
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('A32：最新成果在完整入库且基线已独立保存后才可回收', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cleanup-latest-'));
+  const dbPath = path.join(dir, 'db.sqlite3');
+  const store = new SyncStore(dbPath, { dataDir: dir });
+  try {
+    require('../src/storage/schema.cjs').ensureCollectorSchema(store.db);
+    const id = store.beginRun({ textbookIds: ['tb1'], details: false, downloadAssets: false });
+    const node = { externalId: 'c1', level: 1, name: '目录', path: '/c1', sortOrder: 1 };
+    store.saveRunCatalogTree(id, 'tb1', [node]);
+    store.saveRunQuestion(
+      id,
+      'tb1',
+      { externalId: 'q1', questionType: '单选题', contentHtml: '<p>题</p>', plainText: '题', detailFetched: true },
+      'c1',
+    );
+    store.saveRunQuestionCatalogs(id, 'tb1', 'q1', [node]);
+    store.db
+      .prepare(
+        `INSERT INTO sync_run_catalog_progress(run_id,provider,textbook_external_id,catalog_external_id,status,observed_at)
+         VALUES(?,?,?,?,?,?)`,
+      )
+      .run(id, 'zujuan', 'tb1', 'c1', 'completed', new Date().toISOString());
+    store.db
+      .prepare(
+        "UPDATE sync_runs SET status='success', snapshot_complete=1, scan_complete=1, finished_at=?, snapshot_locked_at=? WHERE id=?",
+      )
+      .run(new Date().toISOString(), new Date().toISOString(), id);
+    const payload = {
+      textbookExternalId: 'tb1',
+      snapshotLockedAt: store.db.prepare('SELECT snapshot_locked_at FROM sync_runs WHERE id=?').get(id)
+        .snapshot_locked_at,
+    };
+    // Without the Service's confirmation, or without a baseline, keep it.
+    assert.throws(() => reclaimRun(dbPath, dir, id, payload), /最新成果/);
+    assert.throws(() => reclaimRun(dbPath, dir, id, { ...payload, allowLatest: true }), /最新成果/);
+    store.db
+      .exec(`CREATE TABLE IF NOT EXISTS catalog_baselines (scope_key TEXT PRIMARY KEY, textbook_external_id TEXT NOT NULL,
+      catalog_external_id TEXT NOT NULL, confirmed_json TEXT, candidate_json TEXT, confirmed_run_id INTEGER,
+      candidate_run_id INTEGER, updated_at TEXT NOT NULL)`);
+    store.db
+      .prepare('INSERT INTO catalog_baselines VALUES(?,?,?,?,?,?,?,?)')
+      .run(
+        'k',
+        'tb1',
+        'c1',
+        JSON.stringify({ version: 1, headPages: [{ page: 1, ids: ['q1'] }], reliableEnd: 1 }),
+        null,
+        id,
+        null,
+        'now',
+      );
+    const done = reclaimRun(dbPath, dir, id, { ...payload, allowLatest: true });
+    assert.equal(done.runId, id);
+    assert.equal(store.db.prepare('SELECT COUNT(*) n FROM sync_run_question_items WHERE run_id=?').get(id).n, 0);
+    // The incremental evidence survives the snapshot.
+    assert.ok(
+      store.db.prepare('SELECT confirmed_json FROM catalog_baselines WHERE scope_key=?').get('k').confirmed_json,
+    );
+  } finally {
+    store.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

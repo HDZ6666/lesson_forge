@@ -307,6 +307,29 @@ def cycle_summaries(mysql):
     return result
 
 
+def session_summaries(mysql):
+    """Per plan and sync session: rounds, end reason and real new counts."""
+    sessions = collections.OrderedDict()
+    for cycle in sorted(mysql.get('cycles', []), key=lambda r: (r['plan_id'], r.get('cycle_no') or 0)):
+        if cycle.get('session_no') is None:
+            continue
+        summary = cycle.get('summary_json') or {}
+        if isinstance(summary, str):
+            summary = json.loads(summary or '{}')
+        key = (cycle['plan_id'], cycle['session_no'])
+        item = sessions.setdefault(key, {'planId': cycle['plan_id'], 'sessionNo': cycle['session_no'],
+                                         'legacy': bool(cycle.get('legacy')), 'rounds': 0, 'newQuestionCount': 0,
+                                         'newRelationCount': 0, 'endReason': None, 'startedAt': cycle.get('started_at'),
+                                         'finishedAt': None})
+        item['rounds'] += 1
+        item['newQuestionCount'] += int(summary.get('newQuestionCount') or 0)
+        item['newRelationCount'] += int(summary.get('newRelationCount') or 0)
+        if cycle.get('end_reason'):
+            item['endReason'] = cycle['end_reason']
+            item['finishedAt'] = cycle.get('finished_at')
+    return list(sessions.values())
+
+
 def summary(db, data):
     events = []
     for row in db.execute('SELECT at,observed_at,kind,entity,message,payload FROM events WHERE kind IN (\'protection\',\'resource\',\'metadata\',\'error\',\'stopped\') ORDER BY at'):
@@ -328,7 +351,9 @@ def summary(db, data):
     return {'diagnosticEvents':detailed, 'kernelErrors':kernel, 'slowRequests':[json.loads(r[1]) for r in slow], 'at':data['at'], 'monitoringStartedAt':db.execute('SELECT min(observed_at) FROM events').fetchone()[0],
             'activeCollection': active_collection(data.get('collector', {})),
             'host':data['host'], 'storage':data.get('collector', {}).get('storage'), 'probeErrors':data['probeErrors'],
-            'cycles':cycle_summaries(mysql), 'incidents':events,
+            'cycles':cycle_summaries(mysql), 'sessions':session_summaries(mysql), 'incidents':events,
+            'resourceWait':next((json.loads(r['resource_wait_json']) if isinstance(r.get('resource_wait_json'), str)
+                                 else r.get('resource_wait_json') for r in mysql.get('control', []) if r.get('resource_wait_json')), None),
             'openIssues':[r for r in mysql.get('issues', []) if r['status'] == 'open'],
             'activeTasks':[{k:r.get(k) for k in ('run_id','logical_task_id','status','started_at','options')}
                            for r in mysql.get('jobs', []) if r['status'] in ACTIVE],
@@ -346,6 +371,14 @@ def markdown(report):
     for cycle in report['cycles']:
         lines += [f'## {cycle["cycle_name"]}', '', f'教材总数：{cycle["targets"]}；轮次状态：{cycle["status"]}；全部完整入库：{"是" if cycle["allFullyImported"] else "否"}。', '',
                   ' | '.join(f'{k}: {v}' for k,v in cycle['counts'].items()), '']
+    if report.get('sessions'):
+        lines += ['## 同步批次', '', '| 计划 | 第几次同步 | 轮数 | 新增题 | 新增关联 | 结束原因 |', '| --- | --- | --- | --- | --- | --- |']
+        lines += [f"| {s['planId']} | {s['sessionNo']}{'（旧记录）' if s['legacy'] else ''} | {s['rounds']} | {s['newQuestionCount']} | {s['newRelationCount']} | {s['endReason'] or '进行中'} |"
+                  for s in report['sessions']]
+        lines += ['']
+    wait = report.get('resourceWait') or {}
+    if wait.get('active'):
+        lines += [f"资源等待：{wait.get('reason')}，开始 {wait.get('since')}，下次检查 {wait.get('nextCheckAt')}（合并为一条公共等待）。", '']
     host = report['host']
     lines += ['## 当前资源', '', f'可用内存 {host["memoryMiB"]} MiB / {host["totalMemoryMiB"]} MiB；Swap 已用 {host["swapUsedMiB"]} MiB；磁盘剩余 {host["diskFreeMiB"]} MiB。', '',
               'Swap 占用是存量，需结合 swapInPages / swapOutPages 差值、内存压力和可用内存判断当前是否换页。', '',

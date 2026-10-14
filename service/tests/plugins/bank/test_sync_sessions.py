@@ -117,3 +117,58 @@ async def test_plan_dump_reports_session_and_effective_window(bank_db):
     result = await plans.save_plan(bank_db, PlanInput(subjectId=1, enabled=False, catalogPageLimit=10000))
     assert result['catalogPageLimit'] == 10000 and result['effectiveCatalogPageLimit'] == 1000
     assert result['sessionNo'] == 0 and result['maxRounds'] is None
+
+
+@pytest.mark.asyncio
+async def test_discovery_failure_continues_known_list_marked_not_refreshed(bank_db, monkeypatch):
+    monkeypatch.setenv('BANK_AUTOMATIC_SYNC_ENABLED', '1')
+    plan_id, _ = await registered_plan(bank_db)
+    await _finish_round(bank_db, plan_id, inserted=0, relations=0)
+    plan = await bank_db.get(QbSyncPlan, plan_id, populate_existing=True)
+    assert plan.session_end_reason == 'no_new'
+    plan.next_cycle_at = datetime.utcnow().replace(microsecond=0)
+    await bank_db.commit()
+    await tick(bank_db, plan_id)
+    plan = await bank_db.get(QbSyncPlan, plan_id, populate_existing=True)
+    discovery = await bank_db.get(QbSyncJob, plan.discovery_task_id)
+    discovery.status = discovery.phase = 'failed'
+    discovery.error_message = '教材列表 HTTP 405'
+    discovery.active_slot = None
+    discovery.dispatch_book_key = None
+    await bank_db.commit()
+    await tick(bank_db, plan_id)
+    plan = await bank_db.get(QbSyncPlan, plan_id, populate_existing=True)
+    assert plan.cycle_state == 'running' and plan.session_no == 2 and plan.session_round == 1
+    cycle = await bank_db.scalar(select(QbSyncCycle).where(QbSyncCycle.plan_id == plan_id, QbSyncCycle.cycle_no == plan.cycle_no))
+    assert cycle.summary_json['discoveryFailed'] and cycle.summary_json['note'] == '发现失败，清单未刷新'
+
+
+@pytest.mark.asyncio
+async def test_discovery_protection_keeps_waiting_instead_of_using_old_list(bank_db, monkeypatch):
+    monkeypatch.setenv('BANK_AUTOMATIC_SYNC_ENABLED', '1')
+    plan_id, _ = await registered_plan(bank_db)
+    await _finish_round(bank_db, plan_id, inserted=0, relations=0)
+    plan = await bank_db.get(QbSyncPlan, plan_id, populate_existing=True)
+    plan.next_cycle_at = datetime.utcnow().replace(microsecond=0)
+    await bank_db.commit()
+    await tick(bank_db, plan_id)
+    plan = await bank_db.get(QbSyncPlan, plan_id, populate_existing=True)
+    discovery = await bank_db.get(QbSyncJob, plan.discovery_task_id)
+    discovery.status = discovery.phase = 'blocked'
+    discovery.error_message = '站点返回验证/防护页面，任务已熔断。'
+    discovery.active_slot = None
+    discovery.dispatch_book_key = None
+    await bank_db.commit()
+    await tick(bank_db, plan_id)
+    plan = await bank_db.get(QbSyncPlan, plan_id, populate_existing=True)
+    assert plan.cycle_state == 'discovering' and plan.session_round == 0
+
+
+@pytest.mark.asyncio
+async def test_books_report_rounds_taken_part_in_current_session(bank_db, monkeypatch):
+    monkeypatch.setenv('BANK_AUTOMATIC_SYNC_ENABLED', '1')
+    plan_id, _ = await registered_plan(bank_db)
+    await _finish_round(bank_db, plan_id, inserted=1, relations=0)
+    await tick(bank_db, plan_id)
+    books = await plans.list_books(bank_db, plan_id)
+    assert all(b['sessionRounds'] == [1, 2] for b in books)

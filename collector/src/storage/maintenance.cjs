@@ -13,13 +13,22 @@ const { DatabaseSync } = require('node:sqlite');
  * Freed pages inside the database are deliberately not VACUUMed: new crawls
  * reuse them, and VACUUM needs a second database-sized copy on disk.
  */
-function checkpointDatabase(dbPath) {
+function checkpointDatabase(dbPath, dataDir = null) {
   const db = new DatabaseSync(dbPath);
   try {
     db.exec('PRAGMA busy_timeout=2000');
     const row = db.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get() || {};
     const pageSize = Number(db.prepare('PRAGMA page_size').get().page_size);
+    let retention = null;
+    if (dataDir) {
+      try {
+        retention = require('./retention.cjs').pruneRetention(dataDir, db);
+      } catch (error) {
+        retention = { error: String(error.message || error).slice(0, 200) };
+      }
+    }
     return {
+      retention,
       busy: Number(row.busy) === 1,
       walPages: Number(row.log),
       checkpointedPages: Number(row.checkpointed),

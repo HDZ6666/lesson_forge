@@ -350,6 +350,15 @@ async def record_runtime_failure(db, row, *, stage, message, now):
         'errorKind': getattr(row, 'error_kind', None), 'attempts': getattr(row, 'attempt_count', None),
         'nextAttemptAt': utc_datetime(next_at).isoformat() if next_at else None,
     }
+    counts = evidence.get('snapshotCounts')
+    if counts is not None and all(value == 0 for value in counts.values()) and scope.error_message:
+        # An empty result is the consequence of the collection failure, not
+        # a new problem (spec E08/A30): link the root and do not re-verify it.
+        evidence['emptySnapshot'] = True
+        root = await db.scalar(select(QbSyncIssue.issue_id).where(
+            QbSyncIssue.textbook_id == scope.local_textbook_id, QbSyncIssue.error_type == 'scope_failure',
+            QbSyncIssue.status != 'resolved', QbSyncIssue.latest_task_id == row.task_id).limit(1))
+        evidence['rootIssueId'] = root
     # Ownership is decided from the failure itself; a missing retry time no
     # longer turns a transient program failure into "needs a person".
     evidence.update(classify_issue(f'{stage}_failure', message, evidence))

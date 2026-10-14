@@ -40,6 +40,7 @@ const PERSISTED_FIELDS = [
   'maxPages',
   'limitTo1000Pages',
   'catalogPageLimit',
+  'syncMode',
   'totalVersions',
   'completedVersions',
   'totalTextbooks',

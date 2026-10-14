@@ -171,7 +171,7 @@ class LifecycleMethods {
   scheduleIdleCheckpoint(delayMs = 2000) {
     if (!this.maintenance || !this.dbPath) return;
     clearTimeout(this.idleCheckpointTimer);
-    this.idleCheckpointTimer = setTimeout(() => void this.maintenance.checkpoint(this.dbPath), delayMs);
+    this.idleCheckpointTimer = setTimeout(() => void this.maintenance.checkpoint(this.dbPath, this.dataDir), delayMs);
     this.idleCheckpointTimer.unref?.();
   }
 
