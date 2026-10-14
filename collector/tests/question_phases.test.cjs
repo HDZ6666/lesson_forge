@@ -76,7 +76,7 @@ test('seal steps emit sealed / error events with the run counters', () => {
     error,
   );
   assert.equal(status, 'failed');
-  assert.equal(paused, '需要验证', 'source protection records the shared manual pause');
+  assert.equal(paused, null, 'a bare HTTP 403 is kept for diagnosis, not a shared manual pause');
   assert.equal(counters.errors, 1);
   assert.equal(error.eventEmitted, true);
   assert.deepEqual(
@@ -136,4 +136,30 @@ test('invalid recycle settings are rejected as invalid_option', () => {
     () => session({ browserRecycleMb: 'lots' }),
     (error) => error.code === 'invalid_option',
   );
+});
+
+test('only protection-backed codes pause the shared source for a person', () => {
+  for (const [code, expected] of [
+    ['waiting_verification', true],
+    ['json_html', true],
+    ['http_401', false],
+    ['http_403', false],
+    ['http_405', false],
+    ['unexpected_html', false],
+  ]) {
+    let paused = false;
+    sealFailed(
+      {
+        store: null,
+        events: { emit: () => {} },
+        runId: null,
+        scope: {},
+        selectedCatalogs: [],
+        counters: { errors: 0 },
+        sourceControl: { markManual: () => (paused = true) },
+      },
+      Object.assign(new Error(code), { code }),
+    );
+    assert.equal(paused, expected, code);
+  }
 });

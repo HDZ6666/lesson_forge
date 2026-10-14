@@ -105,7 +105,9 @@ async def test_failed_book_does_not_fail_other_queued_books_and_next_round_is_fr
     await tick(bank_db, plan_id)
     next_jobs = list((await bank_db.scalars(select(QbSyncJob).where(QbSyncJob.options_json['autoCycleNo'].as_integer() == 2))).all())
     assert len(next_jobs) == 2
-    assert all(j.options_json['autoCycleName'].endswith('第 2 轮') for j in next_jobs)
+    # A wake-up after sleep is the 2nd sync session; its rounds restart at 1.
+    assert all('第 2 次同步' in j.options_json['autoCycleName'] and j.options_json['autoCycleName'].endswith('第 1 轮')
+               for j in next_jobs)
     assert all(j.retry_of_run_id is None for j in next_jobs)
     scopes = list((await bank_db.scalars(select(QbSyncJobScope).where(QbSyncJobScope.run_id.in_([j.run_id for j in next_jobs])))).all())
     assert all(s.resume_from_collector_run_id is None for s in scopes)

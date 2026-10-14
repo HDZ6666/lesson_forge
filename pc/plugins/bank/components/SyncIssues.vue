@@ -4,7 +4,7 @@
     <el-form inline class="issue-filters" label-position="top">
       <el-form-item label="教材"><el-select v-model="textbookId" clearable filterable remote :remote-method="searchBooks" placeholder="全部教材" @change="load()" @visible-change="shown=>shown&&searchBooks('')"><el-option v-for="book in books" :key="book.textbookId" :label="book.textbookName" :value="book.textbookId"/></el-select></el-form-item>
       <el-form-item label="状态"><el-select v-model="status" clearable placeholder="全部状态" @change="load()"><el-option label="待处理" value="open"/><el-option label="暂不处理" value="ignored"/><el-option label="已修复" value="resolved"/></el-select></el-form-item>
-      <el-form-item label="处理安排"><el-select v-model="handling" clearable placeholder="全部安排" @change="load()"><el-option label="人工处理" value="manual"/><el-option label="自动重试" value="retry"/></el-select></el-form-item>
+      <el-form-item label="处理安排"><el-select v-model="handling" clearable placeholder="全部安排" @change="load()"><el-option label="需要处理（来源页面或维护）" value="manual"/><el-option label="需要你操作来源页面" value="source_manual"/><el-option label="需要维护" value="maintenance"/><el-option label="程序处理" value="program"/><el-option label="自动重试" value="retry"/></el-select></el-form-item>
       <el-form-item label="筛选"><el-button text @click="advanced=!advanced">{{advanced?'收起筛选':'更多筛选'}}</el-button></el-form-item>
       <template v-if="advanced"><el-form-item label="问题类型"><el-select v-model="errorType" clearable placeholder="全部类型" @change="load()"><el-option label="题目或素材" value="question_quality"/><el-option label="教材范围" value="scope_failure"/><el-option label="封存核验" value="intake_failure"/><el-option label="入库运行" value="import_failure"/><el-option label="教材身份" value="metadata_identity"/><el-option label="发现核验" value="metadata_validation"/></el-select></el-form-item><el-form-item label="出现日期"><el-date-picker v-model="dates" type="daterange" value-format="YYYY-MM-DD" start-placeholder="开始日期" end-placeholder="结束日期" @change="load()"/></el-form-item></template>
     </el-form>
@@ -26,7 +26,7 @@
         </div>
       </template></el-table-column>
       <el-table-column label="教材 / 问题原因" min-width="360"><template #default="{row}"><strong>{{row.versionName ? row.versionName + ' · ' : ''}}{{row.textbookName || '教材发现（公共）'}}</strong><span class="cell-sub">任务 #{{row.latestTaskId}} · {{row.diagnosis?.stage || '同步处理'}}<template v-if="row.diagnosis?.textbookExternalId"> · 教材来源 ID {{row.diagnosis.textbookExternalId}}</template></span><p class="issue-reason">{{row.diagnosis?.title || row.reason}}</p><span class="cell-sub">展开左侧箭头查看原因和处理建议</span></template></el-table-column>
-      <el-table-column label="处理安排" min-width="170"><template #default="{row}"><el-tag :type="row.handling==='retry'?'info':'warning'" effect="plain">{{row.handling==='retry'?'系统会重试':'需要你处理'}}</el-tag><span v-if="row.nextAttemptAt" class="cell-sub">下次 {{new Date(row.nextAttemptAt).toLocaleString()}}</span></template></el-table-column>
+      <el-table-column label="处理安排" min-width="170"><template #default="{row}"><el-tag :type="handlingTag(row)" effect="plain">{{handlingLabel(row)}}</el-tag><span v-if="row.diagnosis?.impactScopeLabel" class="cell-sub">影响：{{row.diagnosis.impactScopeLabel}}</span><span v-if="row.nextAttemptAt" class="cell-sub">下次 {{new Date(row.nextAttemptAt).toLocaleString()}}</span></template></el-table-column>
       <el-table-column label="状态" width="95"><template #default="{row}"><el-tag :type="row.status==='resolved'?'success':row.status==='ignored'?'info':'warning'">{{ labels[row.status] }}</el-tag></template></el-table-column>
       <el-table-column label="最近出现" min-width="175"><template #default="{row}">{{ new Date(row.lastSeenAt).toLocaleString() }}<span class="cell-sub">累计 {{row.attempts}} 次</span></template></el-table-column>
       <el-table-column label="操作" width="175" fixed="right"><template #default="{row}"><span v-if="!row.latestTaskAvailable" class="cell-sub">任务已归档</span><el-button v-else link type="primary" @click="openTask(row)">查看任务</el-button><el-button v-if="row.status!=='resolved'" v-hasPermi="['bank:sync:issues:edit']" link @click="change(row)">{{ row.status==='ignored' ? '恢复待处理' : '暂不处理' }}</el-button></template></el-table-column>
@@ -42,6 +42,9 @@ import { ElMessageBox } from 'element-plus'
 import request from '@/utils/request'
 const props=defineProps({taskId:Number,subjectId:Number}),router=useRouter(),rows=ref([]),status=ref('open'),cursor=ref(),total=ref(0),loading=ref(false),error=ref('')
 const advanced=ref(false)
+const HANDLING={retry:['系统会重试','info'],program:['程序处理','info'],source_manual:['需要你操作来源页面','danger'],maintenance:['需要维护','warning'],manual:['需要处理','warning'],isolated:['已隔离','info']}
+function handlingLabel(row){return (HANDLING[row.handling]||HANDLING.manual)[0]}
+function handlingTag(row){return (HANDLING[row.handling]||HANDLING.manual)[1]}
 const handling=ref('manual'),errorType=ref(),dates=ref([]),textbookId=ref(),books=ref([])
 let booksEpoch=0
 async function searchBooks(name){const id=++booksEpoch;try{const r=await request({url:'/bank/sync/issues/textbooks',params:{subjectId:props.subjectId,name}});if(id===booksEpoch)books.value=r.data || r}catch(e){if(id===booksEpoch)error.value=e.message}}

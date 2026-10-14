@@ -27,6 +27,47 @@ from plugins.bank.service.resource_guard import configured_limit, resource_statu
 from plugins.bank.service.subject_service import SubjectService
 
 TERMINAL = ('completed', 'failed', 'blocked', 'cancelled', 'interrupted')
+# Each catalog only reads the provider's currently reachable first 1000 pages.
+CATALOG_WINDOW_PAGES = 1000
+# Why a sync session ended. Kept separate from plan control and blockers.
+END_REASONS = ('no_new', 'no_new_with_issues', 'no_runnable_books', 'round_limit', 'user_end')
+UNSETTLED_IMPORT = ('queued', 'preparing', 'running')
+UNSETTLED_INTAKE = ('pending', 'probing', 'retry')
+
+
+def effective_page_limit(limit):
+    """Legacy limits above the window stay stored but never request page 1001."""
+    return min(int(limit or CATALOG_WINDOW_PAGES), CATALOG_WINDOW_PAGES)
+
+
+def begin_session(plan, now):
+    """Open a new sync session; rounds inside it restart from 1."""
+    plan.session_no = (plan.session_no or 0) + 1
+    plan.session_round = 0
+    plan.session_started_at = now
+    plan.session_end_reason = None
+
+
+def import_stat(stats, bucket):
+    return int(((stats or {}).get(bucket) or {}).get('inserted') or 0)
+
+
+def settle_round(*, eligible_count, problem_count, new_questions, new_relations, round_no, max_rounds):
+    """Decide what follows a fully settled round.
+
+    Effective growth is formal MySQL inserts only: new questions plus new
+    question-catalog relations. Updates, re-accepted rows and request counts
+    never extend a session.
+    """
+    if max_rounds and round_no >= max_rounds:
+        return 'round_limit'
+    if new_questions + new_relations > 0:
+        return 'continue'
+    if eligible_count == 0 or problem_count >= eligible_count:
+        return 'no_runnable_books'
+    if problem_count:
+        return 'no_new_with_issues'
+    return 'no_new'
 
 
 async def control_status(db):
@@ -90,6 +131,12 @@ def plan_dump(row):
         'planName': row.plan_name,
         'listConcurrency': row.list_concurrency,
         'catalogPageLimit': row.catalog_page_limit,
+        'effectiveCatalogPageLimit': effective_page_limit(row.catalog_page_limit),
+        'sessionNo': row.session_no or 0,
+        'sessionRound': row.session_round or 0,
+        'maxRounds': row.max_rounds,
+        'sessionStartedAt': utc_datetime(row.session_started_at),
+        'sessionEndReason': row.session_end_reason,
         'cycleName': row.cycle_name,
         'enabled': bool(row.enabled),
         'autoUpdate': bool(row.auto_update),
@@ -159,6 +206,8 @@ async def save_plan(db, payload):
     if row.cycle_state in ('completed','stopped') and row.cycle_finished_at:
         row.next_cycle_at=row.cycle_finished_at+timedelta(days=payload.refresh_days) if row.auto_update else None
     row.list_concurrency = payload.list_concurrency
+    if 'max_rounds' in payload.model_fields_set:
+        row.max_rounds = payload.max_rounds  # None means unlimited rounds.
     row.catalog_page_limit = payload.catalog_page_limit
     row.plan_name = name
     row.enabled = int(payload.enabled)
@@ -394,6 +443,7 @@ async def tick_plan(db, plan_id, *, client):
         if plan.cycle_state in ('idle','completed','stopped'):
             if plan.cycle_no and (not plan.auto_update or not plan.next_cycle_at or plan.next_cycle_at>now):
                 return
+            begin_session(plan,now)
             plan.cycle_state='discovering';plan.discovery_next_at=None;plan.discovery_error=None
             await db.commit()
         if plan.cycle_state=='discovering':
@@ -402,21 +452,8 @@ async def tick_plan(db, plan_id, *, client):
             plan=await db.get(QbSyncPlan,plan_id,with_for_update=True,populate_existing=True)
             if not plan.enabled or plan.control_state!='active':
                 return
-            books=await list_books(db,plan_id)
-            states={r.textbook_id:r for r in (await db.scalars(select(QbSyncBookState).where(QbSyncBookState.plan_id==plan_id))).all()}
-            targets=[b['textbookId'] for b in books if b['enabled'] and not b['exceptionKind']]
-            plan.textbook_order=[b['textbookId'] for b in books]
-            plan.cycle_no+=1
             discovery=await db.get(QbSyncJob,plan.discovery_processed_task_id) if plan.discovery_processed_task_id else None
-            snapshot=(discovery.options_json or {}) if discovery else {}
-            plan.cycle_name=snapshot.get('autoCycleName') if snapshot.get('autoCycleNo')==plan.cycle_no else _cycle_name(plan,now,plan.cycle_no)
-            plan.cycle_targets=targets;plan.cycle_started_at=now;plan.cycle_finished_at=None;plan.next_cycle_at=None
-            plan.cycle_state='running'
-            db.add(QbSyncCycle(plan_id=plan_id,cycle_no=plan.cycle_no,cycle_name=plan.cycle_name,
-                              status='running',targets=targets,started_at=now))
-            for book in books:
-                if book['textbookId'] not in states:
-                    db.add(QbSyncBookState(plan_id=plan_id,textbook_id=book['textbookId'],enabled=1,last_cycle_no=0,revision=1))
+            await _start_round(db,plan,now,(discovery.options_json or {}) if discovery else {})
             await db.commit()
         plan=await db.get(QbSyncPlan,plan_id,with_for_update=True,populate_existing=True)
         if not plan.enabled or plan.control_state!='active' or plan.cycle_state!='running':
@@ -451,16 +488,9 @@ async def tick_plan(db, plan_id, *, client):
         eligible=[b for b in books if b['textbookId'] in targets and b['enabled'] and not b['exceptionKind']]
         pending=[b for b in eligible if states[b['textbookId']].last_cycle_no<cycle_no]
         if not pending:
-            plan.cycle_state='completed';plan.cycle_finished_at=now
-            plan.next_cycle_at=now+timedelta(days=plan.refresh_days) if plan.auto_update else None
-            cycle=await db.scalar(select(QbSyncCycle).where(QbSyncCycle.plan_id==plan_id,QbSyncCycle.cycle_no==cycle_no))
-            if cycle:
-                cycle.status='completed';cycle.finished_at=now
-                cycle.summary_json={'targetCount':len(targets),'handledCount':len(eligible),
-                    'completeCount':sum(1 for b in eligible if any(j.run_id==states[b['textbookId']].last_task_id and not (j.options_json or {}).get('planOutcome',{}).get('needsRefill',True) for j in jobs))}
-            for state in states.values():
-                if state.textbook_id in targets:
-                    state.next_due_at=plan.next_cycle_at
+            if await _settle_round(db,plan,books,states,jobs,scopes,eligible,targets,now) is False:
+                await db.commit()
+                return
             await db.commit()
             return
         await db.commit()
@@ -484,19 +514,96 @@ async def tick_plan(db, plan_id, *, client):
         await db.commit()
 
 
+async def _start_round(db, plan, now, snapshot=None):
+    """Freeze the next round's target list inside the current session."""
+    books=await list_books(db,plan.plan_id)
+    states={r.textbook_id:r for r in (await db.scalars(select(QbSyncBookState).where(QbSyncBookState.plan_id==plan.plan_id))).all()}
+    targets=[b['textbookId'] for b in books if b['enabled'] and not b['exceptionKind']]
+    plan.textbook_order=[b['textbookId'] for b in books]
+    if not plan.session_no:
+        begin_session(plan,now)
+    plan.cycle_no+=1
+    plan.session_round=(plan.session_round or 0)+1
+    snapshot=snapshot or {}
+    plan.cycle_name=(snapshot.get('autoCycleName') if snapshot.get('autoCycleNo')==plan.cycle_no
+                     else _cycle_name(plan,now,plan.session_round))
+    plan.cycle_targets=targets;plan.cycle_started_at=now;plan.cycle_finished_at=None;plan.next_cycle_at=None
+    plan.cycle_state='running'
+    db.add(QbSyncCycle(plan_id=plan.plan_id,cycle_no=plan.cycle_no,cycle_name=plan.cycle_name,status='running',
+                       targets=targets,started_at=now,session_no=plan.session_no,round_no=plan.session_round,legacy=0))
+    for book in books:
+        if book['textbookId'] not in states:
+            db.add(QbSyncBookState(plan_id=plan.plan_id,textbook_id=book['textbookId'],enabled=1,last_cycle_no=0,revision=1))
+
+
+async def _settle_round(db, plan, books, states, jobs, scopes, eligible, targets, now):
+    """Settle a round only after every collected result has a settled import.
+
+    Returns False while saved results still wait for verification or import:
+    an unknown new count is never treated as zero.
+    """
+    plan_id,cycle_no=plan.plan_id,plan.cycle_no
+    job_ids=[j.run_id for j in jobs]
+    imports=list((await db.scalars(select(QbQuestionImport).where(QbQuestionImport.task_id.in_(job_ids)))).all()) if job_ids else []
+    intakes=list((await db.scalars(select(QbQuestionImportIntake).where(QbQuestionImportIntake.task_id.in_(job_ids)))).all()) if job_ids else []
+    unsettled=[i.task_id for i in imports if i.status in UNSETTLED_IMPORT]
+    unsettled+=[i.task_id for i in intakes if i.status in UNSETTLED_INTAKE
+                and not any(m.scope_id==i.scope_id and m.collector_run_id==i.collector_run_id for m in imports)]
+    cycle=await db.scalar(select(QbSyncCycle).where(QbSyncCycle.plan_id==plan_id,QbSyncCycle.cycle_no==cycle_no))
+    if unsettled:
+        if cycle:
+            cycle.summary_json={**(cycle.summary_json or {}),'waitingImportTaskIds':sorted(set(unsettled))[:50],
+                                'waitReason':'等待已保存成果完成核验和入库'}
+        return False
+    # Imports commit their stats with each batch, so summing per-import
+    # totals is idempotent across retries of the same batch.
+    new_questions=sum(import_stat(i.stats_json,'questions') for i in imports)
+    new_relations=sum(import_stat(i.stats_json,'questionCatalogs') for i in imports)
+    latest={states[b['textbookId']].last_task_id for b in eligible}
+    by_id={j.run_id:j for j in jobs}
+    problems=[]
+    for book in eligible:
+        job=by_id.get(states[book['textbookId']].last_task_id)
+        outcome=((job.options_json or {}).get('planOutcome') or {}) if job else {}
+        if job is None or job.status!='completed' or outcome.get('importStatus') in ('missing','failed','blocked','cancelled'):
+            problems.append(book['textbookId'])
+    decision=settle_round(eligible_count=len(eligible),problem_count=len(problems),new_questions=new_questions,
+                          new_relations=new_relations,round_no=plan.session_round or 1,max_rounds=plan.max_rounds)
+    summary={'targetCount':len(targets),'handledCount':len(eligible),
+             'completeCount':sum(1 for j in jobs if j.run_id in latest and not (j.options_json or {}).get('planOutcome',{}).get('needsRefill',True)),
+             'newQuestionCount':new_questions,'newRelationCount':new_relations,
+             'problemCount':len(problems),'problemTextbookIds':problems[:50],
+             'decision':decision,'sessionNo':plan.session_no,'roundNo':plan.session_round}
+    if cycle:
+        cycle.status='completed';cycle.finished_at=now;cycle.summary_json=summary
+        cycle.end_reason=None if decision=='continue' else decision
+    if decision=='continue':
+        await db.flush()
+        await _start_round(db,plan,now)
+        return True
+    plan.cycle_state='completed';plan.cycle_finished_at=now;plan.session_end_reason=decision
+    plan.next_cycle_at=now+timedelta(days=plan.refresh_days) if plan.auto_update else None
+    for state in states.values():
+        if state.textbook_id in targets:
+            state.next_due_at=plan.next_cycle_at
+    return True
+
+
 async def cycle_history(db,plan_id,before=None):
     query=select(QbSyncCycle).where(QbSyncCycle.plan_id==plan_id)
     if before:query=query.where(QbSyncCycle.cycle_no<before)
     rows=(await db.scalars(query.order_by(QbSyncCycle.cycle_no.desc()).limit(21))).all()
     return {'rows':[{'cycleNo':r.cycle_no,'cycleName':r.cycle_name,'status':r.status,
+                    'sessionNo':r.session_no,'roundNo':r.round_no,'legacy':bool(r.legacy),'endReason':r.end_reason,
                     'targetCount':len(r.targets or []),'summary':r.summary_json or {},
                     'startedAt':utc_datetime(r.started_at),'finishedAt':utc_datetime(r.finished_at)} for r in rows[:20]],
             'nextCursor':rows[19].cycle_no if len(rows)>20 else None}
 
 
-def _cycle_name(plan, now, number):
+def _cycle_name(plan, now, round_no):
     local = now.replace(tzinfo=timezone.utc).astimezone(timezone(timedelta(hours=8)))
-    return f"{plan.plan_name or '学科同步'} · {local:%Y-%m-%d %H:%M} · 第 {number} 轮"
+    session = plan.session_no or 1
+    return f"{plan.plan_name or '学科同步'} · 第 {session} 次同步 · {local:%Y-%m-%d %H:%M} · 第 {round_no} 轮"
 
 
 async def _discovery(db, plan_id, client):
@@ -555,7 +662,7 @@ async def _discovery(db, plan_id, client):
                   if previous_options.get('autoCycleNo') == plan.cycle_no + 1 else None)
     discovery_options = {'autoDiscoveryPlanId': plan_id, 'autoPlanId': plan_id, 'discoveryMode': 'merge',
                          'autoPlanName': plan.plan_name, 'autoCycleNo': plan.cycle_no + 1,
-                         'autoCycleName': cycle_name or _cycle_name(plan, now, plan.cycle_no + 1)}
+                         'autoCycleName': cycle_name or _cycle_name(plan, now, (plan.session_round or 0) + 1)}
     await db.rollback()
     from plugins.bank.service.sync_run_service import SyncRunService
 

@@ -15,7 +15,35 @@ from plugins.bank.entity.do.bank_do import (
     QbTextbookVersion,
 )
 from plugins.bank.service.import_dates import utc_datetime
-from plugins.bank.service.issue_diagnostics import describe_issue
+from plugins.bank.service.issue_diagnostics import classify_issue, describe_issue
+
+
+def _handling_column():
+    return QbSyncIssue.evidence_json['handling'].as_string()
+
+
+def _owner_column():
+    return QbSyncIssue.evidence_json['owner'].as_string()
+
+
+def needs_person_condition():
+    """Open issues a person (source page or maintenance) must act on.
+
+    Retries and program-owned waits are excluded. Legacy rows without an
+    owner keep their previous meaning (anything not scheduled for retry).
+    """
+    return ((_handling_column().is_(None)) | (_handling_column() != 'retry')) & (
+        _owner_column().is_(None) | (_owner_column() != 'program'))
+
+
+def handling_condition(handling):
+    if handling == 'retry':
+        return _handling_column() == 'retry'
+    if handling == 'manual':
+        return needs_person_condition()
+    if handling == 'program':
+        return (_handling_column() == 'retry') | (_owner_column() == 'program')
+    return _owner_column() == handling
 
 
 def identity(subject, provider, book, kind, key, error):
@@ -81,7 +109,8 @@ async def record_import_batch(db, row, issues, accepted_keys, now):
             key=str(issue['questionId']),
             error_type='question_quality',
             reason=issue['reason'],
-            evidence={'importId': row.import_id, 'scopeId': row.scope_id, 'batchNo': row.batch_no + 1, 'collectorRunId': row.collector_run_id, 'cursor': row.cursor, 'ordinal': issue.get('ordinal'), 'handling': 'manual'},
+            evidence={'importId': row.import_id, 'scopeId': row.scope_id, 'batchNo': row.batch_no + 1, 'collectorRunId': row.collector_run_id, 'cursor': row.cursor, 'ordinal': issue.get('ordinal'), 'handling': 'isolated',
+                      'owner': 'program', 'impactScope': 'item'},
             now=now,
         )
     if accepted_keys:
@@ -121,6 +150,13 @@ async def record_import_batch(db, row, issues, accepted_keys, now):
             }
 
 
+def _dump_handling(row):
+    evidence = row.evidence_json or {}
+    if evidence.get('handling') == 'retry':
+        return 'retry'
+    return classify_issue(row.error_type, row.reason, evidence)['owner']
+
+
 def dump(row):
     return {
         'issueId': row.issue_id,
@@ -136,7 +172,8 @@ def dump(row):
         'resolvedTaskId': row.resolved_task_id,
         'attempts': row.attempts,
         'evidence': row.evidence_json,
-        'handling': (row.evidence_json or {}).get('handling', 'manual'),
+        'handling': _dump_handling(row),
+        **classify_issue(row.error_type, row.reason, row.evidence_json),
         'nextAttemptAt': (row.evidence_json or {}).get('nextAttemptAt'),
         'operatorNote': row.operator_note,
         'revision': row.revision,
@@ -169,10 +206,8 @@ async def list_issues(
     ):
         if value is not None:
             query = query.where(column == value)
-    if handling == 'retry':
-        query = query.where(QbSyncIssue.evidence_json['handling'].as_string() == 'retry')
-    elif handling == 'manual':
-        query = query.where((QbSyncIssue.evidence_json['handling'].as_string().is_(None)) | (QbSyncIssue.evidence_json['handling'].as_string() != 'retry'))
+    if handling:
+        query = query.where(handling_condition(handling))
     if task_id is not None:
         query = query.where(
             exists(
@@ -313,8 +348,12 @@ async def record_runtime_failure(db, row, *, stage, message, now):
         'collectionError': scope.error_message,
         'snapshotCounts': {'catalogs': scope.catalog_count, 'questions': scope.question_count, 'relations': scope.question_catalog_count} if scope.snapshot_locked_at else None,
         'errorKind': getattr(row, 'error_kind', None), 'attempts': getattr(row, 'attempt_count', None),
-        'nextAttemptAt': utc_datetime(next_at).isoformat() if next_at else None, 'handling': 'retry' if next_at else 'manual',
+        'nextAttemptAt': utc_datetime(next_at).isoformat() if next_at else None,
     }
+    # Ownership is decided from the failure itself; a missing retry time no
+    # longer turns a transient program failure into "needs a person".
+    evidence.update(classify_issue(f'{stage}_failure', message, evidence))
+    evidence['handling'] = 'retry' if next_at else evidence['owner']
     await observe(db, subject_id=scope.subject_id, provider=scope.source_provider,
         book_id=scope.local_textbook_id, task_id=row.task_id, kind='scope',
         key=f'{scope.external_textbook_id}:{stage}', error_type=f'{stage}_failure',

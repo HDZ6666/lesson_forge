@@ -26,10 +26,13 @@ function catalogLastPage(options = {}) {
   // `--max-pages` bound.  When enabled, a catalog may request at most the
   // provider's 1000-page policy window; the caller decides whether reaching
   // this boundary is a normal (policy-limited) completion.
+  // A configured catalog page limit is always clamped to the provider's
+  // reachable window: legacy limits above 1000 stay stored but never request
+  // page 1001.  Without any limit the debug safety ceiling still applies.
   const configuredLimit = options.catalogPageLimit;
   const policyLimit =
     configuredLimit != null
-      ? Math.min(safety, configuredLimit)
+      ? Math.min(safety, configuredLimit, SITE_PAGE_LIMIT)
       : options.limitTo1000Pages === true
         ? Math.min(safety, SITE_PAGE_LIMIT)
         : safety;

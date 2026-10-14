@@ -28,7 +28,10 @@ READ = UserInterfaceAuthDependency(
 
 class PlanInput(BankModel):
     list_concurrency: int = Field(default=8, strict=True, ge=1, le=8)
+    # Legacy values up to 10000 still validate; requests are capped at the
+    # 1000-page window (see sync_plans.effective_page_limit).
     catalog_page_limit: int = Field(default=1000, strict=True, ge=1, le=10000)
+    max_rounds: int | None = Field(default=None, strict=True, ge=1, le=1000)
     plan_name: str | None = Field(default=None, min_length=1, max_length=100)
     subject_id: int = Field(gt=0)
     expected_revision: int | None = Field(default=None, gt=0)
@@ -190,7 +193,7 @@ async def issues(
     task_id: Annotated[int | None, Query(alias='taskId', gt=0)] = None,
     status: Literal['open', 'ignored', 'resolved'] | None = None,
     error_type: Annotated[str | None, Query(alias='errorType', max_length=50)] = None,
-    handling: Literal['manual', 'retry'] | None = None,
+    handling: Literal['manual', 'retry', 'program', 'source_manual', 'maintenance'] | None = None,
     since: datetime | None = None,
     until: datetime | None = None,
     before: Annotated[int | None, Query(gt=0)] = None,

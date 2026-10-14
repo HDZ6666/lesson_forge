@@ -8,7 +8,9 @@
 
 const { StopCrawlError, VerificationRequiredError } = require('../../shared/errors.cjs');
 
-const MANUAL_PAUSE_CODES = new Set(['waiting_verification', 'challenge', 'http_401', 'http_403', 'http_405']);
+// Only codes backed by protection evidence pause the shared source for a
+// person.  Bare HTTP 401/403/405 stay as technical failures (spec E02/A24).
+const MANUAL_PAUSE_CODES = new Set(['waiting_verification', 'challenge', 'json_html', 'verification_required']);
 const INTERRUPTED_CODES = new Set([
   'network_error',
   'navigation_error',

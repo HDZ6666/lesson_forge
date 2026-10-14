@@ -2159,7 +2159,9 @@ async def _execute_remote(  # noqa: PLR0912, PLR0915
         if handle.task_module == 'question' and handle.list_concurrency is not None:
             start_kwargs['list_concurrency'] = handle.list_concurrency
         if handle.task_module == 'question' and handle.catalog_page_limit is not None:
-            start_kwargs['catalog_page_limit'] = handle.catalog_page_limit
+            # Stored legacy limits above 1000 never request outside the window.
+            from plugins.bank.service.sync_plans import effective_page_limit
+            start_kwargs['catalog_page_limit'] = effective_page_limit(handle.catalog_page_limit)
         if handle.workflow_version >= 2:
             start_kwargs['workflow_version'] = 2
         dispatch_id = handle.dispatch_job_id

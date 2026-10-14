@@ -22,6 +22,17 @@ function isProtectionText(value) {
   return PROTECTION_MARKERS.some((marker) => text.includes(String(marker).toLowerCase()));
 }
 
+// Generic words such as "forbidden" also appear on ordinary error pages; a
+// bare 401/403 needs a marker that actually names a challenge.
+const GENERIC_MARKERS = new Set(['forbidden', 'access denied']);
+
+function isExplicitChallengeText(value) {
+  const text = String(value || '').toLowerCase();
+  return PROTECTION_MARKERS.some(
+    (marker) => !GENERIC_MARKERS.has(String(marker).toLowerCase()) && text.includes(String(marker).toLowerCase()),
+  );
+}
+
 function looksLikeHtml(value) {
   const text = String(value || '')
     .trim()
@@ -58,7 +69,11 @@ function classifyQuestionResponse(result) {
   const status = Number(response.status || 0);
   const text = String(response.text ?? response.body ?? '');
   if (status === 401 || status === 403) {
-    return { kind: 'verification', code: `http_${status}`, status, text };
+    // A bare 401/403 does not prove a protection page a person can solve.
+    // Only explicit protection evidence enters the manual verification flow;
+    // anything else is kept for technical diagnosis (spec E02/A24).
+    if (isExplicitChallengeText(text)) return { kind: 'verification', code: `http_${status}`, status, text };
+    return { kind: 'fatal', code: `http_${status}`, status, text, needsDiagnosis: true };
   }
   if (status === 429) return { kind: 'retry', code: 'http_429', status, text, throttled: true };
   if (RETRYABLE_HTTP.has(status)) {
@@ -75,7 +90,9 @@ function classifyQuestionResponse(result) {
     if (isProtectionText(text)) return { kind: 'verification', code: 'json_html', status, text };
     return { kind: 'ok', code: 'ok', status, text, payload: envelope };
   }
-  if (looksLikeHtml(text)) return { kind: 'verification', code: 'json_html', status, text };
+  if (isProtectionText(text)) return { kind: 'verification', code: 'json_html', status, text };
+  // Ordinary HTML (error page, gateway page) is not a slider by itself.
+  if (looksLikeHtml(text)) return { kind: 'fatal', code: 'unexpected_html', status, text, needsDiagnosis: true };
   return { kind: 'ok', code: 'ok', status, text };
 }
 
@@ -84,7 +101,7 @@ function isCookieSwitchError(error) {
   if (error instanceof VerificationRequiredError) return true;
   const code = String(error.code || '');
   if (code === 'waiting_verification' || code === 'json_html') return true;
-  return /^http_(401|403|405|429)$/.test(code);
+  return /^http_(401|403|429)$/.test(code);
 }
 
 function isTextbookFatalError(error) {
@@ -171,6 +188,7 @@ module.exports = {
   classifyQuestionResponse,
   isCookieSwitchError,
   isPageLevelError,
+  isExplicitChallengeText,
   isProtectionText,
   isTextbookFatalError,
   looksLikeHtml,

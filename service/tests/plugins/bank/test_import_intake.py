@@ -239,7 +239,9 @@ async def test_resume_and_delete_wait_for_intake_even_before_registration(import
     from plugins.bank.entity.do.bank_do import QbSyncIssue
     issue = await db.scalar(select(QbSyncIssue).where(QbSyncIssue.error_type == 'intake_failure'))
     assert issue.status == 'open' and issue.textbook_id == 1 and issue.latest_task_id == 28
-    assert issue.evidence_json['handling'] == 'manual' and issue.evidence_json['stage'] == 'intake'
+    # A non-retryable snapshot failure with no protection evidence is maintenance, not a teacher check.
+    assert issue.evidence_json['handling'] == 'maintenance' and issue.evidence_json['owner'] == 'maintenance'
+    assert issue.evidence_json['stage'] == 'intake'
     await db.rollback()
     with pytest.raises(ServiceException, match='人工判断'):
         await ensure_import_intake_finished(db, 28, automatic=True)

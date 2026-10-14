@@ -312,7 +312,8 @@ test('HTTP 重试/验证分类及退避策略', () => {
   assert.equal(isPageLevelError({ code: 'waiting_verification' }), false);
   assert.equal(classifyQuestionResponse({ status: 503, text: 'busy' }).kind, 'retry');
   assert.equal(classifyQuestionResponse({ status: 429, text: 'slow' }).throttled, true);
-  assert.equal(classifyQuestionResponse({ status: 403, text: 'forbidden' }).kind, 'verification');
+  assert.equal(classifyQuestionResponse({ status: 403, text: 'forbidden' }).kind, 'fatal');
+  assert.equal(classifyQuestionResponse({ status: 403, text: '请完成滑块验证' }).kind, 'verification');
   assert.equal(classifyQuestionResponse({ status: 200, text: '<html>验证码</html>' }).kind, 'verification');
   assert.equal(
     retryDelay('normal', 0, {}, () => 0),
@@ -1073,8 +1074,10 @@ for (const pageLimit of [3, 1000, 1500]) {
           ],
         },
       });
-      assert.equal(Math.max(...requested.get('261285')), pageLimit);
-      assert.ok(!requested.get('261285').includes(pageLimit + 1));
+      // Limits above the 1000-page window are clamped to it.
+      const effective = Math.min(pageLimit, 1000);
+      assert.equal(Math.max(...requested.get('261285')), effective);
+      assert.ok(!requested.get('261285').includes(effective + 1));
       assert.ok(requested.get('261286').length > 0);
       assert.equal(result.completeness.complete, false);
       const store = new QuestionSyncStore(dbPath, { dataDir: directory });

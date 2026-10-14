@@ -116,7 +116,16 @@ test('真正的防护 HTML 与带防护词的错误信封仍被识别为 verific
   assert.equal(plain.kind, 'ok');
   assert.throws(() => parseQuestionListPayload(plain.payload), /list_api_contract|题目列表接口返回异常/);
 
-  assert.equal(classifyQuestionResponse({ status: 403, text: 'forbidden' }).kind, 'verification');
+  // Bare 403 / ordinary HTML are diagnosis cases, not a slider (spec A24).
+  assert.equal(classifyQuestionResponse({ status: 403, text: 'forbidden' }).kind, 'fatal');
+  assert.equal(classifyQuestionResponse({ status: 403, text: 'forbidden' }).needsDiagnosis, true);
+  assert.equal(classifyQuestionResponse({ status: 403, text: protectionPage }).kind, 'verification');
+  assert.equal(
+    classifyQuestionResponse({ status: 405, text: '<html><body>Method Not Allowed</body></html>' }).kind,
+    'fatal',
+  );
+  const gateway = '<!DOCTYPE html><html><head><title>502</title></head><body>Bad gateway</body></html>';
+  assert.equal(classifyQuestionResponse({ status: 200, text: gateway }).code, 'unexpected_html');
   assert.equal(classifyQuestionResponse({ status: 503, text: 'busy' }).kind, 'retry');
   assert.equal(parseJsonEnvelope('not json'), null);
   assert.equal(parseJsonEnvelope('[1,2]'), null);

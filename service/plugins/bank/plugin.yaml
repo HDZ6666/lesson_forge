@@ -49,6 +49,7 @@ backend:
     - migrations/mysql/026_task_executions.py
     - migrations/mysql/027_coverage_indexes.py
     - migrations/mysql/028_plan_page_limit.py
+    - migrations/mysql/029_sync_sessions.py
   seeds:
     - seeds/mysql/001_dict.sql
   hooks:

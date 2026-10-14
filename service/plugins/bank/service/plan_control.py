@@ -92,6 +92,8 @@ async def action(db, plan_id, payload, operator):
     elif payload.action=='start':
         if plan.control_state in ('pausing','ending') or plan.cycle_state in ('running','discovering'):
             raise ServiceException(message='已有一轮正在执行，请先处理当前轮次')
+        from plugins.bank.service.sync_plans import begin_session
+        begin_session(plan,now)
         plan.enabled=1;plan.control_state='active';plan.cycle_state='discovering'
         plan.discovery_next_at=None;plan.discovery_error=None;plan.next_cycle_at=None
     else:
@@ -143,8 +145,9 @@ async def reconcile_controls(session_factory):
                 plan.enabled=1
                 plan.cycle_state='stopped';plan.cycle_finished_at=now
                 plan.next_cycle_at=now+timedelta(days=plan.refresh_days) if plan.auto_update else None
+                plan.session_end_reason='user_end'
                 cycle=await db.scalar(select(QbSyncCycle).where(QbSyncCycle.plan_id==plan_id,QbSyncCycle.cycle_no==plan.cycle_no))
-                if cycle:cycle.status='stopped';cycle.finished_at=now
+                if cycle:cycle.status='stopped';cycle.finished_at=now;cycle.end_reason='user_end'
                 if plan.discovery_task_id:
                     plan.discovery_processed_task_id=max(plan.discovery_processed_task_id or 0,plan.discovery_task_id)
                     plan.discovery_task_id=None

@@ -12,6 +12,51 @@ STAGES = {
 }
 
 
+OWNER_LABELS = {
+    'source_manual': '需要你操作来源页面',
+    'program': '程序处理',
+    'maintenance': '需要维护',
+}
+SCOPE_LABELS = {'item': '单题/单页', 'book': '目录/教材', 'source': '公共来源会话', 'server': '服务器或公共服务'}
+# Persistent program failures become maintenance, never a teacher judgement.
+PERSISTENT_ATTEMPTS = 6
+
+_PROTECTION = re.compile(r'验证码|滑块|防护|安全验证|访问验证|waiting_verification|verification_required|captcha|challenge', re.I)
+_RESOURCE = re.compile(r'内存|磁盘|水位|资源不足|enospc|no space|disk|memory', re.I)
+_TRANSIENT = re.compile(r'超时|timeout|timed out|http 50[234]|\b50[234]\b|reader_timeout|econnreset|网络|暂时|暂不可用|稍后|服务不可用|unavailable', re.I)
+_DETERMINISTIC = re.compile(r'目录 ?id ?重复|解析|身份|冲突|parse|identity|schema|contract|结构', re.I)
+_DIAGNOSE_HTTP = re.compile(r'http[_ ]?40[135]|unexpected_html|返回了 ?html', re.I)
+
+
+def classify_issue(error_type, reason='', evidence=None):
+    """Return who handles an issue and how far it reaches, kept as two facts.
+
+    Ownership comes from what actually happened, never from whether a retry
+    time happens to be scheduled (spec 6.1). Bare HTTP 401/403/405 or plain
+    HTML is a technical diagnosis, not a slider for a person to solve.
+    """
+    evidence = evidence or {}
+    if evidence.get('owner') in OWNER_LABELS:
+        return {'owner': evidence['owner'], 'impactScope': evidence.get('impactScope') or 'book'}
+    text = ' '.join(str(v) for v in (reason, evidence.get('collectionError'), evidence.get('errorKind')) if v)
+    if error_type == 'question_quality':
+        return {'owner': 'program', 'impactScope': 'item'}
+    if error_type in ('metadata_identity', 'metadata_validation'):
+        return {'owner': 'maintenance', 'impactScope': 'book'}
+    if _PROTECTION.search(text):
+        return {'owner': 'source_manual', 'impactScope': 'source'}
+    if _DIAGNOSE_HTTP.search(text):
+        return {'owner': 'maintenance', 'impactScope': 'source'}
+    if _DETERMINISTIC.search(text):
+        return {'owner': 'maintenance', 'impactScope': 'book'}
+    if _RESOURCE.search(text) or _TRANSIENT.search(text):
+        attempts = evidence.get('attempts') or 0
+        if evidence.get('handling') != 'retry' and attempts >= PERSISTENT_ATTEMPTS:
+            return {'owner': 'maintenance', 'impactScope': 'server'}
+        return {'owner': 'program', 'impactScope': 'server'}
+    return {'owner': 'maintenance', 'impactScope': 'book'}
+
+
 def describe_issue(row, scope=None):
     evidence = row.evidence_json or {}
     collection_error = scope.error_message if scope and scope.error_message else evidence.get('collectionError')
@@ -61,8 +106,14 @@ def describe_issue(row, scope=None):
     elif row.error_type in ('metadata_identity', 'metadata_validation'):
         impact = '有冲突的数据未自动登记，原有教材保留。'
         action = '核对教材归属和来源记录；修正后在教材发现详情重试登记。'
-    if any(word in (root or '').lower() for word in ('验证码', '防护', '验证页面', 'http 429')):
-        action = '先在采集器浏览器处理来源验证，或等待来源冷却结束，再从任务详情重新采集。'
+    ownership = classify_issue(row.error_type, root or row.reason, evidence)
+    if ownership['owner'] == 'source_manual':
+        action = '来源需要验证，采集已暂停，已保存成果保留。打开服务器浏览器处理后，检查原请求是否恢复，再明确恢复或重新排队。'
+        action_label = '打开服务器浏览器'
+    elif ownership['owner'] == 'program' and row.error_type != 'question_quality':
+        action = '程序会在条件恢复后从原阶段继续，已保存成果不会重新采集；无需你判断。'
+    elif ownership['owner'] == 'maintenance' and ownership['impactScope'] == 'server':
+        action = '多次自动恢复仍未成功，需要维护服务或存储；已保存成果保留。'
     if evidence.get('handling') == 'retry':
         action = '系统已安排自动重试，可查看下次重试时间；连续失败时再按原始错误排查。'
     return {
@@ -77,4 +128,8 @@ def describe_issue(row, scope=None):
         'textbookExternalId': evidence.get('textbookExternalId') or (scope.external_textbook_id if scope else None),
         'catalogOccurrences': evidence.get('catalogOccurrences', []),
         'sourceObservedAt': evidence.get('sourceObservedAt'),
+        'owner': ownership['owner'],
+        'ownerLabel': OWNER_LABELS[ownership['owner']],
+        'impactScope': ownership['impactScope'],
+        'impactScopeLabel': SCOPE_LABELS.get(ownership['impactScope'], ownership['impactScope']),
     }
