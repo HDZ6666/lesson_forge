@@ -446,6 +446,7 @@ def task_payload(row: object, scopes: list[object] | None = None) -> dict[str, A
         **task_concurrency.snapshot(options),
         'planPaused': bool(options.get('planWorkPaused')),
         'planEnded': bool(options.get('planWorkEnded')),
+        'stopCause': options.get('stopCause'),
         'collectionResumePending': bool(options.get('planResumePending')),
         'snapshotReclaimed': bool(options.get('snapshotReclaimed')),
         'snapshotCleanupPending': bool(options.get('snapshotCleanupPending')),

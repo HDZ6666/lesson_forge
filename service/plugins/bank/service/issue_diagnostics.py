@@ -133,3 +133,43 @@ def describe_issue(row, scope=None):
         'impactScope': ownership['impactScope'],
         'impactScopeLabel': SCOPE_LABELS.get(ownership['impactScope'], ownership['impactScope']),
     }
+
+
+STOP_CAUSE_LABELS = {
+    'user_pause': '用户暂停计划',
+    'user_end': '用户结束本次同步',
+    'user_cancel': '用户停止任务',
+    'resource': '主机资源不足，安全停止',
+    'service_restart': '服务重启或部署，安全停止',
+    'source_verification': '来源需要验证',
+}
+
+
+def stop_cause(options, status, message, *, was_cancelling=False):
+    """Why a collection stopped (spec E15): a signal alone is not a fault.
+
+    User intent recorded on the task wins, then resource and source causes
+    found in the stop message; a bare SIGTERM/SIGINT with no recorded intent
+    is a service restart or deployment, handled by the program.
+    """
+    if status not in ('interrupted', 'cancelled', 'blocked'):
+        return None
+    options = options or {}
+    text = str(message or '')
+    if options.get('planWorkEnded'):
+        cause = 'user_end'
+    elif options.get('planWorkPaused'):
+        cause = 'user_pause'
+    elif was_cancelling or status == 'cancelled':
+        cause = 'user_cancel'
+    elif any(word in text for word in ('内存', '磁盘', 'resource_pressure', 'disk')):
+        cause = 'resource'
+    elif any(word in text for word in ('验证', '防护', 'captcha')):
+        cause = 'source_verification'
+    elif any(word in text for word in ('SIGTERM', 'SIGINT', 'stop_requested', '安全点停止')):
+        cause = 'service_restart'
+    else:
+        return None
+    signal = next((s for s in ('SIGTERM', 'SIGINT') if s in text), None)
+    return {'cause': cause, 'label': STOP_CAUSE_LABELS[cause], 'signal': signal,
+            'operator': options.get('planActionBy'), 'message': text[:300] or None}

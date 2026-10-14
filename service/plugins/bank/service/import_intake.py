@@ -29,7 +29,8 @@ from plugins.bank.service.incremental_import import (
     attach_coverage_evidence,
     import_status,
 )
-from plugins.bank.service.plan_work import allowed_condition, assert_options
+from plugins.bank.service.plan_work import assert_results_options as assert_options
+from plugins.bank.service.plan_work import results_allowed_condition as allowed_condition
 from plugins.bank.service.question_apply_service import _coerce_datetime
 
 INTAKE_LEASE_SECONDS = 60
@@ -91,7 +92,7 @@ async def register_import_intake(db: Any, scope_id: int) -> dict[str, Any] | Non
             now = await _clock(db)
             row = QbQuestionImportIntake(
                 task_id=task.run_id, scope_id=scope_id, collector_run_id=scope.collector_run_id,
-                binding_hash=_digest(_descriptor(task, scope)), status='discarded' if (task.options_json or {}).get('planWorkEnded') else 'pending',
+                binding_hash=_digest(_descriptor(task, scope)), status='pending',
                 attempt_count=0, attempt_limit=INTAKE_MAX_ATTEMPTS, create_time=now, update_time=now,
             )
             db.add(row)
@@ -366,8 +367,7 @@ async def defer_plan_intake(db, ticket):
     row=await db.get(QbQuestionImportIntake,ticket['intakeId'],with_for_update=True,populate_existing=True)
     now=await _clock(db)
     _owned(row,ticket,now)
-    task=await db.get(QbSyncJob,row.task_id)
-    row.status='discarded' if (task.options_json or {}).get('planWorkEnded') else 'pending'
+    row.status='pending'
     row.attempt_count=max(0,row.attempt_count-1)
     _release(row)
     row.update_time=now

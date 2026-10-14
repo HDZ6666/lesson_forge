@@ -2890,11 +2890,18 @@ async def _finish(  # noqa: PLR0913
                 'queued', 'starting', 'running', 'cancelling',
             ):
                 return
-            if parent.status == 'cancelling':
+            was_cancelling = parent.status == 'cancelling'
+            if was_cancelling:
                 status, error_message = 'cancelled', '同步已停止'
                 values = finish_values(status, status, error_message)
             for key, value in values.items():
                 setattr(parent, key, value)
+            from plugins.bank.service.issue_diagnostics import stop_cause
+            cause = stop_cause(parent.options_json, status, error_message, was_cancelling=was_cancelling)
+            if cause:
+                parent.options_json = {**(parent.options_json or {}), 'stopCause': cause}
+                from plugins.bank.service import diagnostics
+                diagnostics.event('collection_stopped', stage='collection', taskId=run_id, **cause)
             # Job and unfinished scopes settle together. A dispatcher must
             # not release the book between these two lifecycle writes.
             for scope in await SyncTaskDao.scopes_for_update(db, run_id):

@@ -378,6 +378,10 @@ async def _book_task_progress(db, states, cycle_no):
             'taskInCurrentCycle': (job.options_json or {}).get('autoCycleNo') == cycle_no,
             'acceptedCount': imported.accepted_count if imported else 0,
             'quarantinedCount': imported.quarantined_count if imported else 0,
+            # Saved, accepted and deduplicated-new are different numbers (spec 9).
+            'savedQuestionCount': int(scope.question_count or 0),
+            'newQuestionCount': import_stat(imported.stats_json, 'questions') if imported else None,
+            'newRelationCount': import_stat(imported.stats_json, 'questionCatalogs') if imported else None,
         }
     return result
 
@@ -624,6 +628,8 @@ async def _settle_round(db, plan, books, states, jobs, scopes, eligible, targets
     decision=settle_round(eligible_count=len(eligible),problem_count=len(problems),new_questions=new_questions,
                           new_relations=new_relations,round_no=plan.session_round or 1,max_rounds=plan.max_rounds)
     summary={'targetCount':len(targets),'handledCount':len(eligible),
+             # Targets not run this round: disabled or isolated by a problem.
+             'skippedCount':len(targets)-len(eligible),'checkedCount':len(eligible)-len(problems),
              'completeCount':sum(1 for j in jobs if j.run_id in latest and not (j.options_json or {}).get('planOutcome',{}).get('needsRefill',True)),
              'newQuestionCount':new_questions,'newRelationCount':new_relations,
              'problemCount':len(problems),'problemTextbookIds':problems[:50],
@@ -691,6 +697,7 @@ async def session_log(db, plan_id, session_no=None):
         summary=cycle.summary_json or {}
         rounds.append({'cycleNo':cycle.cycle_no,'roundNo':cycle.round_no,'legacy':bool(cycle.legacy),
                        'status':cycle.status,'endReason':cycle.end_reason,'targetCount':len(cycle.targets or []),
+                       'skippedCount':summary.get('skippedCount'),'problemCount':summary.get('problemCount'),
                        'startedAt':utc_datetime(cycle.started_at),'finishedAt':utc_datetime(cycle.finished_at),
                        'collection':dict(collection),'verification':dict(intake),
                        'imports':{'count':len(imports),'completed':sum(1 for r in imports if r.status=='completed'),

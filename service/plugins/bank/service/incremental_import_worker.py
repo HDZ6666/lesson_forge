@@ -27,7 +27,8 @@ from plugins.bank.service.incremental_import import (
 from plugins.bank.service.incremental_merge import prepare_incremental_verdicts
 from plugins.bank.service.incremental_snapshot import SealedSnapshotReader, check_sealed_snapshot, read_checked_batch
 from plugins.bank.service.large_snapshot_spool import spool_snapshot
-from plugins.bank.service.plan_work import PlanWorkPaused, assert_task
+from plugins.bank.service.plan_work import PlanWorkPaused
+from plugins.bank.service.plan_work import assert_results_task as assert_task
 from plugins.bank.service.question_apply_service import _asset_root, _normalise_snapshot_summary
 from plugins.bank.service.resource_guard import ResourcePressure, assert_import_resources
 from plugins.bank.service.source_write_lock import SourceWriteBusy

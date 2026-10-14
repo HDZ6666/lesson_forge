@@ -39,6 +39,7 @@ const { catalogLastPage, catalogSafetyPageLimit, growTargetPages } = require('..
 const { listWindow, postQuestionList } = require('../../sources/zujuan/list_window.cjs');
 const { downloadAsset, prefetchAssets } = require('../../assets/download.cjs');
 const { saveRawPage } = require('../../storage/raw_pages.cjs');
+const diagnostics = require('../../shared/diagnostics.cjs');
 const {
   createJoinTracker,
   nextBaseline,
@@ -305,6 +306,15 @@ function createCatalogCrawler(ctx) {
         confirmed: confirmed === state.baseline ? undefined : confirmed,
         candidate,
       });
+      diagnostics.write('incremental_baseline_saved', {
+        stage: 'collection',
+        runId,
+        catalogExternalId: state.catalog.externalId,
+        committed: confirmed !== state.baseline,
+        reliableEnd: (confirmed || {}).reliableEnd ?? null,
+        candidateKept: Boolean(candidate),
+        stopReason: stallReason || (pageLimitReached || windowReason ? 'window_end' : 'actual_end'),
+      });
     } catch (error) {
       console.warn(`[增量] catalog=${state.catalog.externalId} 基线写入失败：${error.message}`);
     }
@@ -325,6 +335,13 @@ function createCatalogCrawler(ctx) {
     state.candidateTracker = null;
     if (join.shift !== 0) return; // The head moved again; rescan normally.
     state.candidateCovered = state.candidateThrough;
+    diagnostics.write('incremental_head_continued', {
+      stage: 'collection',
+      runId,
+      catalogExternalId: state.catalog.externalId,
+      continuedFromRunId: resumedFromRunId,
+      skippedThrough: state.candidateThrough,
+    });
     const resumeFrom = Math.max(state.nextPage, state.candidateThrough - incremental.backtrackPages + 1);
     console.log(
       `[增量] catalog=${state.catalog.externalId} 头部与上次未完成的扫描一致，跳过已扫到的 ${state.candidateThrough} 页，从 ${resumeFrom} 页继续`,
@@ -351,6 +368,17 @@ function createCatalogCrawler(ctx) {
           });
           state.joinPlan = plan;
           state.gapPages = plan.gapPages.filter((gap) => !state.successPages.has(gap));
+          diagnostics.write('incremental_head_joined', {
+            stage: 'collection',
+            runId,
+            catalogExternalId: state.catalog.externalId,
+            confirmedAtPage: join.confirmedAtPage,
+            shift: plan.shift,
+            covered: plan.covered,
+            skippedRange: plan.skippedRange || null,
+            resumeFrom: plan.resumeFrom ?? null,
+            gapCount: state.gapPages.length,
+          });
           if (!plan.covered) state.nextPage = Math.max(state.nextPage, plan.resumeFrom);
           console.log(
             `[增量] catalog=${state.catalog.externalId} 已在 page=${join.confirmedAtPage} 接上历史保存范围（位移 ${plan.shift} 页），` +

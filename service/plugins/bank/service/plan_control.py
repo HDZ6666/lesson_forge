@@ -51,7 +51,7 @@ async def action(db, plan_id, payload, operator):
             options=dict(row.options_json or {})
             if options.get('planWorkEnded'):
                 continue
-            options.update(planWorkPaused=not end,planWorkEnded=end)
+            options.update(planWorkPaused=not end,planWorkEnded=end,planActionBy=operator)
             options.pop('allowWhilePlanPaused',None)
             options['autoResumePending']=False
             if row.task_module=='question' and row.status in ('starting','running','cancelling'):
@@ -131,19 +131,22 @@ async def reconcile_controls(session_factory):
                         QbQuestionImport.status.in_(('preparing','running')) & (QbQuestionImport.lease_until<=now)))
                     .values(status='paused',stage='paused',worker_token=None,lease_until=None,active_source_slot=None))
             if ending:
+                # Ending stops collection only: saved results are finished,
+                # not thrown away (spec 4.1). Results paused earlier resume.
                 await db.execute(update(QbQuestionImport).where(QbQuestionImport.task_id.in_(task_ids),
-                    or_(QbQuestionImport.status.in_(('queued','paused')),
-                        QbQuestionImport.status.in_(('preparing','running')) & (QbQuestionImport.lease_until<=now)))
-                    .values(status='cancelled',stage='cancelled',worker_token=None,lease_until=None,active_source_slot=None))
-                await db.execute(update(QbQuestionImportIntake).where(QbQuestionImportIntake.task_id.in_(task_ids),
-                    or_(QbQuestionImportIntake.status.in_(('pending','retry')),
-                        (QbQuestionImportIntake.status=='probing') & (QbQuestionImportIntake.lease_until<=now)))
-                    .values(status='discarded',worker_token=None,lease_until=None))
+                    QbQuestionImport.status=='paused').values(status='queued',stage='queued'))
             collecting=await db.scalar(select(QbSyncJob.run_id).where(owned_condition(plan_id),QbSyncJob.active_slot.is_not(None)).limit(1))
             importing=await db.scalar(select(QbQuestionImport.import_id).where(QbQuestionImport.task_id.in_(task_ids),
                 QbQuestionImport.status.in_(('preparing','running')),QbQuestionImport.lease_until>now).limit(1))
             probing=await db.scalar(select(QbQuestionImportIntake.intake_id).where(QbQuestionImportIntake.task_id.in_(task_ids),
                 QbQuestionImportIntake.status=='probing',QbQuestionImportIntake.lease_until>now).limit(1))
+            if ending and not (collecting or importing or probing):
+                # The sync ends only after its saved results are verified and imported.
+                importing=await db.scalar(select(QbQuestionImport.import_id).where(QbQuestionImport.task_id.in_(task_ids),
+                    QbQuestionImport.status.in_(('queued','preparing','running'))).limit(1))
+                probing=await db.scalar(select(QbQuestionImportIntake.intake_id).where(
+                    QbQuestionImportIntake.task_id.in_(task_ids),
+                    QbQuestionImportIntake.status.in_(('pending','retry','probing'))).limit(1))
             if collecting or importing or probing:
                 await db.commit();continue
             plan.control_state='active' if ending else 'paused'
@@ -222,8 +225,12 @@ async def set_order(db, plan_id, payload):
     rows=(await db.execute(select(QbSyncJob,QbSyncJobScope.local_textbook_id)
         .join(QbSyncJobScope,QbSyncJobScope.run_id==QbSyncJob.run_id)
         .where(owned_condition(plan_id),QbSyncJob.status=='queued',QbSyncJob.active_slot.is_(None)).with_for_update())).all()
+    previous=list(plan.textbook_order or [])
     for job,book_id in rows:job.dispatch_rank=ranks.get(book_id,len(ids))
     await db.commit()
+    from plugins.bank.service import diagnostics
+    diagnostics.event('queue_reordered', stage='queue', planId=plan_id, revision=plan.revision,
+                      movedCount=sum(1 for a,b in zip(previous,ids) if a!=b), queuedTaskCount=len(rows))
     return {'revision':plan.revision,'textbookIds':ids}
 
 
@@ -317,6 +324,9 @@ async def pin_book(db, plan_id, textbook_id, revision):
         job.options_json={**(job.options_json or {}),'pinnedOnce':True}
     plan.revision+=1
     await db.commit()
+    from plugins.bank.service import diagnostics
+    diagnostics.event('queue_pinned', stage='queue', planId=plan_id, textbookId=textbook_id,
+                      taskIds=[job.run_id for job,_ in rows], revision=plan.revision)
     return {'revision':plan.revision,'taskIds':[job.run_id for job,_ in rows]}
 
 

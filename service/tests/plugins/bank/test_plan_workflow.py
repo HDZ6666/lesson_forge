@@ -208,9 +208,17 @@ async def test_import_pause_retains_batch_then_resume_and_end(import_db):
     await db.rollback();p=await db.get(QbSyncPlan,plan['planId'])
     await plan_control.action(db,p.plan_id,PlanAction(action='end',expectedRevision=p.revision),'teacher')
     await db.rollback();await plan_control.reconcile_controls(factory)
+    # Ending stops collection, but the saved result is finished, not cancelled (spec 4.1).
     row=await db.get(QbQuestionImport,ticket['importId'],populate_existing=True)
-    assert row.status=='cancelled' and row.cursor==1
+    assert row.status=='queued' and row.cursor==1
+    assert ticket['importId'] in await incremental_import.pending_incremental_import_ids(db)
+    p=await db.get(QbSyncPlan,plan['planId'],populate_existing=True)
+    assert p.control_state=='ending', 'the sync is recorded as ended only after its results are handled'
     assert await db.scalar(select(QbQuestion.question_id).where(QbQuestion.external_question_id=='q3'))
+    row.status='completed';row.stage='completed';await db.commit()
+    await db.rollback();await plan_control.reconcile_controls(factory)
+    p=await db.get(QbSyncPlan,plan['planId'],populate_existing=True)
+    assert p.control_state=='active' and p.session_end_reason=='user_end'
 
 
 @pytest.mark.asyncio

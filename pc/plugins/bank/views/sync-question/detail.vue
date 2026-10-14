@@ -93,7 +93,8 @@
         <span>开始时间：{{ formatTaskTime(summaryStartedAt) }}</span>
         <span>结束时间：{{ summaryFinishedAt }}</span>
       </div>
-      <el-alert v-if="task.errorMessage" class="inner-alert" type="error" :closable="false" show-icon>{{ task.errorMessage }}</el-alert>
+      <el-alert v-if="task.stopCause" class="inner-alert" :type="['user_pause','user_end','user_cancel','service_restart'].includes(task.stopCause.cause) ? 'info' : 'warning'" :closable="false" show-icon :title="`停止原因：${task.stopCause.label}`"><span v-if="task.stopCause.operator">操作人 {{ task.stopCause.operator }}；</span>已保存的成果和断点保留<span v-if="task.stopCause.signal">（进程信号 {{ task.stopCause.signal }}）</span>。</el-alert>
+      <el-alert v-else-if="task.errorMessage" class="inner-alert" type="error" :closable="false" show-icon>{{ task.errorMessage }}</el-alert>
       <details class="log-panel sync-disclosure">
         <summary>运行日志 · 自动刷新最后 100 条</summary>
         <pre v-if="task.logs.length" tabindex="0" aria-label="运行日志">{{ task.logs.join('\n') }}</pre>

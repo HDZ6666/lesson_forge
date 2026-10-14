@@ -68,3 +68,21 @@ async def test_empty_snapshot_links_root_issue_and_is_not_reverified(import_db):
     assert issue.evidence_json['emptySnapshot'] is True and issue.evidence_json['rootIssueId'] == root
     assert issue.evidence_json['owner'] == 'maintenance' and issue.evidence_json['impactScope'] == 'book'
     assert await sync_plans.retry_saved_book_results(db, 1, now) is False, 'an empty result is never re-verified'
+
+
+@pytest.mark.parametrize('options,status,message,cancelling,cause', [
+    ({'planWorkPaused': True, 'planActionBy': 'teacher'}, 'interrupted', '收到 SIGTERM，采集在安全点停止', False, 'user_pause'),
+    ({'planWorkEnded': True}, 'cancelled', '同步已停止', True, 'user_end'),
+    ({}, 'cancelled', '同步已停止', True, 'user_cancel'),
+    ({}, 'interrupted', '主机可用内存低于保留水位', False, 'resource'),
+    ({}, 'interrupted', '收到 SIGTERM，采集在安全点停止', False, 'service_restart'),
+])
+def test_stop_cause_combines_user_intent_resource_and_signal(options, status, message, cancelling, cause):
+    """E15: a signal alone is never a fault; recorded intent wins."""
+    from plugins.bank.service.issue_diagnostics import stop_cause
+
+    result = stop_cause(options, status, message, was_cancelling=cancelling)
+    assert result['cause'] == cause
+    if 'SIGTERM' in message:
+        assert result['signal'] == 'SIGTERM'
+    assert stop_cause({}, 'completed', '', was_cancelling=False) is None

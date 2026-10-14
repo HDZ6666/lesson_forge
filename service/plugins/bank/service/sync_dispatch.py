@@ -333,6 +333,11 @@ async def claim_next(db, *, task_id=None) -> dict | None:
     except IntegrityError:
         await db.rollback()
         return None
+    from plugins.bank.service import diagnostics
+    claimed = row.options_json or {}
+    diagnostics.event('queue_claimed', stage='queue', taskId=row.run_id, taskModule=row.task_module,
+                      planId=claimed.get('autoPlanId') or claimed.get('manualPlanId'),
+                      cycleNo=claimed.get('autoCycleNo'), priority=row.dispatch_priority, rank=row.dispatch_rank)
     return {'taskId': row.run_id, 'token': token, 'jobId': row.dispatch_job_id,
             'taskModule': row.task_module, 'runType': row.run_type}
 
