@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import secrets
 from datetime import timedelta
 from typing import Any
@@ -36,6 +37,11 @@ from plugins.bank.service.question_apply_service import _coerce_datetime
 INTAKE_LEASE_SECONDS = 60
 INTAKE_MAX_ATTEMPTS = 3
 INTAKE_RETRY_DELAYS = (30, 90, 300)
+# After the quick retries, a transient failure (timeout, 5xx) keeps the same
+# sealed snapshot and is retried on a slower schedule before it is handed to
+# maintenance (spec E03/A26). Seconds, overridable as a comma list.
+INTAKE_SLOW_RETRY_DELAYS = tuple(int(v) for v in os.getenv(
+    'BANK_INTAKE_SLOW_RETRY_DELAYS', '1800,3600,7200,14400,21600').split(',') if v.strip())
 COUNT_FIELDS = {
     'catalogs': 'catalog_count', 'questions': 'question_count',
     'questionCatalogs': 'question_catalog_count', 'tags': 'question_tag_count', 'assets': 'question_asset_count',
@@ -319,6 +325,13 @@ async def fail_import_intake(db: Any, ticket: dict[str, Any], kind: str, message
             row.status = 'retry'
             delay = INTAKE_RETRY_DELAYS[min(row.attempt_count - 1, len(INTAKE_RETRY_DELAYS) - 1)]
             row.next_attempt_at = now + timedelta(seconds=delay)
+        elif retryable and (row.slow_retry_count or 0) < len(INTAKE_SLOW_RETRY_DELAYS):
+            # Quick retries are used up: schedule a slower retry of the same
+            # snapshot instead of leaving it blocked with nobody to pick it up.
+            row.status = 'retry'
+            row.next_attempt_at = now + timedelta(seconds=INTAKE_SLOW_RETRY_DELAYS[row.slow_retry_count or 0])
+            row.slow_retry_count = (row.slow_retry_count or 0) + 1
+            row.attempt_limit = row.attempt_count + 1
         from plugins.bank.service.sync_issues import record_runtime_failure
         await record_runtime_failure(db, row, stage='intake', message=message, now=now)
         await db.commit()
@@ -348,6 +361,7 @@ async def retry_import_intake(db: Any, task_id: int) -> dict[str, Any]:
         else:
             row.status = 'pending'
             row.attempt_limit = row.attempt_count + INTAKE_MAX_ATTEMPTS
+            row.slow_retry_count = 0
             row.next_attempt_at = None
             row.error_kind = None
             row.error_message = None

@@ -19,6 +19,7 @@ from plugins.bank.entity.do.bank_do import (
     QbSyncJobScope,
     QbTextbook,
 )
+from plugins.bank.service import import_intake
 from plugins.bank.service import import_intake_worker as intake_worker
 from plugins.bank.service import incremental_import_worker as worker
 from plugins.bank.service import sync_run_service as runs
@@ -112,6 +113,8 @@ async def test_finish_registers_before_any_remote_fetch(import_db, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_transport_retry_budget_is_durable_and_manual_retry_extends_it(import_db, monkeypatch):
+    # Quick budget only here; the slow retries after it have their own test.
+    monkeypatch.setattr(import_intake, 'INTAKE_SLOW_RETRY_DELAYS', ())
     db = import_db
     client, _summary, _calls = _client(monkeypatch)
 

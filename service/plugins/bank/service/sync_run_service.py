@@ -2826,6 +2826,27 @@ async def _finalize_scopes(
         )
 
 
+async def _plan_book_logical_task(db: Any, plan_id: int, local_textbook_id: Any) -> int | None:
+    """The logical task this plan already holds for the textbook, if any."""
+    if not local_textbook_id:
+        return None
+    from plugins.bank.entity.do.bank_do import QbSyncBookState
+    from plugins.bank.service.plan_control import owned_condition
+    state = await db.scalar(select(QbSyncBookState).where(
+        QbSyncBookState.plan_id == plan_id, QbSyncBookState.textbook_id == int(local_textbook_id)))
+    ids = [i for i in ((state.last_task_id, state.last_manual_task_id) if state else ()) if i]
+    previous = await db.get(QbSyncJob, max(ids)) if ids else None
+    if previous is None:
+        # No state pointer yet (or a legacy plan): the plan's earliest execution
+        # for this textbook carries the logical identity.
+        previous = await db.scalar(select(QbSyncJob).join(QbSyncJobScope, QbSyncJobScope.run_id == QbSyncJob.run_id).where(
+            owned_condition(plan_id), QbSyncJob.task_module == 'question',
+            QbSyncJobScope.local_textbook_id == int(local_textbook_id)).order_by(QbSyncJob.run_id).limit(1))
+    if previous is None or previous.task_module != 'question':
+        return None
+    return previous.logical_task_id or previous.run_id
+
+
 async def _finish(  # noqa: PLR0913
     run_id: int,
     handle: _WorkerHandle,
@@ -3203,6 +3224,11 @@ class SyncRunService:
             previous = await db.get(QbSyncJob, retry_of_run_id)
             if previous is not None:
                 logical_task_id = previous.logical_task_id or previous.run_id
+        if task_module == 'question' and logical_task_id is None and plan_id and selected_scope_rows:
+            # One textbook in one plan is one stable logical task: every later
+            # round, rerun or supplement adds an execution to it (spec 2).
+            logical_task_id = await _plan_book_logical_task(
+                db, int(plan_id), _scope_field(selected_scope_rows[0], 'local_textbook_id', 'localTextbookId'))
         row = QbSyncJob(
             run_type=run_type,
             task_module=task_module,

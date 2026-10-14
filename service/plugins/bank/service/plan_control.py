@@ -196,7 +196,7 @@ async def resume_stopped_collections(session_factory):
             if scope and not scope.snapshot_complete:
                 if scope.collector_run_id and scope.snapshot_locked_at:
                     extra={k:v for k,v in options.items() if k in (
-                        'autoPlanId','autoPlanName','autoCycleNo','autoCycleName','manualPlanId','manualSingle',
+                        'autoPlanId','autoPlanName','autoCycleNo','autoCycleName','manualPlanId','manualSingle','supplementId',
                         'manualDispatchRequested','allowWhilePlanPaused','listConcurrency','concurrencySource','inheritedConcurrency','syncMode')}
                     extra['resumeFirst']=True
                     if options.get('concurrencySource')!='task':
@@ -279,13 +279,23 @@ async def sync_book_once(db, plan_id, textbook_id, payload, operator):
         QbSyncJob.options_json['autoCycleNo'].as_integer() == plan.cycle_no,
     ).order_by(QbSyncJob.run_id.desc()).limit(1))
     previous_id = previous.run_id if previous else None
+    supplement_run = plan.cycle_state in ('completed', 'stopped', 'idle')
     options = {'manualPlanId': plan_id, 'manualSingle': True, 'manualDispatchRequested': True,
                'allowWhilePlanPaused': bool(payload.allow_paused), 'autoPlanId': plan_id,
                'autoPlanName': plan.plan_name, 'autoCycleNo': plan.cycle_no, 'autoCycleName': plan.cycle_name,
-               'syncMode': 'full' if payload.full else 'incremental',
-               # Between sessions this is a one-book supplement: it never
-               # wakes the whole subject or moves the scheduled wake-up.
-               'supplementRun': plan.cycle_state in ('completed', 'stopped', 'idle')}
+               'syncMode': 'full' if payload.full else 'incremental', 'supplementRun': supplement_run}
+    if supplement_run:
+        # Between sessions this is a one-book supplement with its own record:
+        # it never joins the finished round's history, never wakes the whole
+        # subject and never moves the scheduled wake-up (spec 4.1, A09).
+        from plugins.bank.entity.do.bank_do import QbSyncSupplement
+        now=await _clock(db)
+        supplement=QbSyncSupplement(plan_id=plan_id,textbook_id=textbook_id,status='running',
+                                    sync_mode=options['syncMode'],created_by=str(operator)[:64],started_at=now)
+        db.add(supplement)
+        await db.flush()
+        options.update(autoCycleNo=None, supplementId=supplement.supplement_id,
+                       autoCycleName=f'单本补采 #{supplement.supplement_id} · {book.textbook_name}')
     await db.commit()
     if previous_id:
         result = await SyncTaskService.retry_question(db, previous_id, operator, settings=payload, execution_options=options)
@@ -302,6 +312,13 @@ async def sync_book_once(db, plan_id, textbook_id, payload, operator):
         db.add(state)
     state.last_manual_task_id=task_id
     state.last_task_id=task_id
+    if options.get('supplementId'):
+        from plugins.bank.entity.do.bank_do import QbSyncSupplement
+        supplement=await db.get(QbSyncSupplement,options['supplementId'])
+        supplement.task_id=task_id
+        from plugins.bank.service import diagnostics
+        diagnostics.event('supplement_started', stage='plan', planId=plan_id, supplementId=supplement.supplement_id,
+                          textbookId=textbook_id, taskId=task_id, syncMode=supplement.sync_mode, operator=operator)
     await db.commit()
     return {'taskId':task_id,'existing':False}
 

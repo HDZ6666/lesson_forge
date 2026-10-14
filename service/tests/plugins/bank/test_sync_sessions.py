@@ -39,6 +39,7 @@ async def _finish_round(db, plan_id, *, inserted, relations, import_status='comp
     for offset, job in enumerate(jobs):
         scope = await db.scalar(select(QbSyncJobScope).where(QbSyncJobScope.run_id == job.run_id))
         job.status = job.phase = 'completed'
+        job.started_at = job.started_at or now
         job.snapshot_complete = 1
         job.dispatch_book_key = None
         job.active_slot = None
@@ -171,7 +172,38 @@ async def test_books_report_rounds_taken_part_in_current_session(bank_db, monkey
     await _finish_round(bank_db, plan_id, inserted=1, relations=0)
     await tick(bank_db, plan_id)
     books = await plans.list_books(bank_db, plan_id)
+    # Round 2 tasks are only queued: they have not taken part yet.
+    assert all(b['sessionRounds'] == [1] for b in books)
+    second = (await bank_db.scalars(select(QbSyncJob).where(
+        QbSyncJob.options_json['autoCycleNo'].as_integer() == 2))).all()
+    for job in second:
+        job.started_at = datetime.utcnow().replace(microsecond=0)
+    await bank_db.commit()
+    books = await plans.list_books(bank_db, plan_id)
     assert all(b['sessionRounds'] == [1, 2] for b in books)
+
+
+@pytest.mark.asyncio
+async def test_each_book_keeps_one_logical_task_across_rounds(bank_db, monkeypatch):
+    """Spec 2: a later round adds an execution to the same logical task."""
+    monkeypatch.setenv('BANK_AUTOMATIC_SYNC_ENABLED', '1')
+    plan_id, _ = await registered_plan(bank_db)
+    await _finish_round(bank_db, plan_id, inserted=1, relations=0)
+    await tick(bank_db, plan_id)
+    rows = (await bank_db.execute(select(QbSyncJob, QbSyncJobScope.local_textbook_id)
+        .join(QbSyncJobScope, QbSyncJobScope.run_id == QbSyncJob.run_id)
+        .where(QbSyncJob.task_module == 'question').order_by(QbSyncJob.run_id))).all()
+    by_book = {}
+    for job, book in rows:
+        by_book.setdefault(book, []).append(job)
+    assert by_book and all(len(jobs) == 2 for jobs in by_book.values())
+    for jobs in by_book.values():
+        first, second = jobs
+        assert second.run_id != first.run_id
+        assert (second.logical_task_id or second.run_id) == (first.logical_task_id or first.run_id)
+    books = await plans.list_books(bank_db, plan_id)
+    assert all(b['logicalTaskId'] == by_book[b['textbookId']][0].run_id for b in books)
+    assert all(b['executionCount'] == 1 and b['executionRecordCount'] == 2 for b in books)
 
 
 @pytest.mark.asyncio

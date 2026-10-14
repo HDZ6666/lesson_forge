@@ -362,6 +362,11 @@ async def record_runtime_failure(db, row, *, stage, message, now):
     # Ownership is decided from the failure itself; a missing retry time no
     # longer turns a transient program failure into "needs a person".
     evidence.update(classify_issue(f'{stage}_failure', message, evidence))
+    if not next_at and evidence['owner'] == 'program':
+        # "Program handles it" is only true while a recovery is actually
+        # scheduled; with none left it goes to maintenance, never silence.
+        evidence['owner'] = 'maintenance'
+        evidence['escalatedFrom'] = 'program'
     evidence['handling'] = 'retry' if next_at else evidence['owner']
     await observe(db, subject_id=scope.subject_id, provider=scope.source_provider,
         book_id=scope.local_textbook_id, task_id=row.task_id, kind='scope',

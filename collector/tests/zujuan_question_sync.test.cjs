@@ -2257,6 +2257,56 @@ test('A20：头部中断后续采接着上次未完成的头部继续，不从�
   }
 });
 
+test('下一轮自动执行（非续采）也接着上一轮未完成的头部，新插入的页按位移处理', async () => {
+  const { directory, dbPath } = tempDb();
+  const tree = { id: '260617', title: '测试教材', children: [{ id: '261285', title: '大目录', children: [] }] };
+  let current = (curPage) => [String(70000000 + curPage)];
+  const requested = [];
+  const page = mockSyncPage(({ curPage, categoryId }) => {
+    if (categoryId !== '261285') return { status: 200, headers: {}, text: listApiText(104269, ['35020603']) };
+    requested.push(curPage);
+    return { status: 200, headers: {}, text: listApiText(400, current(curPage)) };
+  });
+  const options = (extra = {}) => baseSyncOptions(directory, dbPath, { catalogPageLimit: 60, ...extra });
+  try {
+    await runSync(options(), { context: {}, page, catalogTree: tree });
+    current = (curPage) => (curPage <= 30 ? [String(80000000 + curPage)] : [String(70000000 + curPage - 30)]);
+    requested.length = 0;
+    await runSync(options({ maxPages: 20, maxPagesProvided: true }), { context: {}, page, catalogTree: tree });
+    assert.equal(Math.max(...requested), 20);
+    // Before the next round, 5 more new pages appear on top.
+    current = (curPage) =>
+      curPage <= 5
+        ? [String(90000000 + curPage)]
+        : curPage <= 35
+          ? [String(80000000 + curPage - 5)]
+          : [String(70000000 + curPage - 35)];
+    requested.length = 0;
+    const next = await runSync(options(), { context: {}, page, catalogTree: tree });
+    assert.ok(
+      requested.includes(1) && requested.includes(8),
+      `new head and the match are read: ${requested.join(',')}`,
+    );
+    assert.ok(
+      !requested.includes(15),
+      `pages saved by the previous round are not requested again: ${requested.join(',')}`,
+    );
+    const store = new QuestionSyncStore(dbPath, { dataDir: directory });
+    try {
+      assert.equal(store.getRunCatalogProgress(next.runId, '260617', '261285').stallReason, 'incremental_joined');
+      const baseline = store.getCatalogBaseline(
+        store.db.prepare('SELECT scope_key FROM catalog_baselines').get().scope_key,
+      );
+      assert.equal(baseline.confirmed.headPages[0].ids[0], '90000001');
+      assert.equal(baseline.confirmed.reliableEnd, 60);
+    } finally {
+      store.close();
+    }
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test('E10：采集中浏览器上下文关闭后重建并只补抓未返回的页，运行正常结束', async () => {
   const { directory, dbPath } = tempDb();
   const tree = { id: '260617', title: '测试教材', children: [{ id: '261285', title: '大目录', children: [] }] };

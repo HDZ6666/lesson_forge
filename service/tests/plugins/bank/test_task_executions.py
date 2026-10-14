@@ -83,7 +83,8 @@ async def test_plan_manual_rerun_joins_current_cycle_next_cycle_is_separate(bank
     next_cycle = await SyncTaskService.create_question(bank_db,{'versionId':1,'textbookId':1}, 'automatic',
         automatic_options={'autoPlanId':plan_id,'autoCycleNo':2,'autoCycleName':'下一轮'})
     new = await bank_db.get(QbSyncJob,next_cycle['taskId'])
-    assert new.logical_task_id == new.run_id != root
+    # The same book stays one logical task across rounds; only executions are added.
+    assert new.logical_task_id == root != new.run_id
 
 
 @pytest.mark.asyncio

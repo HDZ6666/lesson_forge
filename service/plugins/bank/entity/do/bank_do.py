@@ -638,6 +638,7 @@ class QbQuestionImportIntake(Base):
     status = Column(String(20), nullable=False)
     attempt_count = Column(Integer, nullable=False, server_default='0')
     attempt_limit = Column(Integer, nullable=False, server_default='3')
+    slow_retry_count = Column(Integer, nullable=False, server_default='0')
     next_attempt_at = Column(DateTime, nullable=True)
     worker_token = Column(CHAR(64), nullable=True)
     lease_until = Column(DateTime, nullable=True)
@@ -860,6 +861,23 @@ class QbSyncPlan(Base):
     lease_until = Column(DateTime, nullable=True)
     revision = Column(Integer, nullable=False, server_default='1')
     update_time = Column(DateTime, nullable=False)
+
+
+class QbSyncSupplement(Base):
+    """A one-book supplement run between sessions, recorded on its own (A09)."""
+
+    __tablename__ = 'qb_sync_supplement'
+
+    supplement_id = Column(BigInteger, primary_key=True, autoincrement=True)
+    plan_id = Column(BigInteger, nullable=False)
+    textbook_id = Column(BigInteger, nullable=False)
+    task_id = Column(BigInteger, nullable=True)
+    sync_mode = Column(String(20), nullable=False, server_default='incremental')
+    status = Column(String(20), nullable=False)
+    summary_json = Column(JSON, nullable=True)
+    created_by = Column(String(64), nullable=True)
+    started_at = Column(DateTime, nullable=False)
+    finished_at = Column(DateTime, nullable=True)
 
 
 class QbSyncCycle(Base):

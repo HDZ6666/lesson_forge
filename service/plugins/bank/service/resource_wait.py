@@ -66,14 +66,18 @@ class ResourceWait:
             else:
                 self.interval = min(ceiling, max(base, self.interval * 2))
             self.next_check = now + self.interval
-            if entered or changed:
-                await self._persist(session_factory, waiting=True)
+            # Every failed check is persisted so the page and the monitor read
+            # the real next check and count; the backoff bounds these writes.
+            await self._persist(session_factory, waiting=True, announce=entered or changed)
             return False
         if not self.waiting:
             return True
         # A single good sample is not a lasting recovery.
         if self.recovering_since is None:
             self.recovering_since = now
+            self.checks += 1
+            self.interval = stable
+            await self._persist(session_factory, waiting=True, recovering=True)
         if now - self.recovering_since < stable:
             self.next_check = now + min(base, stable)
             return False
@@ -83,7 +87,8 @@ class ResourceWait:
         self.reset()
         return True
 
-    async def _persist(self, session_factory: Any, *, waiting: bool) -> None:
+    async def _persist(self, session_factory: Any, *, waiting: bool, announce: bool = False,
+                       recovering: bool = False) -> None:
         if session_factory is None:
             return
         from sqlalchemy import update
@@ -100,14 +105,16 @@ class ResourceWait:
                     db.add(row)
                 previous = row.resource_wait_json or {}
                 if waiting:
-                    # Queued imports show the one stable reason they wait on.
-                    await db.execute(update(QbQuestionImport).where(QbQuestionImport.status == 'queued')
-                                     .values(error_message=str(self.reason)[:2000]))
+                    if announce:
+                        # Queued imports show the one stable reason they wait on.
+                        await db.execute(update(QbQuestionImport).where(QbQuestionImport.status == 'queued')
+                                         .values(error_message=str(self.reason)[:2000]))
                     since = previous.get('since') if previous.get('active') else utc_datetime(now).isoformat()
                     row.resource_wait_json = {
                         'active': True, 'scope': 'server', 'reason': self.reason, 'since': since,
                         'nextCheckAt': utc_datetime(now + timedelta(seconds=self.interval)).isoformat(),
-                        'checks': self.checks,
+                        'checks': self.checks, 'lastCheckAt': utc_datetime(now).isoformat(),
+                        'intervalSeconds': round(self.interval), 'recovering': recovering,
                     }
                 else:
                     row.resource_wait_json = {**previous, 'active': False,

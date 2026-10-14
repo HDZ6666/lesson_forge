@@ -156,11 +156,19 @@ function createCatalogCrawler(ctx) {
     // An unfinished head from the execution this run continues: when the
     // current head still matches it, skip what it already covered (A20).
     // Its results were carried into this run, so nothing is lost.
+    // The next automatic round continues it too, as long as that execution's
+    // saved pages were sealed into its own result (they are imported from
+    // there, so skipping them here loses nothing).
+    const candidateRun = stored?.candidateRunId != null ? Number(stored.candidateRunId) : null;
+    const candidateSealed =
+      candidateRun != null &&
+      candidateRun !== Number(runId) &&
+      typeof store.getRun === 'function' &&
+      Boolean(store.getRun(candidateRun)?.snapshot_locked_at);
     const candidate =
       !fullMode &&
-      resumedFromRunId != null &&
       stored?.candidate?.headPages?.length &&
-      Number(stored.candidateRunId) === Number(resumedFromRunId)
+      ((resumedFromRunId != null && candidateRun === Number(resumedFromRunId)) || candidateSealed)
         ? stored.candidate
         : null;
     const candidateThrough = candidate ? contiguousThrough(candidate.scannedPages || []) : 0;
@@ -179,7 +187,9 @@ function createCatalogCrawler(ctx) {
             )
           : null,
       candidateThrough,
+      candidateRunId: candidate ? candidateRun : null,
       candidateCovered: 0,
+      candidateShift: 0,
       trackBaseline,
       baseline,
       joinTracker: createJoinTracker(baseline, opts),
@@ -285,7 +295,8 @@ function createCatalogCrawler(ctx) {
     const successPages = new Map(state.successPages);
     // Pages the continued head already saved count as covered.
     for (let page = 1; page <= state.candidateCovered; page += 1) {
-      if (!successPages.has(page)) successPages.set(page, []);
+      const current = page + state.candidateShift;
+      if (!successPages.has(current)) successPages.set(current, []);
     }
     const { confirmed, candidate } = nextBaseline({
       previous: state.baseline,
@@ -333,18 +344,23 @@ function createCatalogCrawler(ctx) {
     const join = state.candidateTracker.observe(page, ids);
     if (!join) return;
     state.candidateTracker = null;
-    if (join.shift !== 0) return; // The head moved again; rescan normally.
+    // New questions pushed the unfinished head down by `shift` pages: its
+    // pages 1..T are now pages shift+1..shift+T.
+    const shift = Math.max(0, Number(join.shift) || 0);
+    if (shift + state.candidateThrough <= state.nextPage - 1) return;
+    state.candidateShift = shift;
     state.candidateCovered = state.candidateThrough;
     diagnostics.write('incremental_head_continued', {
       stage: 'collection',
       runId,
       catalogExternalId: state.catalog.externalId,
-      continuedFromRunId: resumedFromRunId,
-      skippedThrough: state.candidateThrough,
+      continuedFromRunId: state.candidateRunId,
+      shift,
+      skippedThrough: shift + state.candidateThrough,
     });
-    const resumeFrom = Math.max(state.nextPage, state.candidateThrough - incremental.backtrackPages + 1);
+    const resumeFrom = Math.max(state.nextPage, shift + state.candidateThrough - incremental.backtrackPages + 1);
     console.log(
-      `[增量] catalog=${state.catalog.externalId} 头部与上次未完成的扫描一致，跳过已扫到的 ${state.candidateThrough} 页，从 ${resumeFrom} 页继续`,
+      `[增量] catalog=${state.catalog.externalId} 头部与上次未完成的扫描一致，位移 ${shift} 页，跳过已扫到的 ${shift + state.candidateThrough} 页，从 ${resumeFrom} 页继续`,
     );
     state.nextPage = resumeFrom;
   }

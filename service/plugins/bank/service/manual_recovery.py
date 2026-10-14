@@ -49,7 +49,7 @@ async def finish_browser(db, session_id, state, operator):
     scope = await db.scalar(select(QbSyncJobScope).where(QbSyncJobScope.run_id == row.run_id))
     options = row.options_json or {}
     inherited = {k:v for k,v in options.items() if k in
-                 ('autoPlanId','autoPlanName','autoCycleNo','autoCycleName','manualPlanId','manualSingle')}
+                 ('autoPlanId','autoPlanName','autoCycleNo','autoCycleName','manualPlanId','manualSingle','supplementId')}
     inherited.update(manualDispatchRequested=True, resumeFirst=True)
     # Source remains paused while the durable refill is queued. Closing the
     # browser and clearing source pause is the final step.

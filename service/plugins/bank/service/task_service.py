@@ -1515,7 +1515,7 @@ class SyncTaskService:
             scope_rows=retry_scopes,
             defer_dispatch=int(options.get('workflowVersion', 1)) >= 2,
             extra_options={
-                **{k:v for k,v in options.items() if k in ('autoPlanId','autoPlanName','autoCycleNo','autoCycleName','manualPlanId','manualSingle','manualDispatchRequested','allowWhilePlanPaused','resumeFirst','syncMode')},
+                **{k:v for k,v in options.items() if k in ('autoPlanId','autoPlanName','autoCycleNo','autoCycleName','manualPlanId','manualSingle','manualDispatchRequested','allowWhilePlanPaused','resumeFirst','syncMode','supplementId')},
                 **(execution_options or {}),
                 **task_concurrency.snapshot(concurrency),
                 'workflowVersion': int(options.get('workflowVersion', 1)),

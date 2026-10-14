@@ -68,6 +68,42 @@ async def test_single_book_full_rerun_and_supplement_between_sessions(bank_db, m
     assert job.options_json['syncMode'] == 'full' and job.options_json['supplementRun'] is True
     plan = await bank_db.get(QbSyncPlan, plan_id, populate_existing=True)
     assert plan.next_cycle_at == deadline and plan.cycle_state == 'completed'
+    # Its own record, outside the finished round's history (A09).
+    from plugins.bank.entity.do.bank_do import QbSyncJobScope, QbSyncSupplement
+    from plugins.bank.service import sync_plans
+    from plugins.bank.service.incremental_import import _new_import
+    supplement = await bank_db.scalar(select(QbSyncSupplement))
+    job_id, supplement_id = job.run_id, supplement.supplement_id
+    assert supplement.status == 'running' and supplement.task_id == job.run_id and supplement.textbook_id == 1
+    assert job.options_json['autoCycleNo'] is None and job.options_json['supplementId'] == supplement.supplement_id
+    rounds = (await sync_plans.session_log(bank_db, plan_id))['rounds']
+    assert all(r['collection'].get('queued', 0) == 0 for r in rounds), 'not mixed into the old round'
+    # The subject's wake-up waits while the supplement runs.
+    finished_at = plan.cycle_finished_at
+    plan.next_cycle_at = finished_at
+    session_before = plan.session_no
+    await bank_db.commit()
+    await tick(bank_db, plan_id)
+    plan = await bank_db.get(QbSyncPlan, plan_id, populate_existing=True)
+    assert plan.session_no == session_before and plan.cycle_state == 'completed'
+    # Collection and import finish: the supplement closes with its own summary.
+    job = await bank_db.get(QbSyncJob, job_id, populate_existing=True)
+    job.status = job.phase = 'completed'; job.started_at = job.started_at or finished_at
+    job.active_slot = None; job.dispatch_book_key = None
+    scope = await bank_db.scalar(select(QbSyncJobScope).where(QbSyncJobScope.run_id == job_id))
+    scope.collector_run_id = 9000; scope.snapshot_complete = 1; scope.snapshot_locked_at = finished_at
+    scope.question_count = 12
+    row = _new_import(scope, finished_at)
+    row.status = 'completed'; row.accepted_count = 12
+    row.stats_json = {**row.stats_json, 'questions': {'inserted': 4}, 'questionCatalogs': {'inserted': 6}}
+    bank_db.add(row)
+    await bank_db.commit()
+    await tick(bank_db, plan_id)
+    supplement = await bank_db.get(QbSyncSupplement, supplement_id, populate_existing=True)
+    assert supplement.status == 'completed' and supplement.finished_at is not None
+    assert supplement.summary_json['newQuestionCount'] == 4 and supplement.summary_json['newRelationCount'] == 6
+    log = await sync_plans.session_log(bank_db, plan_id)
+    assert log['supplements'][0]['supplementId'] == supplement_id
 
 
 @pytest.mark.asyncio
@@ -96,6 +132,11 @@ async def test_resource_wait_is_one_persisted_wait_with_backoff_and_stable_recov
         assert await allow() is False
     # Backoff: far fewer real checks than polls.
     assert len(checks) < 10
+    # The persisted wait follows the real backoff: count and next check move.
+    control = await bank_db.get(QbSyncControl, 1, populate_existing=True)
+    wait = control.resource_wait_json
+    assert wait['checks'] == len(checks) and wait['intervalSeconds'] == gate.interval
+    assert wait['since'] == since and wait['nextCheckAt'] > wait['lastCheckAt']
     short['value'] = False
     clock['now'] = 100.0
     assert await allow() is False, 'one good sample is not a lasting recovery'

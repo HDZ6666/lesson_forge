@@ -141,6 +141,11 @@ async def test_full_round_deadline_and_manual_single_does_not_reset_it(bank_db,m
     plan.next_cycle_at=datetime.utcnow()-timedelta(seconds=1);await bank_db.commit()
     await tick(bank_db,plan_id)
     plan=await bank_db.get(QbSyncPlan,plan_id)
+    assert plan.cycle_state=='completed', 'the wake-up waits for the running one-book supplement'
+    job=await bank_db.get(QbSyncJob,result['taskId'],populate_existing=True)
+    job.status=job.phase='cancelled';job.active_slot=None;job.dispatch_book_key=None;await bank_db.commit()
+    await tick(bank_db,plan_id)
+    plan=await bank_db.get(QbSyncPlan,plan_id)
     assert plan.cycle_state=='discovering' and plan.discovery_task_id
 
 
@@ -321,3 +326,60 @@ async def test_mysql_upgrade_024_retains_plan_queue_and_is_repeatable(bank_db):
     assert len(history)==1 and history[0].targets==[1,2]
     ddl=(await bank_db.execute(text('SHOW CREATE TABLE qb_question_import'))).one()[1]
     assert "'paused'" in ddl and "'cancelled'" in ddl
+
+
+@pytest.mark.asyncio
+async def test_intake_timeout_gets_slow_retries_then_goes_to_maintenance(import_db, monkeypatch):
+    """E03/A26: after quick retries a timeout is retried later on the same
+    snapshot; only when no recovery is left does the issue become maintenance."""
+    monkeypatch.setattr(import_intake, 'INTAKE_SLOW_RETRY_DELAYS', (1800, 3600))
+    db = import_db
+    from plugins.bank.entity.do.bank_do import QbQuestionImportIntake, QbSyncIssue
+    intake = await import_intake.register_import_intake(db, 30)
+    seen = []
+    for _ in range(5):
+        row = await db.get(QbQuestionImportIntake, intake['intakeId'], populate_existing=True)
+        row.next_attempt_at = None if row.next_attempt_at is None else datetime(2000, 1, 1)
+        await db.commit()
+        ticket = await import_intake.claim_import_intake(db, intake['intakeId'])
+        assert ticket is not None, f'retry {len(seen)} is picked up again'
+        await import_intake.fail_import_intake(db, ticket, 'reader_timeout', '核验接口超时', retryable=True)
+        row = await db.get(QbQuestionImportIntake, intake['intakeId'], populate_existing=True)
+        seen.append((row.status, row.slow_retry_count))
+        issue = await db.scalar(select(QbSyncIssue).order_by(QbSyncIssue.issue_id.desc()).limit(1))
+        if row.status == 'retry':
+            assert issue.evidence_json['owner'] == 'program' and issue.evidence_json['nextAttemptAt']
+    assert seen == [('retry', 0), ('retry', 0), ('retry', 1), ('retry', 2), ('blocked', 2)]
+    assert issue.evidence_json['owner'] == 'maintenance' and issue.evidence_json['handling'] == 'maintenance'
+
+
+@pytest.mark.asyncio
+async def test_failed_plan_import_is_actually_recovered_later(import_db, monkeypatch):
+    """E04: the delayed import recovery a failure record promises is run by the scheduler."""
+    db = import_db
+    plan = await sync_plans.save_plan(db, PlanInput(subjectId=1, enabled=True))
+    job = await db.get(QbSyncJob, 28)
+    job.options_json = {**job.options_json, 'autoPlanId': plan['planId']}
+    await db.commit()
+    ticket = await incremental_import.claim_incremental_import(db, 30, report())
+    row = await db.get(QbQuestionImport, ticket['importId'])
+    row.status = 'failed'; row.worker_token = None; row.lease_until = None
+    now = datetime.utcnow().replace(microsecond=0)
+    row.update_time = now - timedelta(hours=1)
+    await db.commit()
+    calls = []
+
+    async def fake_retry(db_, textbook_id, now_):
+        calls.append(textbook_id)
+        return True
+    monkeypatch.setattr(sync_plans, 'retry_saved_book_results', fake_retry)
+    assert await sync_plans.recover_failed_results(db, now) == 0, 'not before refill_hours'
+    row = await db.get(QbQuestionImport, ticket['importId'], populate_existing=True)
+    p = await db.get(QbSyncPlan, plan['planId'])
+    row.update_time = now - timedelta(hours=p.refill_hours + 1)
+    await db.commit()
+    assert await sync_plans.recover_failed_results(db, now) == 1 and len(calls) == 1
+    job = await db.get(QbSyncJob, 28, populate_existing=True)
+    job.options_json = {**job.options_json, 'planImportRetryCount': 3}
+    await db.commit()
+    assert await sync_plans.recover_failed_results(db, now) == 0, 'no more automatic recovery after three'

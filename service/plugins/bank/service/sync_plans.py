@@ -19,6 +19,7 @@ from plugins.bank.entity.do.bank_do import (
     QbSyncJob,
     QbSyncJobScope,
     QbSyncPlan,
+    QbSyncSupplement,
     QbTextbook,
     QbTextbookApplyState,
     QbTextbookVersion,
@@ -320,11 +321,14 @@ async def _session_rounds(db, plan):
         .join(QbSyncJob,QbSyncJob.run_id==QbSyncJobScope.run_id)
         .where(QbSyncJob.task_module=='question',
                QbSyncJob.options_json['autoPlanId'].as_integer()==plan.plan_id,
-               QbSyncJob.options_json['autoCycleNo'].as_integer().in_(list(cycles))))).all()
+               QbSyncJob.options_json['autoCycleNo'].as_integer().in_(list(cycles)),
+               # Only executions that actually started take part in a round;
+               # a queued or never-started cancelled task does not (spec 2).
+               QbSyncJob.started_at.is_not(None)))).all()
     result={}
     for book,options in rows:
         round_no=cycles.get((options or {}).get('autoCycleNo'))
-        if round_no is not None and (options or {}).get('status')!='cancelled':
+        if round_no is not None:
             result.setdefault(book,set()).add(round_no)
     return {book:sorted(values) for book,values in result.items()}
 
@@ -479,12 +483,18 @@ async def tick_plan(db, plan_id, *, client):
         return
     try:
         plan=await db.get(QbSyncPlan,plan_id,with_for_update=True,populate_existing=True)
+        now=await _clock(db)
+        supplement_open=await settle_supplements(db,plan_id,now)
+        await db.commit()
+        plan=await db.get(QbSyncPlan,plan_id,with_for_update=True,populate_existing=True)
         if plan.control_state!='active':
             return
         await SubjectService.require(db,plan.subject_id,sync=True)
-        now=await _clock(db)
         if plan.cycle_state in ('idle','completed','stopped'):
             if plan.cycle_no and (not plan.auto_update or not plan.next_cycle_at or plan.next_cycle_at>now):
+                return
+            if supplement_open:
+                # The scheduled wake-up waits for a running one-book supplement.
                 return
             begin_session(plan,now)
             plan.cycle_state='discovering';plan.discovery_next_at=None;plan.discovery_error=None
@@ -706,10 +716,64 @@ async def session_log(db, plan_id, session_no=None):
                        'openIssueCount':int(issues or 0),
                        'newQuestionCount':summary.get('newQuestionCount'),'newRelationCount':summary.get('newRelationCount'),
                        'decision':summary.get('decision'),'note':summary.get('note')})
+    supplements=(await db.scalars(select(QbSyncSupplement).where(QbSyncSupplement.plan_id==plan_id)
+                                  .order_by(QbSyncSupplement.supplement_id.desc()).limit(20))).all()
     return {'sessionNo':session_no,'sessions':sorted(sessions,reverse=True),'rounds':rounds,
+            'supplements':[supplement_dump(r) for r in supplements],
             'endReason':next((r['endReason'] for r in reversed(rounds) if r['endReason']),None),
             'newQuestionCount':sum(int(r['newQuestionCount'] or 0) for r in rounds),
             'newRelationCount':sum(int(r['newRelationCount'] or 0) for r in rounds)}
+
+
+def supplement_dump(row):
+    summary=row.summary_json or {}
+    return {'supplementId':row.supplement_id,'textbookId':row.textbook_id,'taskId':row.task_id,
+            'syncMode':row.sync_mode,'status':row.status,'startedAt':utc_datetime(row.started_at),
+            'finishedAt':utc_datetime(row.finished_at),'createdBy':row.created_by,**summary}
+
+
+async def settle_supplements(db, plan_id, now):
+    """Close one-book supplements once collection, verification and import are done.
+
+    Returns True while one is still open: the subject's own wake-up waits for
+    it, so the two never run side by side (spec 4.1, A09).
+    """
+    rows=(await db.scalars(select(QbSyncSupplement).where(QbSyncSupplement.plan_id==plan_id,
+        QbSyncSupplement.status=='running').with_for_update())).all()
+    still_open=False
+    for row in rows:
+        job=await db.get(QbSyncJob,row.task_id) if row.task_id else None
+        if job is None:
+            still_open=True
+            continue
+        # Follow resumes and retries of the same supplement to the latest execution.
+        latest=await db.scalar(select(QbSyncJob).where(QbSyncJob.task_module=='question',
+            QbSyncJob.options_json['supplementId'].as_integer()==row.supplement_id).order_by(QbSyncJob.run_id.desc()).limit(1))
+        job=latest or job
+        if job.status not in TERMINAL or job.active_slot is not None or (job.options_json or {}).get('planResumePending'):
+            still_open=True
+            continue
+        imports=list((await db.scalars(select(QbQuestionImport).where(QbQuestionImport.task_id==job.run_id))).all())
+        intakes=list((await db.scalars(select(QbQuestionImportIntake).where(QbQuestionImportIntake.task_id==job.run_id))).all())
+        if any(i.status in UNSETTLED_IMPORT for i in imports) or any(
+                i.status in UNSETTLED_INTAKE and not i.import_id for i in intakes):
+            still_open=True
+            continue
+        scope=await db.scalar(select(QbSyncJobScope).where(QbSyncJobScope.run_id==job.run_id))
+        imported=imports[-1] if imports else None
+        row.status='completed' if job.status=='completed' and imported and imported.status=='completed' else (
+            'cancelled' if job.status=='cancelled' else 'finished_with_issues')
+        row.task_id=job.run_id
+        row.finished_at=now
+        row.summary_json={'jobStatus':job.status,'importStatus':imported.status if imported else 'missing',
+                          'savedQuestionCount':int(scope.question_count or 0) if scope else 0,
+                          'acceptedCount':sum(int(i.accepted_count or 0) for i in imports),
+                          'newQuestionCount':sum(import_stat(i.stats_json,'questions') for i in imports),
+                          'newRelationCount':sum(import_stat(i.stats_json,'questionCatalogs') for i in imports)}
+        from plugins.bank.service import diagnostics
+        diagnostics.event('supplement_finished', stage='plan', planId=plan_id, supplementId=row.supplement_id,
+                          taskId=job.run_id, status=row.status, **row.summary_json)
+    return still_open
 
 
 def _cycle_name(plan, now, round_no):
@@ -801,6 +865,12 @@ async def schedule_once(*, session_factory, client):
         if (await control_status(db))['paused']:
             return
         ids = list((await db.scalars(select(QbSyncPlan.plan_id).where(QbSyncPlan.enabled == 1))).all())
+        # Supplements of a paused plan (run with explicit permission) still close.
+        open_ids = set((await db.scalars(select(QbSyncSupplement.plan_id).where(
+            QbSyncSupplement.status == 'running'))).all()) - set(ids)
+        for plan_id in open_ids:
+            await settle_supplements(db, plan_id, await _clock(db))
+            await db.commit()
     if not ids:
         return
     for plan_id in ids:
@@ -811,6 +881,41 @@ async def schedule_once(*, session_factory, client):
                 from utils.log_util import logger
 
                 logger.exception('自动同步计划 %s 处理失败，其他教材任务继续', plan_id)
+    async with session_factory() as db:
+        try:
+            await recover_failed_results(db)
+        except Exception:
+            from utils.log_util import logger
+
+            logger.exception('已保存成果的延迟恢复失败，下次调度再试')
+
+
+async def recover_failed_results(db, now=None):
+    """Run the delayed import recovery that failure records promise (spec E04).
+
+    A failed import of a plan's saved result is retried on the same snapshot
+    once ``refill_hours`` have passed, at most three times; after that its
+    issue is maintenance (no further recovery is scheduled).
+    """
+    now = now or await _clock(db)
+    rows = (await db.execute(select(QbQuestionImport, QbSyncJob, QbSyncJobScope.local_textbook_id, QbSyncPlan)
+        .join(QbSyncJob, QbSyncJob.run_id == QbQuestionImport.task_id)
+        .join(QbSyncJobScope, QbSyncJobScope.scope_id == QbQuestionImport.scope_id)
+        .join(QbSyncPlan, QbSyncPlan.plan_id == QbSyncJob.options_json['autoPlanId'].as_integer())
+        .where(QbQuestionImport.status == 'failed', QbSyncPlan.enabled == 1, QbSyncPlan.control_state == 'active')
+        .order_by(QbQuestionImport.import_id).limit(20))).all()
+    due = []
+    for imported, job, textbook_id, plan in rows:
+        options = job.options_json or {}
+        if options.get('planWorkPaused') or options.get('planImportRetryCount', 0) >= 3:
+            continue
+        if imported.update_time and imported.update_time + timedelta(hours=plan.refill_hours) > now:
+            continue
+        due.append(textbook_id)
+    await db.rollback()
+    for textbook_id in dict.fromkeys(due):
+        await retry_saved_book_results(db, textbook_id, now)
+    return len(due)
 
 
 async def retry_saved_book_results(db, textbook_id, now):
