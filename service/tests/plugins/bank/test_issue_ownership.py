@@ -4,6 +4,8 @@ from types import SimpleNamespace
 import pytest
 
 from plugins.bank.service.issue_diagnostics import classify_issue, describe_issue
+from tests.plugins.bank.test_incremental_import import import_db as import_db
+from tests.plugins.bank.test_incremental_merge import bank_db as bank_db
 
 
 @pytest.mark.parametrize('error_type,reason,evidence,owner,scope', [
@@ -35,3 +37,34 @@ def test_stored_owner_wins_and_description_carries_labels():
     described = describe_issue(row)
     assert described['owner'] == 'program' and described['ownerLabel'] == '程序处理'
     assert '无需你判断' in described['actionHint']
+
+
+@pytest.mark.asyncio
+async def test_empty_snapshot_links_root_issue_and_is_not_reverified(import_db):
+    """E08/A30: an empty result after a collection failure points at the root, not a new manual problem."""
+    from datetime import datetime
+
+    from sqlalchemy import select
+
+    from plugins.bank.entity.do.bank_do import QbQuestionImportIntake, QbSyncIssue, QbSyncJobScope
+    from plugins.bank.service import sync_issues, sync_plans
+
+    db = import_db
+    now = datetime.utcnow().replace(microsecond=0)
+    scope = await db.get(QbSyncJobScope, 30)
+    scope.question_count = scope.catalog_count = scope.question_catalog_count = 0
+    scope.error_message = '目录 ID 重复：4712'
+    await sync_issues.observe(db, subject_id=1, provider='zujuan', book_id=1, task_id=28, kind='scope', key='tb1',
+                              error_type='scope_failure', reason='目录 ID 重复：4712', evidence={}, now=now)
+    await db.flush()
+    root = await db.scalar(select(QbSyncIssue.issue_id).where(QbSyncIssue.error_type == 'scope_failure'))
+    db.add(QbQuestionImportIntake(intake_id=5, task_id=28, scope_id=30, collector_run_id=27, binding_hash='b' * 64, status='blocked',
+                                  attempt_count=6, attempt_limit=6, error_message='空快照', create_time=now, update_time=now))
+    await db.commit()
+    intake = SimpleNamespace(scope_id=30, task_id=28, collector_run_id=27, intake_id=5, error_kind='empty', attempt_count=6)
+    await sync_issues.record_runtime_failure(db, intake, stage='intake', message='空快照', now=now)
+    await db.commit()
+    issue = await db.scalar(select(QbSyncIssue).where(QbSyncIssue.error_type == 'intake_failure'))
+    assert issue.evidence_json['emptySnapshot'] is True and issue.evidence_json['rootIssueId'] == root
+    assert issue.evidence_json['owner'] == 'maintenance' and issue.evidence_json['impactScope'] == 'book'
+    assert await sync_plans.retry_saved_book_results(db, 1, now) is False, 'an empty result is never re-verified'

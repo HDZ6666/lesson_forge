@@ -144,6 +144,11 @@ async def plan_queue_view(plan_id:int,db:DB)->Response:
     return ResponseUtil.success(data=await plan_queue(db,plan_id))
 
 
+@sync_plan_controller.get('/plans/{plan_id}/sessions',dependencies=[READ])
+async def plan_session_log(plan_id:int,db:DB,session_no:Annotated[int|None,Query(alias='sessionNo',gt=0)]=None)->Response:
+    return ResponseUtil.success(data=await sync_plans.session_log(db,plan_id,session_no))
+
+
 @sync_plan_controller.get('/plans/{plan_id}/history',dependencies=[READ])
 async def plan_history(plan_id:int,db:DB,before:Annotated[int|None,Query(gt=0)]=None)->Response:
     return ResponseUtil.success(data=await sync_plans.cycle_history(db,plan_id,before))

@@ -1,11 +1,12 @@
 """One-book cycles reuse existing jobs and dispatch; no second collection pipeline."""
 
+import collections
 import os
 import re
 import secrets
 from datetime import timedelta, timezone
 
-from sqlalchemy import or_, select, update
+from sqlalchemy import func, or_, select, update
 
 from exceptions.exception import ServiceException
 from plugins.bank.entity.do.bank_do import (
@@ -14,6 +15,7 @@ from plugins.bank.entity.do.bank_do import (
     QbSyncBookState,
     QbSyncControl,
     QbSyncCycle,
+    QbSyncIssue,
     QbSyncJob,
     QbSyncJobScope,
     QbSyncPlan,
@@ -655,6 +657,52 @@ async def cycle_history(db,plan_id,before=None):
                     'targetCount':len(r.targets or []),'summary':r.summary_json or {},
                     'startedAt':utc_datetime(r.started_at),'finishedAt':utc_datetime(r.finished_at)} for r in rows[:20]],
             'nextCursor':rows[19].cycle_no if len(rows)>20 else None}
+
+
+async def session_log(db, plan_id, session_no=None):
+    """One sync session as a log: each round with its stage counts and outcome.
+
+    Stage counts come from the round's executions (collection), intake and
+    import rows (verification and import) and open problems, so the page can
+    say where a round spent its work without reading diagnostics files.
+    """
+    plan=await db.get(QbSyncPlan,plan_id)
+    if plan is None:
+        raise ServiceException(message='计划不存在')
+    session_no=session_no or plan.session_no
+    cycles=(await db.scalars(select(QbSyncCycle).where(QbSyncCycle.plan_id==plan_id,QbSyncCycle.session_no==session_no)
+                             .order_by(QbSyncCycle.cycle_no))).all()
+    sessions=[n for n in (await db.scalars(select(QbSyncCycle.session_no).where(
+        QbSyncCycle.plan_id==plan_id,QbSyncCycle.session_no.is_not(None)).distinct())).all()]
+    rounds=[]
+    for cycle in cycles:
+        jobs=(await db.execute(select(QbSyncJob.run_id,QbSyncJob.status).where(
+            QbSyncJob.task_module=='question',
+            QbSyncJob.options_json['autoPlanId'].as_integer()==plan_id,
+            QbSyncJob.options_json['autoCycleNo'].as_integer()==cycle.cycle_no))).all()
+        ids=[job.run_id for job in jobs]
+        collection=collections.Counter(job.status for job in jobs)
+        intake=collections.Counter((await db.scalars(select(QbQuestionImportIntake.status).where(
+            QbQuestionImportIntake.task_id.in_(ids)))).all()) if ids else collections.Counter()
+        imports=(await db.execute(select(QbQuestionImport.status,QbQuestionImport.accepted_count,
+            QbQuestionImport.quarantined_count).where(QbQuestionImport.task_id.in_(ids)))).all() if ids else []
+        issues=await db.scalar(select(func.count()).select_from(QbSyncIssue).where(
+            QbSyncIssue.latest_task_id.in_(ids),QbSyncIssue.status!='resolved')) if ids else 0
+        summary=cycle.summary_json or {}
+        rounds.append({'cycleNo':cycle.cycle_no,'roundNo':cycle.round_no,'legacy':bool(cycle.legacy),
+                       'status':cycle.status,'endReason':cycle.end_reason,'targetCount':len(cycle.targets or []),
+                       'startedAt':utc_datetime(cycle.started_at),'finishedAt':utc_datetime(cycle.finished_at),
+                       'collection':dict(collection),'verification':dict(intake),
+                       'imports':{'count':len(imports),'completed':sum(1 for r in imports if r.status=='completed'),
+                                  'accepted':sum(int(r.accepted_count or 0) for r in imports),
+                                  'quarantined':sum(int(r.quarantined_count or 0) for r in imports)},
+                       'openIssueCount':int(issues or 0),
+                       'newQuestionCount':summary.get('newQuestionCount'),'newRelationCount':summary.get('newRelationCount'),
+                       'decision':summary.get('decision'),'note':summary.get('note')})
+    return {'sessionNo':session_no,'sessions':sorted(sessions,reverse=True),'rounds':rounds,
+            'endReason':next((r['endReason'] for r in reversed(rounds) if r['endReason']),None),
+            'newQuestionCount':sum(int(r['newQuestionCount'] or 0) for r in rounds),
+            'newRelationCount':sum(int(r['newRelationCount'] or 0) for r in rounds)}
 
 
 def _cycle_name(plan, now, round_no):

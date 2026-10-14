@@ -142,6 +142,14 @@ const SETTINGS = [
   },
   // Browser recycling (read by the crawl child)
   {
+    name: 'COLLECTOR_CLOSED_CONTEXT_RECOVERIES',
+    kind: 'int',
+    fallback: 2,
+    min: 0,
+    scope: 'browser',
+    doc: '浏览器上下文意外关闭后，本次运行内最多自动重建几次，0 关闭',
+  },
+  {
     name: 'COLLECTOR_BROWSER_RECYCLE_PAGES',
     kind: 'int',
     fallback: 400,

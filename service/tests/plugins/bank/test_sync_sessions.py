@@ -172,3 +172,17 @@ async def test_books_report_rounds_taken_part_in_current_session(bank_db, monkey
     await tick(bank_db, plan_id)
     books = await plans.list_books(bank_db, plan_id)
     assert all(b['sessionRounds'] == [1, 2] for b in books)
+
+
+@pytest.mark.asyncio
+async def test_session_log_lists_rounds_with_stage_counts(bank_db, monkeypatch):
+    monkeypatch.setenv('BANK_AUTOMATIC_SYNC_ENABLED', '1')
+    plan_id, _ = await registered_plan(bank_db)
+    await _finish_round(bank_db, plan_id, inserted=7, relations=9)
+    await tick(bank_db, plan_id)
+    log = await plans.session_log(bank_db, plan_id)
+    assert log['sessionNo'] == 1 and [r['roundNo'] for r in log['rounds']] == [1, 2]
+    first = log['rounds'][0]
+    assert first['decision'] == 'continue' and first['newQuestionCount'] == 7 and first['newRelationCount'] == 9
+    assert sum(first['collection'].values()) == 2 and first['imports']['count'] == 2
+    assert log['newQuestionCount'] == 7 and log['rounds'][1]['status'] == 'running'

@@ -269,8 +269,16 @@ async def claim_next(db, *, task_id=None) -> dict | None:
         except ServiceException as exc:
             host = {'paused': True, 'reason': exc.message}
         if host.get('paused'):
+            # Back off 60 s, 120 s, ... up to 10 min instead of a fixed
+            # retry, and log the wait once rather than on every attempt.
+            options = row.options_json or {}
+            streak = int(options.get('resourceWaitStreak') or 0)
+            if streak == 0:
+                from plugins.bank.service import diagnostics
+                diagnostics.event('collection_resource_wait_entered', taskId=row.run_id, reason=host.get('reason'))
+            row.options_json = {**options, 'resourceWaitStreak': streak + 1}
             row.dispatch_error = host.get('reason') or '主机资源不足，等待恢复'
-            row.dispatch_not_before = due_now + timedelta(seconds=60)
+            row.dispatch_not_before = due_now + timedelta(seconds=min(600, 60 * 2 ** min(streak, 4)))
             await db.commit()
             return None
     if reason:
@@ -312,6 +320,8 @@ async def claim_next(db, *, task_id=None) -> dict | None:
         plan = await db.get(QbSyncPlan, plan_id, populate_existing=True)
         if plan is not None:
             row.options_json = {**options, 'catalogPageLimit': plan.catalog_page_limit, 'limitTo1000Pages': False}
+    if (row.options_json or {}).get('resourceWaitStreak'):
+        row.options_json = {k: v for k, v in (row.options_json or {}).items() if k != 'resourceWaitStreak'}
     token = secrets.token_hex(32)
     row.active_slot = '1'
     row.worker_token = token

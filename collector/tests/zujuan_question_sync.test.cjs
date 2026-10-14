@@ -2208,3 +2208,91 @@ test('不同页码连续返回同一页时有界停止并保留真实原因', as
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test('A20：头部中断后续采接着上次未完成的头部继续，不从新第一页误判接上', async () => {
+  const { directory, dbPath } = tempDb();
+  const tree = { id: '260617', title: '测试教材', children: [{ id: '261285', title: '大目录', children: [] }] };
+  let current = (curPage) => [String(70000000 + curPage)];
+  const requested = [];
+  const page = mockSyncPage(({ curPage, categoryId }) => {
+    if (categoryId !== '261285') return { status: 200, headers: {}, text: listApiText(104269, ['35020603']) };
+    requested.push(curPage);
+    return { status: 200, headers: {}, text: listApiText(400, current(curPage)) };
+  });
+  const options = (extra = {}) => baseSyncOptions(directory, dbPath, { catalogPageLimit: 60, ...extra });
+  const baselineRow = () => {
+    const store = new QuestionSyncStore(dbPath, { dataDir: directory });
+    try {
+      return store.getCatalogBaseline(store.db.prepare('SELECT scope_key FROM catalog_baselines').get().scope_key);
+    } finally {
+      store.close();
+    }
+  };
+  try {
+    await runSync(options(), { context: {}, page, catalogTree: tree });
+    // Thirty new head pages; the next run stops after 20 (head not joined yet).
+    current = (curPage) => (curPage <= 30 ? [String(80000000 + curPage)] : [String(70000000 + curPage - 30)]);
+    requested.length = 0;
+    await runSync(options({ maxPages: 20, maxPagesProvided: true }), { context: {}, page, catalogTree: tree });
+    assert.equal(Math.max(...requested), 20);
+    let baseline = baselineRow();
+    assert.equal(baseline.confirmed.headPages[0].ids[0], '70000001', 'interrupted head keeps the old baseline');
+    assert.equal(baseline.candidate.headPages[0].ids[0], '80000001');
+    requested.length = 0;
+    const resumed = await runSync(options({ resume: true }), { context: {}, page, catalogTree: tree });
+    assert.ok(requested.includes(1) && requested.includes(3), 'the head is re-confirmed');
+    assert.ok(!requested.includes(10), `pages already scanned are skipped: ${requested.join(',')}`);
+    assert.ok(Math.max(...requested) <= 33 + 8, `joined the old range after the head: ${Math.max(...requested)}`);
+    const store = new QuestionSyncStore(dbPath, { dataDir: directory });
+    try {
+      assert.equal(store.getRunCatalogProgress(resumed.runId, '260617', '261285').stallReason, 'incremental_joined');
+    } finally {
+      store.close();
+    }
+    baseline = baselineRow();
+    assert.equal(baseline.confirmed.headPages[0].ids[0], '80000001');
+    assert.equal(baseline.confirmed.reliableEnd, 60);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('E10：采集中浏览器上下文关闭后重建并只补抓未返回的页，运行正常结束', async () => {
+  const { directory, dbPath } = tempDb();
+  const tree = { id: '260617', title: '测试教材', children: [{ id: '261285', title: '大目录', children: [] }] };
+  const requested = [];
+  let closedOnce = false;
+  const handler = ({ curPage, categoryId }) => {
+    if (categoryId !== '261285') return { status: 200, headers: {}, text: listApiText(104269, ['35020603']) };
+    requested.push(curPage);
+    return { status: 200, headers: {}, text: listApiText(120, [String(72000000 + curPage)]) };
+  };
+  const brokenPage = mockSyncPage(handler);
+  const evaluate = brokenPage.evaluate;
+  brokenPage.evaluate = async (fn, args) => {
+    const page = args?.body ? Number(new URLSearchParams(args.body).get('curPage')) : null;
+    if (page === 5 && !closedOnce) {
+      closedOnce = true;
+      throw new Error('page.evaluate: Target page, context or browser has been closed');
+    }
+    return evaluate(fn, args);
+  };
+  let reopened = 0;
+  try {
+    const result = await runSync(baseSyncOptions(directory, dbPath, { catalogPageLimit: 12 }), {
+      context: {},
+      page: brokenPage,
+      catalogTree: tree,
+      reopenBrowser: async () => {
+        reopened += 1;
+        return { context: {}, page: mockSyncPage(handler) };
+      },
+    });
+    assert.equal(reopened, 1);
+    assert.equal(requested.filter((page) => page === 5).length, 1, 'page 5 fetched once after the rebuild');
+    assert.equal(Math.max(...requested), 12);
+    assert.notEqual(result.status, 'interrupted');
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});

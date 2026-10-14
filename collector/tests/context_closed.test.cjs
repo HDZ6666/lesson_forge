@@ -56,3 +56,20 @@ test('E10: closed context ends the run as resumable interruption, not a catalog 
   assert.equal(isTextbookFatalError(error), true);
   assert.equal(failureStatus(Object.assign(new Error('x'), { code: 'browser_context_closed' })), 'interrupted');
 });
+
+test('E10: a stop request never reopens the browser', async () => {
+  const { BrowserSession } = require('../src/jobs/question/browser_session.cjs');
+  let reopened = 0;
+  const session = new BrowserSession({
+    opts: {},
+    dependencies: { context: {}, page: {}, reopenBrowser: async () => (reopened += 1) },
+    resourceGuard: { status: () => ({}), limits: {} },
+    browserMb: () => null,
+    heartbeat: () => {},
+    assertNotStopped: () => {
+      throw Object.assign(new Error('stop requested'), { code: 'stop_requested' });
+    },
+  });
+  await assert.rejects(session.recoverClosedContext(new Error('closed')), /stop requested/);
+  assert.equal(reopened, 0);
+});

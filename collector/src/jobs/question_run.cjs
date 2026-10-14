@@ -277,6 +277,9 @@ async function runSync(options, dependencies = {}) {
       resumeHints,
       resumeCoverageGaps,
       persistResumeScope,
+      // The interrupted execution this run continues, if any: its saved
+      // results are carried over, so an unfinished head may resume.
+      resumedFromRunId: store.lastBeginMeta?.clonedFrom ?? (store.lastBeginMeta?.reused ? runId : null),
     });
     await crawler.crawlAll();
 

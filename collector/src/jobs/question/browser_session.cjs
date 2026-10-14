@@ -171,6 +171,31 @@ class BrowserSession {
     this.heartbeat('browser_recycled');
   }
 
+  /**
+   * The browser context closed under the run (crash, OOM kill of Chrome).
+   * Rebuild it a bounded number of times when this run owns the browser and
+   * is still allowed to run; otherwise the caller ends the run as a
+   * resumable interruption. Stop requests and source pauses are checked
+   * first, so a deliberate pause never reopens the browser (spec E10).
+   */
+  async recoverClosedContext(error) {
+    this.closedRecoveries = Number(this.closedRecoveries || 0);
+    const limit = recycleSetting(this.opts.closedContextRecoveries, 'COLLECTOR_CLOSED_CONTEXT_RECOVERIES', 2);
+    if (!this.canRecycle() || this.closedRecoveries >= limit) return false;
+    this.assertNotStopped();
+    this.opts.sourceControl?.assertAllowed?.();
+    this.closedRecoveries += 1;
+    try {
+      await this.recycleNow(`浏览器上下文已关闭，第 ${this.closedRecoveries} 次重建`);
+    } catch (reopenError) {
+      if (isTextbookFatalError(reopenError) && !String(reopenError.code || '').startsWith('browser_context'))
+        throw reopenError;
+      console.warn(`[浏览器] 关闭后重建失败：${reopenError.message}；原因：${error?.message || ''}`);
+      return false;
+    }
+    return true;
+  }
+
   // Called between windows, where every fetched page is already settled and
   // the checkpoint is durable.  After recycling, a host still under the hard
   // watermark gets the guard's grace period to recover; if it does not, the
