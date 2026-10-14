@@ -4,7 +4,7 @@
 
 ## 安装与查看
 
-将本目录的 `monitor.py`、`mysql_probe.py`、`collector_probe.cjs` 安装到服务器 `/opt/lesson-forge-monitor/`，权限 644、所有者 root；将 `deploy/production/monitor/lesson-forge-monitor.{service,timer}` 安装到 `/etc/systemd/system/`。执行：
+将本目录的 `monitor.py`、`diagnostic_reader.py`、`mysql_probe.py`、`collector_probe.cjs` 安装到服务器 `/opt/lesson-forge-monitor/`，权限 644、所有者 root；将 `deploy/production/monitor/lesson-forge-monitor.{service,timer}` 安装到 `/etc/systemd/system/`。执行：
 
 ```sh
 sudo systemctl daemon-reload
@@ -24,10 +24,10 @@ sudo journalctl -u lesson-forge-monitor.service -n 20
 - `monitor.sqlite3`：每分钟资源 `samples`、只在状态变化时追加的 `events`、当前事件阶段 `states`、长期每小时资源极值 `hourly`。
 - 关联后台任务号、Collector 运行号、教材来源 ID、计划／轮次、分页并发、错误代码、阶段、子进程 RSS 峰值。采集器每日预算的使用量、内存／磁盘门槛、容器占用、系统换页累计量和 PSI 随采样保存。
 - 同一暂停的重复检查不会累计为多次故障；从“暂停”变“恢复”时记录上一个状态持续时间。首次读取只建立基线，不假装从那时开始发生故障。终止事件按 Collector run 去重；正常 SIGTERM／人工停止与防护分开。
-- 防护间隔只统计已确认的题目运行防护终止；历史教材发现错误单列。`waitingSince` 存在时采用首次等待时间，否则采用同类型错误时间／终止记录，并标注 `timeBasis`。间隔包含不采集的时间，不能解释为网站固定封禁周期。一分钟内发生又恢复、且未留持久化错误的验证可能无法捕获。
+- 防护间隔只统计已确认的题目运行防护终止；历史教材发现错误单列。`waitingSince` 存在时采用首次等待时间，否则采用同类型错误时间／终止记录，并标注 `timeBasis`。间隔包含不采集的时间，不能解释为网站固定封禁周期。新版本事件级日志保存短暂验证；部署前一分钟内发生又恢复、且未留持久化错误的验证可能无法捕获。
 - 全轮统计按每本教材最新执行；包含本轮自动任务及轮次开始后关联同计划的单本手动任务，独立统计“部分入库”。“轮次处理结束”不等于“全部完整入库”。MySQL 的轮次/入库时间为 UTC；旧任务开始/创建时间按部署时区 Asia/Shanghai 解读，Collector 带时区时间直接转换。
 - 资源数据是采样值，历史没有记录的故障时刻精确内存不能补造；两次采样间的瞬时尖峰也可能漏掉。保留实际故障记录 + 前后采样，并区分时刻和观察时刻。宿主机水位与容器健康接口水位同时保留，不将主机数值冒充受限 cgroup 数值。
-- 慢接口阈值 3 秒，另收集 5xx；排除正常 101 WebSocket 长连接，并隐藏人工浏览器临时访问 token。Nginx 每轮最多读取 5000 行，超出明确记录截断；只能读取当前容器仍保留的日志。采样失败也会记录，不视为正常或恢复。
+- 慢接口阈值 3 秒，另收集全部 4xx/5xx；排除正常 101 WebSocket 长连接，并隐藏人工浏览器临时访问 token。Nginx 每轮最多读取 5000 行，超出明确记录截断；只能读取当前容器仍保留的日志。采样失败也会记录，不视为正常或恢复。
 - 原始分钟采样默认保留 30 天，`--sample-days N` 可调整；小时极值和事件不自动删除，长轮次仍保留全程问题和资源趋势。监测库只保存诊断元数据，不复制 9 GiB 的采集库。全量原始历史日志此次保存于本地忽略目录，服务器没有新建数据库备份。
 
 ## 验证
