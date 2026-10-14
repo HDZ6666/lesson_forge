@@ -369,10 +369,10 @@ async def test_failed_plan_import_is_actually_recovered_later(import_db, monkeyp
     await db.commit()
     calls = []
 
-    async def fake_retry(db_, textbook_id, now_):
-        calls.append(textbook_id)
+    async def fake_retry(db_, scope_id, now_, **identity):
+        calls.append((scope_id, identity))
         return True
-    monkeypatch.setattr(sync_plans, 'retry_saved_book_results', fake_retry)
+    monkeypatch.setattr(sync_plans, '_retry_saved_scope_results', fake_retry)
     assert await sync_plans.recover_failed_results(db, now) == 0, 'not before refill_hours'
     row = await db.get(QbQuestionImport, ticket['importId'], populate_existing=True)
     p = await db.get(QbSyncPlan, plan['planId'])
@@ -383,3 +383,47 @@ async def test_failed_plan_import_is_actually_recovered_later(import_db, monkeyp
     job.options_json = {**job.options_json, 'planImportRetryCount': 3}
     await db.commit()
     assert await sync_plans.recover_failed_results(db, now) == 0, 'no more automatic recovery after three'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('newer_import_status', ['completed', 'failed'])
+async def test_failed_import_recovery_preserves_original_snapshot_after_new_execution(import_db, newer_import_status):
+    """New executions must neither hide an old failed result nor steal its retry."""
+    db = import_db
+    plan = await sync_plans.save_plan(db, PlanInput(subjectId=1, enabled=True))
+    job = await db.get(QbSyncJob, 28)
+    job.options_json = {**job.options_json, 'autoPlanId': plan['planId']}
+    await db.commit()
+    ticket = await incremental_import.claim_incremental_import(db, 30, report())
+    original = await db.get(QbQuestionImport, ticket['importId'])
+    original_id = original.import_id
+    original.status = 'failed'
+    original.worker_token = original.lease_until = original.active_source_slot = None
+    original.cursor = original.batch_no = original.accepted_count = 1
+    now = datetime.utcnow().replace(microsecond=0)
+    original.update_time = now - timedelta(days=2)
+    db.add(QbSyncJob(run_id=29, subject_id=1, task_module='question', run_type='content',
+        status='completed', phase='completed', acknowledge_source_policy='Y',
+        options_json={'workflowVersion': 2, 'autoPlanId': plan['planId']}, create_time=now, update_time=now))
+    newer_scope = QbSyncJobScope(scope_id=31, run_id=29, subject_id=1, local_textbook_id=1,
+        local_version_id=1, source_provider='zujuan', external_version_id='v1', external_textbook_id='tb1',
+        collector_run_id=28, status='completed', snapshot_complete=1, snapshot_locked_at=now,
+        question_count=3, create_time=now, update_time=now)
+    db.add(newer_scope)
+    newer = incremental_import._new_import(newer_scope, now - timedelta(days=2))
+    newer.status = newer_import_status
+    db.add(newer)
+    await db.flush()
+    newer_id = newer.import_id
+    await db.commit()
+
+    assert await sync_plans.recover_failed_results(db, now) == (2 if newer_import_status == 'failed' else 1)
+    original = await db.get(QbQuestionImport, original_id, populate_existing=True)
+    newer = await db.get(QbQuestionImport, newer_id, populate_existing=True)
+    assert (original.status, original.task_id, original.scope_id, original.collector_run_id) == ('queued', 28, 30, 27)
+    assert (original.cursor, original.batch_no, original.accepted_count) == (1, 1, 1)
+    assert newer.status == ('queued' if newer_import_status == 'failed' else 'completed')
+    old_job = await db.get(QbSyncJob, 28, populate_existing=True)
+    new_job = await db.get(QbSyncJob, 29, populate_existing=True)
+    assert old_job.options_json['planImportRetryCount'] == 1
+    assert new_job.options_json.get('planImportRetryCount', 0) == (1 if newer_import_status == 'failed' else 0)

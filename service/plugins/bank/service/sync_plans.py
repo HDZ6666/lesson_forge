@@ -898,23 +898,24 @@ async def recover_failed_results(db, now=None):
     issue is maintenance (no further recovery is scheduled).
     """
     now = now or await _clock(db)
-    rows = (await db.execute(select(QbQuestionImport, QbSyncJob, QbSyncJobScope.local_textbook_id, QbSyncPlan)
+    rows = (await db.execute(select(QbQuestionImport, QbSyncJob, QbSyncPlan)
         .join(QbSyncJob, QbSyncJob.run_id == QbQuestionImport.task_id)
         .join(QbSyncJobScope, QbSyncJobScope.scope_id == QbQuestionImport.scope_id)
         .join(QbSyncPlan, QbSyncPlan.plan_id == QbSyncJob.options_json['autoPlanId'].as_integer())
         .where(QbQuestionImport.status == 'failed', QbSyncPlan.enabled == 1, QbSyncPlan.control_state == 'active')
         .order_by(QbQuestionImport.import_id).limit(20))).all()
     due = []
-    for imported, job, textbook_id, plan in rows:
+    for imported, job, plan in rows:
         options = job.options_json or {}
         if options.get('planWorkPaused') or options.get('planImportRetryCount', 0) >= 3:
             continue
         if imported.update_time and imported.update_time + timedelta(hours=plan.refill_hours) > now:
             continue
-        due.append(textbook_id)
+        due.append((imported.scope_id, imported.collector_run_id, imported.import_id))
     await db.rollback()
-    for textbook_id in dict.fromkeys(due):
-        await retry_saved_book_results(db, textbook_id, now)
+    for scope_id, collector_run_id, import_id in due:
+        await _retry_saved_scope_results(db, scope_id, now,
+                                        collector_run_id=collector_run_id, import_id=import_id)
     return len(due)
 
 
@@ -923,10 +924,22 @@ async def retry_saved_book_results(db, textbook_id, now):
     scope = await db.scalar(select(QbSyncJobScope).join(QbSyncJob, QbSyncJob.run_id == QbSyncJobScope.run_id)
         .where(QbSyncJobScope.local_textbook_id == textbook_id, QbSyncJob.status.in_(TERMINAL))
         .order_by(QbSyncJob.run_id.desc()).limit(1))
+    if not scope:
+        return False
+    return await _retry_saved_scope_results(db, scope.scope_id, now)
+
+
+async def _retry_saved_scope_results(db, scope_id, now, *, collector_run_id=None, import_id=None):
+    """Retry one sealed observation; newer executions cannot replace its identity."""
+    scope = await db.get(QbSyncJobScope, scope_id, populate_existing=True)
     if not scope or not scope.collector_run_id:
+        return False
+    if collector_run_id is not None and scope.collector_run_id != collector_run_id:
         return False
     imported = await db.scalar(select(QbQuestionImport).where(QbQuestionImport.scope_id == scope.scope_id,
         QbQuestionImport.collector_run_id == scope.collector_run_id))
+    if import_id is not None and (imported is None or imported.import_id != import_id):
+        return False
     intake = await db.scalar(select(QbQuestionImportIntake).where(QbQuestionImportIntake.scope_id == scope.scope_id,
         QbQuestionImportIntake.collector_run_id == scope.collector_run_id))
     if imported and imported.status in ('queued', 'preparing', 'running'):
