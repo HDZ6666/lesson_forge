@@ -183,7 +183,7 @@ async def test_scope_repair_requires_matching_complete_scan_and_keeps_question_i
     )
     bank_db.add(incoming)
     await bank_db.commit()
-    job = SimpleNamespace(run_id=91, subject_id=1)
+    job = SimpleNamespace(run_id=91, subject_id=1, options_json={})
     scope = SimpleNamespace(
         collector_run_id=92, source_provider='zujuan', local_textbook_id=1, external_textbook_id='tb1'
     )

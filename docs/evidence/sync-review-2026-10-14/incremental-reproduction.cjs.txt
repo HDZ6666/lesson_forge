@@ -1,0 +1,30 @@
+// Append to collector/tests/zujuan_question_sync.test.cjs in an isolated copy.
+test('review repeated interrupted head preserves carried coverage', async () => {
+  const { directory, dbPath } = tempDb();
+  const tree = { id: '260617', title: '测试教材', children: [{ id: '261285', title: '大目录', children: [] }] };
+  let phase = 0;
+  const requested = [];
+  const page = mockSyncPage(({ curPage, categoryId }) => {
+    if (categoryId !== '261285') return { status: 200, headers: {}, text: listApiText(104269, ['35020603']) };
+    requested.push(curPage);
+    if (phase === 2 && curPage === 31) return { status: 403, headers: {}, text: '<html>验证码</html>' };
+    const id = phase === 0 ? 70000000 + curPage : curPage <= 50 ? 80000000 + curPage : 70000000 + curPage - 50;
+    return { status: 200, headers: {}, text: listApiText(1000, [String(id)]) };
+  });
+  const options = (extra = {}) => baseSyncOptions(directory, dbPath, { catalogPageLimit: 100, concurrency: 1, ...extra });
+  try {
+    await runSync(options(), { context: {}, page, catalogTree: tree });
+    phase = 1;
+    await runSync(options({ maxPages: 20, maxPagesProvided: true }), { context: {}, page, catalogTree: tree });
+    phase = 2;
+    requested.length = 0;
+    await assert.rejects(runSync(options(), { context: {}, page, catalogTree: tree }), error => error.code === 'waiting_verification');
+    assert.ok(!requested.includes(10), `previous coverage skipped: ${requested}`);
+    const store = new QuestionSyncStore(dbPath, { dataDir: directory });
+    try {
+      const key = store.db.prepare('SELECT scope_key FROM catalog_baselines').get().scope_key;
+      const candidate = store.getCatalogBaseline(key).candidate;
+      assert.ok(candidate.scannedPages.includes(10), `lost carried coverage: ${JSON.stringify(candidate.scannedPages)}`);
+    } finally { store.close(); }
+  } finally { fs.rmSync(directory, { recursive: true, force: true }); }
+});

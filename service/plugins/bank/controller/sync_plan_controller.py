@@ -45,7 +45,7 @@ class PlanInput(BankModel):
 class BookOverride(BankModel):
     expected_revision: int = Field(ge=0)
     enabled: bool = True
-    exception_kind: Literal['no_questions', 'inaccessible'] | None = None
+    exception_kind: Literal['no_questions', 'inaccessible', 'scope_failure'] | None = None
     operator_note: str | None = Field(default=None, max_length=500)
 
 

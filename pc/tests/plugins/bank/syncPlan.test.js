@@ -15,3 +15,6 @@ assert.equal(planPhase({planId:1, enabled:false}, progress), '整个计划已暂
 assert.equal(planPhase({planId:1, enabled:false, controlState:'pausing'}, progress), '正在停止采集、核验和入库，请等待当前工作收尾')
 assert.equal(planPhase({planId:1, enabled:true, cycleState:'completed',autoUpdate:false},progress),'本轮处理完毕，自动更新关闭')
 assert.equal(planProgress([{...book,taskStage:'paused'}]).paused,1)
+
+assert.equal(planBookStage({...book, exceptionKind:'scope_failure'}).label, '故障隔离，待修复')
+assert.equal(planPhase({planId:1,enabled:true,cycleNo:1,cycleState:'running'}, {finished:2,total:2}), '等待成果核验、入库或来源恢复')

@@ -7,6 +7,7 @@ from sqlalchemy import exists, func, select
 
 from exceptions.exception import ServiceException
 from plugins.bank.entity.do.bank_do import (
+    QbSyncBookState,
     QbSyncIssue,
     QbSyncIssueTask,
     QbSyncJob,
@@ -298,6 +299,16 @@ async def resolve_scope_issues(db, job, scope, now):
             break
     if proof is None:
         return
+    plan_id = (job.options_json or {}).get('autoPlanId')
+    if plan_id:
+        state = await db.scalar(select(QbSyncBookState).where(
+            QbSyncBookState.plan_id == plan_id,
+            QbSyncBookState.textbook_id == scope.local_textbook_id,
+        ).with_for_update())
+        if state and state.exception_kind == 'scope_failure':
+            state.exception_kind = None
+            state.operator_note = None
+            state.revision += 1
     issues = (
         await db.scalars(
             select(QbSyncIssue)
@@ -321,6 +332,27 @@ async def resolve_scope_issues(db, job, scope, now):
         issue.revision += 1
         if await db.get(QbSyncIssueTask, (issue.issue_id, job.run_id)) is None:
             db.add(QbSyncIssueTask(issue_id=issue.issue_id, task_id=job.run_id, evidence_json=proof, observed_at=now))
+
+
+async def isolate_scope_failure(db, job, scope, reason, now):
+    """Keep deterministic book failures out of later automatic rounds."""
+    evidence = {'collectorRunId': scope.collector_run_id, 'status': job.status,
+                **classify_issue('scope_failure', reason)}
+    plan_id = (job.options_json or {}).get('autoPlanId')
+    if plan_id and evidence['owner'] == 'maintenance' and evidence['impactScope'] == 'book':
+        state = await db.scalar(select(QbSyncBookState).where(
+            QbSyncBookState.plan_id == plan_id,
+            QbSyncBookState.textbook_id == scope.local_textbook_id,
+        ).with_for_update())
+        if state and not state.exception_kind:
+            state.exception_kind = 'scope_failure'
+            state.operator_note = str(reason)[:500]
+            state.revision += 1
+        evidence['isolated'] = True
+    return await observe(db, subject_id=job.subject_id, provider=scope.source_provider,
+        book_id=scope.local_textbook_id, task_id=job.run_id, kind='scope',
+        key=scope.external_textbook_id, error_type='scope_failure', reason=reason,
+        evidence=evidence, now=now)
 
 
 async def record_runtime_failure(db, row, *, stage, message, now):

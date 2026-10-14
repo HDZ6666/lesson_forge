@@ -185,18 +185,20 @@ async def release_finished_books(db) -> int:
         options = row.options_json or {}
         if options.get('autoResumePending'):
             continue
+        if (options.get('autoPlanId') and row.status in ('blocked', 'interrupted')
+                and row.error_message):
+            from plugins.bank.service.issue_diagnostics import classify_issue
+            if classify_issue('scope_failure', row.error_message)['owner'] == 'source_manual':
+                row.options_json = {**options, 'planSourceResumePending': True}
         if row.status in ('failed', 'blocked') and row.error_message:
             # Scope-level conflicts remain for human inspection. Budget,
             # rate and host pauses are shared operating conditions instead.
             reason = row.error_message
             if not any(word in reason.lower() for word in ('预算', '水位', '429', '验证', '冷却', 'resource_pressure', 'source_budget')):
-                from plugins.bank.service.sync_issues import observe
+                from plugins.bank.service.sync_issues import isolate_scope_failure
                 scope = await db.scalar(select(QbSyncJobScope).where(QbSyncJobScope.run_id == row.run_id))
                 if scope:
-                    await observe(db, subject_id=row.subject_id, provider=scope.source_provider,
-                        book_id=scope.local_textbook_id, task_id=row.run_id, kind='scope',
-                        key=scope.external_textbook_id, error_type='scope_failure', reason=reason,
-                        evidence={'collectorRunId': scope.collector_run_id, 'status': row.status}, now=await _clock(db))
+                    await isolate_scope_failure(db, row, scope, reason, await _clock(db))
         if row.status == 'completed':
             from plugins.bank.service.sync_issues import resolve_scope_issues
             for scope in await SyncTaskDao.scopes(db, row.run_id):
@@ -241,6 +243,46 @@ async def _validate_waiting_scope(db, row, *, lock=True):
     return scopes
 
 
+async def settling_book_task(db):
+    """The normal queue finishes one book's saved result before the next.
+
+    Isolated local faults may leave durable results behind; shared/pending
+    work must still finish, independently of the optional backlog limit.
+    """
+    imported = exists().where(
+        QbQuestionImport.scope_id == QbSyncJobScope.scope_id,
+        QbQuestionImport.collector_run_id == QbSyncJobScope.collector_run_id,
+    )
+    intake = exists().where(
+        QbQuestionImportIntake.scope_id == QbSyncJobScope.scope_id,
+        QbQuestionImportIntake.collector_run_id == QbSyncJobScope.collector_run_id,
+    )
+    pending = or_(
+        QbSyncJob.options_json['planSourceResumePending'].as_boolean().is_(True) & exists().where(
+            QbSyncBookState.last_task_id == QbSyncJob.run_id,
+            QbSyncBookState.plan_id == QbSyncJob.options_json['autoPlanId'].as_integer()),
+        exists().where(QbQuestionImport.task_id == QbSyncJob.run_id,
+            QbQuestionImport.status.in_(('queued', 'preparing', 'running', 'paused'))),
+        ~imported & exists().where(
+            QbQuestionImportIntake.scope_id == QbSyncJobScope.scope_id,
+            QbQuestionImportIntake.collector_run_id == QbSyncJobScope.collector_run_id,
+            QbQuestionImportIntake.status.in_(('pending', 'probing', 'retry'))),
+        QbSyncJobScope.collector_run_id.is_not(None) & ~imported & ~intake,
+    )
+    isolated = exists().where(
+        QbSyncBookState.plan_id == QbSyncJob.options_json['autoPlanId'].as_integer(),
+        QbSyncBookState.textbook_id == QbSyncJobScope.local_textbook_id,
+        QbSyncBookState.exception_kind.is_not(None),
+    )
+    from plugins.bank.service.plan_work import results_allowed_condition
+    return await db.scalar(select(QbSyncJob.run_id).join(QbSyncJobScope,
+        QbSyncJobScope.run_id == QbSyncJob.run_id).where(
+        QbSyncJob.task_module == 'question', QbSyncJob.status.in_(TERMINAL),
+        QbSyncJob.options_json['workflowVersion'].as_integer() >= 2,
+        results_allowed_condition(), ~isolated, pending,
+    ).order_by(QbSyncJob.run_id).limit(1))
+
+
 async def claim_next(db, *, task_id=None) -> dict | None:
     """Only a successful slot INSERT/UPDATE grants execution across processes."""
     now = datetime.now()
@@ -260,6 +302,10 @@ async def claim_next(db, *, task_id=None) -> dict | None:
     from plugins.bank.service.sync_plans import automatic_task_reason, control_status
     control = await control_status(db)
     reason = (control['reason'] or '同步已紧急暂停') if control['paused'] else await automatic_task_reason(db, row)
+    if not reason and row.task_module == 'question':
+        settling = await settling_book_task(db)
+        if settling is not None:
+            reason = f'等待教材任务 #{settling} 的已保存成果完成核验和入库'
     if not reason and row.task_module == 'question':
         # Check host resources before starting a heavy collection, so a
         # shortage waits instead of piling up new results (spec 7.2).

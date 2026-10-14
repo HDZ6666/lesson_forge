@@ -1,0 +1,48 @@
+{
+  "date": "2026-10-14",
+  "branch": "codex/sync-center-sessions",
+  "head": "31263c76fffc7fc34c05b622acac6c91ca05f32f",
+  "includesUncommittedChanges": true,
+  "preReportTrackedFileFingerprint": "5e907172f1645747ad14aaf8ac97e90ea2b1e9d07b2eb06de64b4960134c2a7e",
+  "results": {
+    "backend": {
+      "originalLog": "/tmp/lesson-final-comprehensive-backend.log",
+      "resultLines": [
+        "FAILED tests/plugins/bank/test_comprehensive_review.py::test_source_resume_preserves_original_execution",
+        "FAILED tests/plugins/bank/test_comprehensive_review.py::test_manual_retry_of_isolated_book_keeps_round_open",
+        "FAILED tests/plugins/bank/test_comprehensive_review.py::test_failed_supplement_creation_does_not_leave_permanent_running_row",
+        "FAILED tests/plugins/bank/test_comprehensive_review.py::test_import_recovery_reaches_due_row_after_twenty_exhausted_rows",
+        "FAILED tests/plugins/bank/test_comprehensive_review.py::test_healthy_book_manual_rerun_keeps_round_open",
+        "FAILED tests/plugins/bank/test_comprehensive_review.py::test_resource_wait_reconciles_after_worker_restart",
+        "FAILED tests/plugins/bank/test_comprehensive_review.py::test_reorder_event_records_actual_movement",
+        "FAILED tests/plugins/bank/test_comprehensive_review.py::test_manual_browser_recovery_keeps_full_scan_mode",
+        "FAILED tests/plugins/bank/test_comprehensive_review.py::test_settled_history_retains_end_time_problem_snapshot",
+        "FAILED tests/plugins/bank/test_comprehensive_review.py::test_metadata_protection_can_open_manual_browser",
+        "10 failed, 570 passed, 20 skipped, 46 warnings in 28.38s"
+      ]
+    },
+    "collector": {
+      "originalLog": "/tmp/lesson-final-comprehensive-collector.log",
+      "resultLines": [
+        "ℹ tests 334",
+        "ℹ pass 330",
+        "ℹ fail 3",
+        "ℹ skipped 1",
+        "ℹ duration_ms 8995.987708"
+      ]
+    },
+    "frontend": {
+      "originalLog": "/tmp/lesson-final-comprehensive-pc.log",
+      "resultLines": [
+        "Plugin tests passed: 17"
+      ]
+    },
+    "resourceDispatch": {
+      "originalLog": "/tmp/lesson-review-resource-dispatch.log",
+      "resultLines": [
+        "FAILED tests/plugins/bank/test_comprehensive_review.py::test_collection_resource_wait_records_event_through_real_dispatch",
+        "1 failed, 10 deselected in 0.77s"
+      ]
+    }
+  }
+}

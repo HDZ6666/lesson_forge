@@ -79,7 +79,7 @@ async def test_discovery_must_register_before_full_queue_and_names_are_snapshots
 
 
 @pytest.mark.asyncio
-async def test_failed_book_does_not_fail_other_queued_books_and_next_round_is_fresh(bank_db, monkeypatch):
+async def test_failed_book_is_isolated_while_other_books_and_next_session_continue(bank_db, monkeypatch):
     monkeypatch.setenv('BANK_AUTOMATIC_SYNC_ENABLED', '1')
     plan_id, _ = await registered_plan(bank_db)
     claim = await dispatch.claim_next(bank_db)
@@ -104,7 +104,9 @@ async def test_failed_book_does_not_fail_other_queued_books_and_next_round_is_fr
     monkeypatch.setattr(plans,'_discovery',_ready)
     await tick(bank_db, plan_id)
     next_jobs = list((await bank_db.scalars(select(QbSyncJob).where(QbSyncJob.options_json['autoCycleNo'].as_integer() == 2))).all())
-    assert len(next_jobs) == 2
+    assert len(next_jobs) == 1  # The deterministic parse failure stays isolated.
+    books = await plans.list_books(bank_db, plan_id)
+    assert next(b for b in books if b['textbookId'] == 1)['exceptionKind'] == 'scope_failure'
     # A wake-up after sleep is the 2nd sync session; its rounds restart at 1.
     assert all('第 2 次同步' in j.options_json['autoCycleName'] and j.options_json['autoCycleName'].endswith('第 1 轮')
                for j in next_jobs)

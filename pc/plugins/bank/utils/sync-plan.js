@@ -5,6 +5,7 @@ export const planTaskStages = {
   failed: ['需要处理', 'danger'], cancelled: ['已停止', 'info'],
 }
 export function planBookStage(book) {
+  if (book.enabled && book.exceptionKind === 'scope_failure') return { key: 'excluded', label: '故障隔离，待修复', type: 'danger' }
   if (!book.enabled || book.exceptionKind) return { key: 'excluded', label: '暂停或人工单列', type: 'info' }
   if (!book.inCurrentCycle) return { key: 'later', label: '等待下轮', type: 'info' }
   const key = book.taskInCurrentCycle ? book.taskStage || 'queued' : 'queued'
@@ -35,5 +36,6 @@ export function planPhase(plan, progress) {
   if (plan.discoveryError) return '教材发现待处理'
   if (!plan.cycleNo) return '准备教材发现'
   if (progress.finished < progress.total) return '逐本同步中'
+  if (plan.cycleState==='running') return '等待成果核验、入库或来源恢复'
   return '本轮已结束，等待下次更新'
 }

@@ -99,7 +99,9 @@ async def action(db, plan_id, payload, operator):
     elif payload.action=='start':
         if plan.control_state in ('pausing','ending') or plan.cycle_state in ('running','discovering'):
             raise ServiceException(message='已有一轮正在执行，请先处理当前轮次')
-        from plugins.bank.service.sync_plans import begin_session
+        from plugins.bank.service.sync_plans import begin_session, settle_supplements
+        if await settle_supplements(db, plan_id, now):
+            raise ServiceException(message='单本补采尚未完成，请等待采集、核验和入库收尾后再启动整学科同步')
         begin_session(plan,now)
         # An explicit full scan applies to this session's first round only;
         # "resume" never turns into a full scan implicitly.
@@ -357,12 +359,13 @@ async def pin_book(db, plan_id, textbook_id, revision):
 async def plan_queue(db, plan_id):
     """Actual dispatch order: current, next, then the waiting queue."""
     from plugins.bank.entity.do.bank_do import QbTextbook
-    from plugins.bank.service.sync_dispatch import queue_fields
+    from plugins.bank.service.sync_dispatch import queue_fields, settling_book_task
     plan=await db.get(QbSyncPlan,plan_id)
     if plan is None:
         raise ServiceException(message='计划不存在')
+    settling_id = await settling_book_task(db)
     rows=(await db.execute(_plan_jobs_query(plan_id).where(
-        or_(QbSyncJob.active_slot.is_not(None),QbSyncJob.status=='queued'))
+        or_(QbSyncJob.active_slot.is_not(None),QbSyncJob.status=='queued',QbSyncJob.run_id==settling_id))
         .order_by(QbSyncJob.active_slot.is_(None),QbSyncJob.dispatch_priority.desc(),QbSyncJob.dispatch_rank,QbSyncJob.run_id))).all()
     names=dict((await db.execute(select(QbTextbook.textbook_id,QbTextbook.textbook_name)
         .where(QbTextbook.textbook_id.in_([book for _,book in rows])))).all()) if rows else {}
@@ -370,10 +373,13 @@ async def plan_queue(db, plan_id):
     for job,book in rows:
         options=job.options_json or {}
         items.append({'taskId':job.run_id,'textbookId':book,'textbookName':names.get(book),
-                      'status':job.status,'running':job.active_slot is not None,
+                      'status':job.status,'running':job.active_slot is not None or job.run_id==settling_id,
+                      'settling':job.run_id==settling_id,
                       'cycleNo':options.get('autoCycleNo'),'pinned':bool(options.get('pinnedOnce')),
                       'syncMode':options.get('syncMode') or 'incremental',
-                      'waitReason':queue_fields(job).get('queueReason') or job.dispatch_error})
+                      'waitReason':(('等待来源验证后续采' if options.get('planSourceResumePending') else
+                                     '等待已保存成果完成核验和入库') if job.run_id==settling_id else
+                                    queue_fields(job).get('queueReason') or job.dispatch_error)})
     current=[i for i in items if i['running']]
     waiting=[i for i in items if not i['running']]
     return {'current':current[0] if current else None,'next':waiting[0] if waiting else None,

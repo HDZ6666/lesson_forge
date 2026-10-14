@@ -1,5 +1,6 @@
 """One-book cycles reuse existing jobs and dispatch; no second collection pipeline."""
 
+import asyncio
 import collections
 import os
 import re
@@ -35,7 +36,7 @@ TERMINAL = ('completed', 'failed', 'blocked', 'cancelled', 'interrupted')
 CATALOG_WINDOW_PAGES = 1000
 # Why a sync session ended. Kept separate from plan control and blockers.
 END_REASONS = ('no_new', 'no_new_with_issues', 'no_runnable_books', 'round_limit', 'user_end')
-UNSETTLED_IMPORT = ('queued', 'preparing', 'running')
+UNSETTLED_IMPORT = ('queued', 'preparing', 'running', 'paused')
 UNSETTLED_INTAKE = ('pending', 'probing', 'retry')
 _SOURCE_PROTECTION = re.compile(r'验证|防护|滑块|captcha|challenge', re.I)
 
@@ -550,6 +551,35 @@ async def tick_plan(db, plan_id, *, client):
         targets=set(plan.cycle_targets or [])
         eligible=[b for b in books if b['textbookId'] in targets and b['enabled'] and not b['exceptionKind']]
         pending=[b for b in eligible if states[b['textbookId']].last_cycle_no<cycle_no]
+        source_stopped = any((job.options_json or {}).get('planSourceResumePending')
+            or (job.status in ('blocked', 'interrupted') and _SOURCE_PROTECTION.search(job.error_message or ''))
+            for job in jobs if job.run_id in {state.last_task_id for state in states.values()})
+        if not pending or source_stopped:
+            # Health calls run outside the plan transaction. Shared blockers
+            # cannot turn the last blocked book into a zero-growth sleep.
+            await db.commit()
+            wait_reason = await _round_public_wait(db, client)
+            plan = await db.get(QbSyncPlan, plan_id, with_for_update=True, populate_existing=True)
+            if not plan.enabled or plan.control_state != 'active':
+                return
+            # Verification may be completed before the next plan heartbeat;
+            # remember the stopped task even if the pause was not sampled.
+            for job in jobs:
+                if client is not None and job.status in ('blocked', 'interrupted') and _SOURCE_PROTECTION.search(job.error_message or ''):
+                    job.options_json = {**(job.options_json or {}), 'planSourceResumePending': True}
+            if wait_reason:
+                cycle = await db.scalar(select(QbSyncCycle).where(
+                    QbSyncCycle.plan_id == plan_id, QbSyncCycle.cycle_no == cycle_no))
+                if cycle:
+                    previous = cycle.summary_json or {}
+                    cycle.summary_json = {**previous, 'waitReason': wait_reason,
+                        'waitingSince': previous.get('waitingSince') or now.isoformat()}
+                await db.commit()
+                return
+            if await _recover_round_collection(db, plan, states, jobs, scopes, eligible, now,
+                                               recover_gaps=not pending):
+                await db.commit()
+                return
         if not pending:
             if await _settle_round(db,plan,books,states,jobs,scopes,eligible,targets,now) is False:
                 await db.commit()
@@ -576,6 +606,89 @@ async def tick_plan(db, plan_id, *, client):
         await db.execute(update(QbSyncPlan).where(QbSyncPlan.plan_id==plan_id,QbSyncPlan.worker_token==token)
                          .values(worker_token=None,lease_until=None,next_check_at=now+timedelta(seconds=30),update_time=now))
         await db.commit()
+
+
+async def _round_public_wait(db, client):
+    control = await control_status(db)
+    if control['paused']:
+        return control['reason'] or '同步已紧急暂停'
+    await db.commit()
+    if client is None:
+        return None
+    try:
+        local = resource_status()
+        if local.get('paused'):
+            return local.get('reason') or '主机资源不足，等待恢复'
+        health = await asyncio.to_thread(client.health)
+    except ServiceException as exc:
+        return exc.message or '采集器暂不可用，等待恢复'
+    if health.get('ok') is False:
+        return '采集器暂不可用，等待恢复'
+    source = health.get('sourceControl') or {}
+    if source.get('paused'):
+        return source.get('reason') or '来源公共暂停，等待恢复'
+    resources = health.get('resources') or {}
+    if resources.get('paused'):
+        return resources.get('reason') or '采集主机资源不足，等待恢复'
+    return None
+
+
+async def _recover_round_collection(db, plan, states, jobs, scopes, eligible, now, *, recover_gaps=True):
+    """Resume explicitly cleared source blocks and bound retries of saved gaps."""
+    from plugins.bank.service.sync_run_service import SyncRunService, _bounded_auto_resume_attempts
+    from plugins.bank.service.task_service import SyncTaskService
+    by_id = {job.run_id: job for job in jobs}
+    for book in eligible:
+        state = states[book['textbookId']]
+        job = by_id.get(state.last_task_id)
+        if job is None:
+            continue
+        scope = scopes.get(job.run_id)
+        options = job.options_json or {}
+        if options.get('planSourceResumePending'):
+            # Clearing the source pause is a user action. The plan only
+            # resumes collection after that explicit verification succeeds.
+            try:
+                await SyncRunService.resume_question(db, job.run_id)
+            except ServiceException as exc:
+                cycle = await db.scalar(select(QbSyncCycle).where(
+                    QbSyncCycle.plan_id == plan.plan_id, QbSyncCycle.cycle_no == plan.cycle_no))
+                if cycle:
+                    cycle.summary_json = {**(cycle.summary_json or {}),
+                        'waitReason': f'等待任务 #{job.run_id} 恢复续采：{exc.message}'}
+                return True  # Saved results may still need intake/import first.
+            job.options_json = {**(job.options_json or {}), 'planSourceResumePending': False}
+            state.last_cycle_no = plan.cycle_no - 1
+            return True
+        if scope is None or not recover_gaps:
+            continue
+        imported = await db.scalar(select(QbQuestionImport).where(
+            QbQuestionImport.task_id == job.run_id,
+            QbQuestionImport.collector_run_id == scope.collector_run_id).limit(1))
+        scan = ((imported.run_coverage_json or {}).get('scan') or {}) if imported else {}
+        # Source total minus collected count is NOT a gap. Only a persisted
+        # failed page in the configured window is recoverable here.
+        if not scan.get('failedPageCount') or scan.get('parseErrorCount') or scan.get('catalogSelectionTruncated'):
+            continue
+        if imported.status not in ('completed', 'partial'):
+            continue
+        attempted = int(options.get('planGapRetryCount') or 0)
+        maximum = _bounded_auto_resume_attempts(options)
+        if attempted >= maximum:
+            from plugins.bank.service.sync_issues import isolate_scope_failure
+            await isolate_scope_failure(db, job, scope,
+                f'当前窗口分页缺口经 {attempted} 次补采仍未修复，需要维护检查', now)
+            return True  # Reload the isolated book list before settlement.
+        result = await SyncTaskService.retry_question(db, job.run_id, 'automatic',
+            execution_options={'planGapRetryCount': attempted + 1,
+                'autoResumeMaxAttempts': maximum, 'autoResume': options.get('autoResume', True)})
+        state.last_task_id = result.get('taskId') or result['runId']
+        state.last_cycle_no = plan.cycle_no - 1
+        _event('sync_window_gap_retry', plan, taskId=job.run_id,
+               retryTaskId=state.last_task_id, attempt=attempted + 1,
+               failedPageCount=scan['failedPageCount'])
+        return True
+    return False
 
 
 async def _start_round(db, plan, now, snapshot=None, *, discovery_failed=None):
@@ -635,11 +748,14 @@ async def _settle_round(db, plan, books, states, jobs, scopes, eligible, targets
         outcome=((job.options_json or {}).get('planOutcome') or {}) if job else {}
         if job is None or job.status!='completed' or outcome.get('importStatus') in ('missing','failed','blocked','cancelled'):
             problems.append(book['textbookId'])
-    decision=settle_round(eligible_count=len(eligible),problem_count=len(problems),new_questions=new_questions,
+    isolated = [b['textbookId'] for b in books if b['enabled'] and b['exceptionKind'] == 'scope_failure']
+    problems = list(dict.fromkeys(problems + isolated))
+    decision=settle_round(eligible_count=len(eligible) + len(set(isolated) - {b['textbookId'] for b in eligible}),problem_count=len(problems),new_questions=new_questions,
                           new_relations=new_relations,round_no=plan.session_round or 1,max_rounds=plan.max_rounds)
     summary={'targetCount':len(targets),'handledCount':len(eligible),
              # Targets not run this round: disabled or isolated by a problem.
-             'skippedCount':len(targets)-len(eligible),'checkedCount':len(eligible)-len(problems),
+             'skippedCount':len(targets)-len(eligible),
+             'checkedCount':len(eligible)-sum(b['textbookId'] in problems for b in eligible),
              'completeCount':sum(1 for j in jobs if j.run_id in latest and not (j.options_json or {}).get('planOutcome',{}).get('needsRefill',True)),
              'newQuestionCount':new_questions,'newRelationCount':new_relations,
              'problemCount':len(problems),'problemTextbookIds':problems[:50],
@@ -750,7 +866,9 @@ async def settle_supplements(db, plan_id, now):
         latest=await db.scalar(select(QbSyncJob).where(QbSyncJob.task_module=='question',
             QbSyncJob.options_json['supplementId'].as_integer()==row.supplement_id).order_by(QbSyncJob.run_id.desc()).limit(1))
         job=latest or job
-        if job.status not in TERMINAL or job.active_slot is not None or (job.options_json or {}).get('planResumePending'):
+        if (job.status not in TERMINAL or job.active_slot is not None
+                or (job.options_json or {}).get('planResumePending')
+                or (job.options_json or {}).get('autoResumePending')):
             still_open=True
             continue
         imports=list((await db.scalars(select(QbQuestionImport).where(QbQuestionImport.task_id==job.run_id))).all())
