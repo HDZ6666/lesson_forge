@@ -20,6 +20,7 @@ const { classifyQuestionResponse, looksLikeHtml } = require('./response_classifi
 const { parseQuestionListPayload, parseQuestionListTotalPayload } = require('./question_parser.cjs');
 const { waitForVerification } = require('./session.cjs');
 const { retryDelay } = require('../../policies/retry.cjs');
+const { saveListFailure } = require('../../storage/raw_pages.cjs');
 
 async function evaluateFetch(page, url, request) {
   if (!page || typeof page.evaluate !== 'function') {
@@ -101,6 +102,14 @@ async function postQuestionList(
     diagnostics.write('list_attempt_started', detail);
     const result = await evaluateFetch(page, request.url, request);
     const classification = classifyQuestionResponse(result);
+    let failureEvidence = null;
+    if (classification.kind === 'fatal' || classification.kind === 'verification') {
+      try {
+        failureEvidence = saveListFailure(options, catalog, pageNumber, result, classification);
+      } catch (error) {
+        diagnostics.write('list_failure_capture_failed', { ...detail, message: error.message });
+      }
+    }
     diagnostics.write('list_attempt_response', {
       ...detail,
       elapsedMs: Math.round(performance.now() - started),
@@ -109,6 +118,10 @@ async function postQuestionList(
       code: classification.code,
       networkError: result.networkError,
       retryAfter: result.headers?.['retry-after'],
+      contentType: result.headers?.['content-type'],
+      responseTitle: failureEvidence?.title,
+      responseBytes: failureEvidence?.responseBytes,
+      evidencePath: failureEvidence?.filePath,
     });
     if (classification.kind === 'verification') {
       sawVerification = true;
@@ -179,10 +192,29 @@ async function postQuestionList(
       continue;
     }
     if (classification.kind === 'fatal') {
+      const recoverable = ['unexpected_html', 'http_405'].includes(classification.code);
+      if (recoverable && retryIndex < 1) {
+        const delay = retryDelay('normal', retryIndex++, result.headers, options.randomFn || Math.random);
+        diagnostics.write('request_retry_scheduled', {
+          ...detail,
+          retryIndex,
+          delayMs: delay,
+          reason: classification.code,
+        });
+        console.warn(
+          `[重试] 目录 ${catalog?.externalId} 第 ${pageNumber} 页返回异常内容，等待 ${(delay / 1000).toFixed(1)} 秒后重试原页`,
+        );
+        await wait(delay);
+        continue;
+      }
+      const description =
+        classification.code === 'unexpected_html'
+          ? `返回了 HTML，未取得题目 JSON（HTTP ${classification.status}）`
+          : `请求被来源拒绝（HTTP ${classification.status}）`;
       throw new QuestionSyncError(
-        `题目列表请求失败：HTTP ${classification.status}`,
+        `题目列表${description}${failureEvidence?.title ? `，页面标题：${failureEvidence.title}` : ''}`,
         classification.code,
-        classification,
+        { ...classification, evidence: failureEvidence },
       );
     }
     if (result.networkError) {
@@ -213,6 +245,7 @@ async function postQuestionList(
           ...detail,
           waitedMs: verificationStartedAt == null ? null : Date.now() - verificationStartedAt,
         });
+      if (sawVerification) console.log(`[恢复] 目录 ${catalog?.externalId} 第 ${pageNumber} 页已返回并解析题目 JSON`);
       diagnostics.write('list_attempt_accepted', detail);
       return parsed;
     } catch (error) {

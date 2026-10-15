@@ -67,6 +67,7 @@ const TEXTBOOK_FATAL_CODES = new Set([
   'checkpoint_contract',
   'asset_storage_error',
   'resume_source_invalid',
+  'list_response_unavailable',
   // Operator/manager stop signal: end the whole run at a safe point.
   'stop_requested',
 ]);

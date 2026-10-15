@@ -420,12 +420,17 @@ async def plan_queue(db, plan_id):
     rows=(await db.execute(_plan_jobs_query(plan_id).where(
         or_(QbSyncJob.active_slot.is_not(None),QbSyncJob.status=='queued',QbSyncJob.run_id==settling_id))
         .order_by(QbSyncJob.active_slot.is_(None),QbSyncJob.dispatch_priority.desc(),QbSyncJob.dispatch_rank,QbSyncJob.run_id))).all()
-    names=dict((await db.execute(select(QbTextbook.textbook_id,QbTextbook.textbook_name)
-        .where(QbTextbook.textbook_id.in_([book for _,book in rows])))).all()) if rows else {}
+    from plugins.bank.entity.do.bank_do import QbTextbookVersion
+    names={book_id:(name,version,external) for book_id,name,version,external in (await db.execute(
+        select(QbTextbook.textbook_id,QbTextbook.textbook_name,QbTextbookVersion.version_name,QbTextbook.external_textbook_id)
+        .join(QbTextbookVersion,QbTextbookVersion.version_id==QbTextbook.version_id)
+        .where(QbTextbook.textbook_id.in_([book for _,book in rows])))).all()} if rows else {}
     items=[]
     for job,book in rows:
         options=job.options_json or {}
-        items.append({'taskId':job.run_id,'textbookId':book,'textbookName':names.get(book),
+        name, version, external = names.get(book, (None, None, None))
+        items.append({'taskId':job.run_id,'textbookId':book,'textbookName':name,
+                      'versionName':version,'externalTextbookId':external,
                       'status':job.status,'running':job.active_slot is not None or job.run_id==settling_id,
                       'settling':job.run_id==settling_id,
                       'cycleNo':options.get('autoCycleNo'),'pinned':bool(options.get('pinnedOnce')),

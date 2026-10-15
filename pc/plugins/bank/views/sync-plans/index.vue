@@ -16,7 +16,7 @@
         <el-button v-else v-hasPermi="['bank:sync:plans:edit']" type="warning" :loading="saving" @click="pause">暂停整个计划</el-button>
         <el-button v-if="plan.enabled && plan.controlState==='active' && ['completed','stopped'].includes(plan.cycleState)" v-hasPermi="['bank:sync:plans:edit']" type="primary" :loading="saving" @click="act('start')">提前同步一次</el-button><el-button v-if="plan.enabled && plan.controlState==='active' && ['completed','stopped'].includes(plan.cycleState)" v-hasPermi="['bank:sync:plans:edit']" :loading="saving" @click="startFull">全量扫描一次</el-button>
         <el-button v-if="['discovering','running'].includes(plan.cycleState) && !['pausing','ending'].includes(plan.controlState)" v-hasPermi="['bank:sync:plans:edit']" @click="endVisible=true;keepUpdates=plan.autoUpdate">结束本次同步</el-button>
-        <el-button @click="settingsVisible=true">计划设置</el-button><el-button @click="showHistory">执行历史</el-button><el-button v-if="plan.sessionNo" @click="showSessionLog()">同步日志</el-button>
+        <el-button type="primary" plain @click="focusQueue">管理队列与置顶</el-button><el-button :disabled="!books.length || saving" @click="openOrder">调整教材顺序</el-button><el-button @click="settingsVisible=true">计划设置</el-button><el-button @click="showHistory">执行历史</el-button><el-button v-if="plan.sessionNo" @click="showSessionLog()">同步日志</el-button>
         <el-button v-if="plan.cycleNo" @click="openCycle(plan.cycleNo)">本轮全部任务</el-button>
         <el-button v-if="plan.lastDiscoveryTaskId" link type="primary" @click="router.push(`/bank/sync-textbook/${plan.lastDiscoveryTaskId}`)">教材发现 #{{ plan.lastDiscoveryTaskId }}</el-button>
       </div>
@@ -30,15 +30,17 @@
       <div class="sync-stat"><span>正在处理</span><strong>{{ progress.collecting + progress.checking + progress.importing }}</strong><small>采集、核验及入库</small></div>
       <div class="sync-stat"><span>需要关注</span><strong>{{ progress.failed }}</strong><small>{{ progress.cancelled }} 本停止 · {{ progress.excluded }} 本排除</small></div>
     </div>
-    <section v-if="plan.planId && queue && (plan.cycleNo || queue.current || queue.queue.length)" class="sync-panel">
-      <div class="section-heading"><div><h3>当前队列</h3><p>按后端实际派发顺序显示。“置顶”只让该教材在当前任务结束后优先执行，不改变计划顺序，也不中断当前任务。</p></div></div>
-      <div class="queue-now"><div><span class="cell-sub">当前任务</span><strong>{{ queue.current ? queue.current.textbookName : '无' }}</strong><span v-if="queue.current?.settling" class="cell-sub">{{ queue.current.waitReason }}</span><span v-if="queue.current" class="cell-sub">{{ queue.current.syncMode==='full' ? '全量窗口扫描' : '增量' }}</span></div><div><span class="cell-sub">下一任务</span><strong>{{ queue.next ? queue.next.textbookName : '无' }}</strong><span v-if="queue.next?.waitReason" class="cell-sub">{{ queue.next.waitReason }}</span></div><div><span class="cell-sub">待执行</span><strong>{{ queue.queue.length }} 本</strong></div></div>
-      <el-table v-if="queue.queue.length" max-height="min(320px, 40vh)" scrollbar-always-on :data="queue.queue.slice(0,50)" row-key="taskId">
-        <el-table-column type="index" label="次序" width="65"/>
-        <el-table-column label="教材" min-width="200"><template #default="{row}">{{ row.textbookName }}<el-tag v-if="row.pinned" size="small" type="warning" style="margin-left:6px">已置顶</el-tag></template></el-table-column>
+    <section ref="queueSection" v-if="plan.planId && queue && (plan.cycleNo || queue.current || queue.queue.length)" class="sync-panel queue-panel">
+      <div class="section-heading"><div><h3>当前队列 · {{queue.queue.length}} 本待执行</h3><p>按后端实际派发顺序显示。“置顶”只让该教材在当前任务结束后优先执行，不改变计划顺序，也不中断当前任务。</p></div></div>
+      <div class="queue-now"><div><span class="cell-sub">当前任务</span><strong>{{ queue.current ? queue.current.textbookName : '无' }}</strong><span v-if="queue.current" class="cell-sub">{{queue.current.versionName}} · 任务 #{{queue.current.taskId}}</span><span v-if="queue.current?.settling" class="cell-sub">{{ queue.current.waitReason }}</span><span v-if="queue.current" class="cell-sub">{{ queue.current.syncMode==='full' ? '全量窗口扫描' : '增量' }}</span></div><div><span class="cell-sub">下一任务</span><strong>{{ queue.next ? queue.next.textbookName : '无' }}</strong><span v-if="queue.next" class="cell-sub">{{queue.next.versionName}} · 任务 #{{queue.next.taskId}}</span><span v-if="queue.next?.waitReason" class="cell-sub">{{ queue.next.waitReason }}</span></div><div><span class="cell-sub">待执行</span><strong>{{ queue.queue.length }} 本</strong></div></div>
+      <el-input v-if="queue.queue.length" v-model="queueSearch" class="queue-search" clearable placeholder="搜索全部队列：版本、教材、任务号或来源 ID" @input="queuePage=1"/>
+      <el-table v-if="queue.queue.length" max-height="min(460px, 50vh)" scrollbar-always-on :data="visibleQueue" row-key="taskId">
+        <el-table-column prop="queuePosition" label="次序" width="65"/>
+        <el-table-column label="教材" min-width="200"><template #default="{row}">{{ row.textbookName }}<span class="cell-sub">{{row.versionName}} · 任务 #{{row.taskId}} · 来源 {{row.externalTextbookId}}</span><el-tag v-if="row.pinned" size="small" type="warning" style="margin-left:6px">已置顶</el-tag></template></el-table-column>
         <el-table-column label="等待原因" min-width="180"><template #default="{row}">{{ row.waitReason || '—' }}</template></el-table-column>
-        <el-table-column label="操作" width="120"><template #default="{row,$index}"><el-button v-if="$index>0" v-hasPermi="['bank:sync:plans:edit']" link type="primary" :disabled="saving" @click="pin(row.textbookId)">置顶</el-button></template></el-table-column>
+        <el-table-column label="操作" width="160" fixed="right"><template #default="{row}"><el-button link type="primary" @click="router.push(`/bank/sync-question/${row.taskId}`)">查看</el-button><el-button v-if="row.queuePosition>1" v-hasPermi="['bank:sync:plans:edit']" link type="primary" :disabled="saving" @click="pin(row.textbookId)">置顶</el-button></template></el-table-column>
       </el-table>
+      <footer v-if="queue.queue.length" class="table-footer"><span>匹配 {{filteredQueue.length}} / {{queue.queue.length}} 本；次序为实际队列位置</span><el-pagination v-model:current-page="queuePage" :page-size="20" :total="filteredQueue.length" layout="prev, pager, next"/></footer>
     </section>
     <section v-if="showCreate" class="sync-panel"><h3>创建本学科的计划</h3><PlanSettingsFields v-model="form"/><el-button v-hasPermi="['bank:sync:plans:edit']" type="primary" :loading="saving" :disabled="loading || !!error" @click="save">创建并开始同步</el-button></section>
     <section v-if="plan.planId && books.length" class="sync-panel">
@@ -52,7 +54,7 @@
         <el-table-column label="最近一次成果" min-width="170"><template #default="{row}"><template v-if="row.lastTaskId"><span class="cell-main">已保存 {{ row.savedQuestionCount ?? 0 }} · 接受 {{ row.acceptedCount ?? 0 }} 条次</span><span class="cell-sub">新增题 {{ row.newQuestionCount ?? '—' }} · 新增关联 {{ row.newRelationCount ?? '—' }}</span></template><span v-else>—</span></template></el-table-column>
         <el-table-column label="最近处理" min-width="165"><template #default="{row}">{{ row.lastFinishedAt ? formatTime(row.lastFinishedAt) : '尚未完成' }}</template></el-table-column>
         <el-table-column label="执行记录" min-width="150"><template #default="{row}"><span v-if="row.executionCount != null" class="cell-main">已执行 {{ row.executionCount }} 次</span><span v-if="row.sessionRounds?.length" class="cell-sub">本次同步参与 {{ row.sessionRounds.length }} 轮（第 {{ row.sessionRounds.join('、') }} 轮）</span><TaskExecutionHistory v-if="row.lastTaskId" :task="{taskId:row.lastTaskId,logicalTaskId:row.logicalTaskId}"/></template></el-table-column>
-        <el-table-column label="操作" width="310"><template #default="{row}"><el-button v-if="row.lastTaskId" link type="primary" @click="router.push(`/bank/sync-question/${row.lastTaskId}`)">查看</el-button><el-button v-hasPermi="['bank:sync:question:add']" link type="primary" :disabled="saving" @click="openSingle(row)">{{ planBookStage(row).key==='queued' ? '提前执行' : ['collecting','checking','importing'].includes(planBookStage(row).key) ? '查看当前任务' : '再同步一次' }}</el-button><el-button v-if="planBookStage(row).key==='queued'" v-hasPermi="['bank:sync:plans:edit']" link :disabled="saving" @click="pin(row.textbookId)">置顶</el-button><el-button v-hasPermi="['bank:sync:plans:edit']" link @click="editBook(row)">设置</el-button></template></el-table-column>
+        <el-table-column label="操作" width="310" fixed="right"><template #default="{row}"><el-button v-if="row.lastTaskId" link type="primary" @click="router.push(`/bank/sync-question/${row.lastTaskId}`)">查看</el-button><el-button v-hasPermi="['bank:sync:question:add']" link type="primary" :disabled="saving" @click="openSingle(row)">{{ planBookStage(row).key==='queued' ? '提前执行' : ['collecting','checking','importing'].includes(planBookStage(row).key) ? '查看当前任务' : '再同步一次' }}</el-button><el-button v-if="planBookStage(row).key==='queued'" v-hasPermi="['bank:sync:plans:edit']" link :disabled="saving" @click="pin(row.textbookId)">置顶</el-button><el-button v-hasPermi="['bank:sync:plans:edit']" link @click="editBook(row)">设置</el-button></template></el-table-column>
         <template #empty><el-empty :image-size="64" :description="books.length ? '没有符合筛选的教材' : '计划正在发现教材，登记后自动生成清单与任务'"/></template>
       </el-table><footer class="table-footer">显示 {{filteredBooks.length}} / {{books.length}} 本教材</footer>
     </section>
@@ -83,7 +85,7 @@
   </div>
 </template>
 <script setup>
-import {computed,ref} from 'vue'
+import {computed,nextTick,ref} from 'vue'
 import {usePollingLifecycle} from '../../composables/usePollingLifecycle'
 import {useRoute,useRouter} from 'vue-router'
 import {ElMessage,ElMessageBox} from 'element-plus'
@@ -99,6 +101,11 @@ import {discoveryFailureText,isNewPlan,planBookStage,planProgress,planPhase} fro
 import '../../styles/sync-center.scss'
 const route=useRoute(),router=useRouter(),subjectId=ref(Number(route.query.subjectId)||1),books=ref([]),plan=ref({}),control=ref({}),loading=ref(true),saving=ref(false),error=ref('')
 const form=ref({planName:'',enabled:true,autoUpdate:true,refreshDays:7,listConcurrency:8,catalogPageLimit:1000,maxRounds:null}),settingsVisible=ref(false),endVisible=ref(false),keepUpdates=ref(true)
+const queueSection=ref(null),queueSearch=ref(''),queuePage=ref(1)
+const filteredQueue=computed(()=>(queue.value?.queue||[]).map((row,index)=>({...row,queuePosition:index+1})).filter(row=>!queueSearch.value.trim()||`${row.versionName} ${row.textbookName} ${row.taskId} ${row.externalTextbookId}`.includes(queueSearch.value.trim())))
+const visibleQueue=computed(()=>filteredQueue.value.slice((queuePage.value-1)*20,queuePage.value*20))
+function focusQueue(){queueSection.value?.scrollIntoView({behavior:'smooth',block:'start'})}
+let initialQueueFocused=false
 const queue=ref(null),singleFull=ref(false),sessionLogVisible=ref(false),sessionLog=ref({}),sessionLogNo=ref()
 const STAGE_LABELS={queued:'排队',starting:'启动',running:'采集中',completed:'完成',failed:'失败',blocked:'受阻',cancelled:'取消',interrupted:'中断',pending:'待核验',probing:'核验中',retry:'待重试',accepted:'已通过'}
 function stageText(counts){const entries=Object.entries(counts||{});return entries.length?entries.map(([k,v])=>`${STAGE_LABELS[k]||k} ${v}`).join(' · '):'—'}
@@ -131,9 +138,11 @@ async function load(silent=false) {
     const current=data(p)[0]||{}
     if(id!==epoch)return
     plan.value=current;control.value=data(c);loadedSubjectId.value=requestedSubject
-    const [b,q]=current.planId?await Promise.all([request({url:`/bank/sync/plans/${current.planId}/books`}).then(data),request({url:`/bank/sync/plans/${current.planId}/queue`}).then(data).catch(()=>null)]) : [[],null]
+    const [b,q]=current.planId?await Promise.all([request({url:`/bank/sync/plans/${current.planId}/books`}).then(data),request({url:`/bank/sync/plans/${current.planId}/queue`}).then(data)]) : [[],null]
     if(id!==epoch)return
     plan.value=current;books.value=b;queue.value=q;control.value=data(c);loadedSubjectId.value=requestedSubject
+    if(queuePage.value>Math.max(1,Math.ceil(filteredQueue.value.length/20)))queuePage.value=1
+    if(!initialQueueFocused&&route.query.section==='queue'){initialQueueFocused=true;await nextTick();focusQueue()}
     if(!silent&&!settingsVisible.value)form.value={planName:current.planName||'',enabled:current.planId?current.enabled:true,autoUpdate:current.autoUpdate ?? true,refreshDays:current.refreshDays||7,listConcurrency:current.listConcurrency||8,catalogPageLimit:current.catalogPageLimit ?? 1000,maxRounds:current.maxRounds ?? null}
   } catch(e) {
     if(id===epoch)error.value=e.message || '计划加载失败，请点击刷新重试'
@@ -162,5 +171,5 @@ function formatTime(v){return v?new Date(v).toLocaleString():'—'}
 usePollingLifecycle(()=>{pageActive=true;load();timer=setInterval(()=>load(true),5000)},()=>{pageActive=false;++epoch;clearInterval(timer)})
 </script>
 <style scoped>
-.supplement-title{margin:18px 0 8px;font-size:14px}.session-log-head{display:flex;gap:12px;align-items:center;margin-bottom:12px;flex-wrap:wrap}.queue-now{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-bottom:14px}.queue-now>div{display:flex;flex-direction:column;gap:4px;padding:10px 12px;border:1px solid var(--el-border-color-lighter);border-radius:8px}.plan-actions{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:22px}.plan-actions .el-button{margin-left:0}.field-hint{font-size:13px;color:var(--el-text-color-secondary);line-height:1.7}.book-filters{display:flex;gap:12px;margin-bottom:18px}.book-filters .el-input{width:240px}.book-filters .el-select{width:180px}.cell-main{font-weight:500}.cell-sub{display:block;font-size:12px;color:var(--el-text-color-secondary);margin-top:5px}.order-list{max-height:55vh;overflow:auto;margin-top:16px}.order-row{display:flex;gap:12px;align-items:center;padding:12px 4px;border-bottom:1px solid var(--el-border-color-lighter)}.order-row>div{flex:1;min-width:0}.order-row small{display:block;color:var(--el-text-color-secondary);margin-top:4px}.drag-handle{cursor:grab;font-size:22px;color:var(--el-text-color-secondary)}@media(max-width:600px){.book-filters{flex-direction:column}.book-filters .el-input,.book-filters .el-select{width:100%}.order-row{gap:6px}.order-row .el-button{padding:6px;font-size:12px}}
+.queue-panel{scroll-margin-top:110px}.queue-search{margin-bottom:14px}.supplement-title{margin:18px 0 8px;font-size:14px}.session-log-head{display:flex;gap:12px;align-items:center;margin-bottom:12px;flex-wrap:wrap}.queue-now{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-bottom:14px}.queue-now>div{display:flex;flex-direction:column;gap:4px;padding:10px 12px;border:1px solid var(--el-border-color-lighter);border-radius:8px}.plan-actions{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:22px}.plan-actions .el-button{margin-left:0}.field-hint{font-size:13px;color:var(--el-text-color-secondary);line-height:1.7}.book-filters{display:flex;gap:12px;margin-bottom:18px}.book-filters .el-input{width:240px}.book-filters .el-select{width:180px}.cell-main{font-weight:500}.cell-sub{display:block;font-size:12px;color:var(--el-text-color-secondary);margin-top:5px}.order-list{max-height:55vh;overflow:auto;margin-top:16px}.order-row{display:flex;gap:12px;align-items:center;padding:12px 4px;border-bottom:1px solid var(--el-border-color-lighter)}.order-row>div{flex:1;min-width:0}.order-row small{display:block;color:var(--el-text-color-secondary);margin-top:4px}.drag-handle{cursor:grab;font-size:22px;color:var(--el-text-color-secondary)}@media(max-width:600px){.book-filters{flex-direction:column}.book-filters .el-input,.book-filters .el-select{width:100%}.order-row{gap:6px}.order-row .el-button{padding:6px;font-size:12px}}
 </style>

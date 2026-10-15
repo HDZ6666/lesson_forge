@@ -66,3 +66,33 @@ test('resource trigger retains decision values and instant process snapshot', ()
     fs.rmSync(root, { recursive: true });
   }
 });
+
+test('失败响应保存受控文本现场，独立于成功页快照开关', () => {
+  const { saveListFailure } = require('../src/storage/raw_pages.cjs');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'list-failure-'));
+  try {
+    const evidence = saveListFailure(
+      { dataDir: root, runId: 7, saveRaw: false },
+      { externalId: '195955' },
+      179,
+      {
+        status: 200,
+        headers: { 'content-type': 'text/html' },
+        text: '<html><title>Error page</title><script>secretcode</script><input value="private"><p>token=unsafe cookie=private 发生错误</p></html>',
+      },
+      { code: 'unexpected_html' },
+    );
+    const saved = JSON.parse(zlib.gunzipSync(fs.readFileSync(evidence.filePath)));
+    assert.equal(saved.title, 'Error page');
+    assert.equal(saved.status, 200);
+    assert.equal(saved.code, 'unexpected_html');
+    assert.equal(saved.pageNumber, 179);
+    assert.equal(saved.contentType, 'text/html');
+    assert.ok(!JSON.stringify(saved).includes('unsafe'));
+    assert.ok(!JSON.stringify(saved).includes('private'));
+    assert.ok(!JSON.stringify(saved).includes('secretcode'));
+    assert.equal(fs.statSync(evidence.filePath).mode & 0o777, 0o600);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

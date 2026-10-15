@@ -337,7 +337,7 @@ async def list_books(db, plan_id, *, display=False):
             'enabled': bool(states[book.textbook_id].enabled) if book.textbook_id in states else True,
             'exceptionKind': states[book.textbook_id].exception_kind if book.textbook_id in states else None,
             'operatorNote': states[book.textbook_id].operator_note if book.textbook_id in states else None,
-            'lastTaskId': states[book.textbook_id].last_task_id if book.textbook_id in states else None,
+            'lastTaskId': task_progress.get(book.textbook_id, {}).get('lastTaskId'),
             'lastCycleNo': states[book.textbook_id].last_cycle_no if book.textbook_id in states else 0,
             'nextDueAt': utc_datetime(states[book.textbook_id].next_due_at) if book.textbook_id in states else None,
             'revision': states[book.textbook_id].revision if book.textbook_id in states else 0,
@@ -379,7 +379,8 @@ async def _book_task_progress(db, states, cycle_no):
     if not ids:
         return {}
     from plugins.bank.service.task_executions import attach_summary, root_id
-    known = list((await db.scalars(select(QbSyncJob).where(QbSyncJob.run_id.in_(ids)))).all())
+    known = list((await db.scalars(select(QbSyncJob).where(
+        QbSyncJob.run_id.in_(ids), QbSyncJob.task_module == 'question'))).all())
     summaries = [{'taskId': j.run_id, 'logicalTaskId': root_id(j)} for j in known]
     await attach_summary(db, summaries)
     summary_by_latest = {p['latestExecutionId']: p for p in summaries}
@@ -429,6 +430,31 @@ async def _book_task_progress(db, states, cycle_no):
             'newRelationCount': import_stat(imported.stats_json, 'questionCatalogs') if imported else None,
         }
     return result
+
+
+async def _repair_book_task_links(db, plan_id):
+    """Repair pointers written when discovery scopes were treated as book jobs."""
+    invalid = (await db.execute(select(QbSyncBookState).outerjoin(
+        QbSyncJob, QbSyncJob.run_id == QbSyncBookState.last_task_id).where(
+            QbSyncBookState.plan_id == plan_id, QbSyncBookState.last_task_id.is_not(None),
+            or_(QbSyncJob.run_id.is_(None), QbSyncJob.task_module != 'question'))
+        .with_for_update())).scalars().all()
+    if not invalid:
+        return
+    from plugins.bank.service.plan_control import owned_condition
+    latest = dict((await db.execute(select(QbSyncJobScope.local_textbook_id, func.max(QbSyncJob.run_id))
+        .join(QbSyncJob, QbSyncJob.run_id == QbSyncJobScope.run_id).where(
+            owned_condition(plan_id), QbSyncJob.task_module == 'question',
+            QbSyncJobScope.local_textbook_id.in_([state.textbook_id for state in invalid]))
+        .group_by(QbSyncJobScope.local_textbook_id))).all())
+    for state in invalid:
+        state.last_task_id = latest.get(state.textbook_id)
+        state.last_cycle_no = 0
+        state.last_finished_at = None
+    await db.flush()
+    from plugins.bank.service import diagnostics
+    diagnostics.event('book_task_links_repaired', stage='plan', planId=plan_id,
+                      textbookIds=[state.textbook_id for state in invalid])
 
 
 async def retry_plan_discovery(db, plan_id, revision):
@@ -562,12 +588,14 @@ async def tick_plan(db, plan_id, *, client):
         plan=await db.get(QbSyncPlan,plan_id,with_for_update=True,populate_existing=True)
         if not plan.enabled or plan.control_state!='active' or plan.cycle_state!='running':
             return
+        await _repair_book_task_links(db, plan_id)
         cycle_no,cycle_name,plan_name=plan.cycle_no,plan.cycle_name,plan.plan_name
         plan_mode,plan_round=plan.session_mode,plan.session_round or 1
         await _close_excluded_waiting(db, plan_id)
         books=await list_books(db,plan_id)
         states={r.textbook_id:r for r in (await db.scalars(select(QbSyncBookState).where(QbSyncBookState.plan_id==plan_id))).all()}
         jobs=list((await db.scalars(select(QbSyncJob).where(
+            QbSyncJob.task_module=='question',
             QbSyncJob.options_json['autoPlanId'].as_integer()==plan_id,
             QbSyncJob.options_json['autoCycleNo'].as_integer()==cycle_no).order_by(QbSyncJob.run_id))).all())
         scopes={r.run_id:r for r in (await db.scalars(select(QbSyncJobScope).where(QbSyncJobScope.run_id.in_([j.run_id for j in jobs])))).all()} if jobs else {}
@@ -636,7 +664,8 @@ async def tick_plan(db, plan_id, *, client):
             return
         await db.commit()
         busy=set((await db.scalars(select(QbSyncJobScope.local_textbook_id).join(QbSyncJob,QbSyncJob.run_id==QbSyncJobScope.run_id)
-                  .where(or_(QbSyncJob.dispatch_book_key.is_not(None),QbSyncJob.status.not_in(TERMINAL))))).all())
+                  .where(QbSyncJob.task_module=='question',
+                         or_(QbSyncJob.dispatch_book_key.is_not(None),QbSyncJob.status.not_in(TERMINAL))))).all())
         from plugins.bank.service.task_service import SyncTaskService
         for book in pending:
             if book['textbookId'] in busy:

@@ -2386,3 +2386,149 @@ test('review repeated interrupted head preserves carried coverage', async () => 
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });
+
+for (const [permanent, pageLimit] of [
+  [false, 4],
+  [false, 8],
+  [true, 8],
+]) {
+  test(`异常 HTML/405 有限恢复并优先补缺页（上限 ${pageLimit}）：${permanent ? '持续失败封存' : '恢复后继续'}`, async () => {
+    const { directory, dbPath } = tempDb();
+    const calls = [];
+    let recovered = false,
+      reopened = 0;
+    const page = mockSyncPage(({ categoryId, curPage }) => {
+      if (categoryId !== '261285') return { status: 200, text: listApiText(80, ['35020603']) };
+      calls.push({ page: curPage, recovered });
+      if ((curPage === 2 || curPage === 3) && (permanent || !recovered))
+        return {
+          status: curPage === 2 ? 200 : 405,
+          headers: { 'content-type': 'text/html' },
+          text: '<html><head><title>Temporary error</title></head><body>暂时不可用</body></html>',
+        };
+      return { status: 200, text: listApiText(80, [`99000${curPage}`]) };
+    });
+    const dependencies = {
+      context: {},
+      page,
+      catalogTree: SAMPLE_TREE,
+      reopenBrowser: async () => {
+        recovered = true;
+        reopened += 1;
+        return { context: {}, page };
+      },
+    };
+    const options = baseSyncOptions(directory, dbPath, { concurrency: 4, catalogPageLimit: pageLimit });
+    try {
+      if (permanent)
+        await assert.rejects(runSync(options, dependencies), (error) => error.code === 'list_response_unavailable');
+      else await runSync(options, dependencies);
+      assert.equal(reopened, 1);
+      const replay = new QuestionSyncStore(dbPath, { dataDir: directory });
+      try {
+        const run = replay.db.prepare('SELECT * FROM sync_runs ORDER BY id DESC LIMIT 1').get();
+        const pages = replay.db
+          .prepare(
+            'SELECT page_number,result_type,raw_snapshot_path FROM sync_run_catalog_pages WHERE run_id=? ORDER BY page_number',
+          )
+          .all(run.id);
+        if (permanent) {
+          assert.equal(run.status, 'interrupted');
+          assert.ok(
+            calls.every((call) => call.page <= 4),
+            '不能继续空跑后续页',
+          );
+          assert.deepEqual(
+            pages.filter((p) => p.result_type === 'success').map((p) => p.page_number),
+            [1, 4],
+          );
+          assert.ok(pages.find((p) => p.page_number === 2).raw_snapshot_path);
+        } else {
+          assert.equal(pages.length, pageLimit);
+          assert.ok(pages.every((p) => p.result_type === 'success'));
+          const after = calls.filter((call) => call.recovered).map((call) => call.page);
+          assert.deepEqual(after.slice(0, 2), [2, 3], '会话恢复后先补原页，再向后翻页');
+        }
+        assert.equal(
+          replay.db.prepare('SELECT manual_required FROM collector_source_control').get().manual_required,
+          0,
+        );
+        const files = fs.readdirSync(
+          path.join(directory, 'raw', new Date().toISOString().slice(0, 10), `run-${run.id}`),
+        );
+        assert.ok(files.some((name) => name.startsWith('list-failure-')));
+      } finally {
+        replay.close();
+      }
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+}
+
+test('重置续采扫描证据保留最大成功页之前的失败缺口', async () => {
+  const { directory, dbPath } = tempDb();
+  try {
+    const first = await runSync(
+      baseSyncOptions(directory, dbPath, { maxPages: 6, maxPagesProvided: true, concurrency: 1 }),
+      {
+        context: {},
+        catalogTree: SAMPLE_TREE,
+        page: mockSyncPage(({ curPage }) => ({ status: 200, text: listApiText(100, [`9800000${curPage}`]) })),
+      },
+    );
+    const store = new QuestionSyncStore(dbPath, { dataDir: directory });
+    try {
+      const next = store.beginRun(buildScope(baseSyncOptions(directory, dbPath, { resume: true })), {
+        resume: true,
+        resumeRunId: first.runId,
+      });
+      store.db
+        .prepare(
+          "UPDATE sync_run_catalog_pages SET result_type='request_failed',error_code='unexpected_html' WHERE run_id=? AND page_number=3",
+        )
+        .run(next);
+      const hints = store.resetRunScan(next);
+      assert.equal(hints['261285'].lastPage, 6);
+      assert.deepEqual(hints['261285'].failedPages, [3]);
+      assert.equal(hints['261285'].finished, false);
+    } finally {
+      store.close();
+    }
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('续采核对旧尾部后先补尾部之前的已知缺页，再继续后面的页', async () => {
+  const { directory, dbPath } = tempDb();
+  try {
+    const first = await runSync(
+      baseSyncOptions(directory, dbPath, { maxPages: 6, maxPagesProvided: true, concurrency: 1 }),
+      {
+        context: {},
+        catalogTree: SAMPLE_TREE,
+        page: mockSyncPage(({ curPage, categoryId }) =>
+          categoryId === '261285' && curPage === 3
+            ? { status: 500, text: 'busy' }
+            : { status: 200, text: listApiText(60, [`9900000${curPage}`]) },
+        ),
+      },
+    );
+    const pages = [];
+    await runSync(
+      baseSyncOptions(directory, dbPath, { resume: true, resumeRunId: first.runId, concurrency: 1, maxPages: 8 }),
+      {
+        context: {},
+        catalogTree: SAMPLE_TREE,
+        page: mockSyncPage(({ curPage, categoryId }) => {
+          if (categoryId === '261285') pages.push(curPage);
+          return { status: 200, text: listApiText(60, curPage <= 6 ? [`9900000${curPage}`] : []) };
+        }),
+      },
+    );
+    assert.deepEqual(pages.slice(0, 4), [1, 6, 3, 7]);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});

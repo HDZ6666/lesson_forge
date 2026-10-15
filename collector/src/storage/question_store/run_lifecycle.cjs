@@ -136,6 +136,7 @@ class RunLifecycleMethods {
       if (Number(row.last_page) >= Number(hints[id]?.lastPage || 0)) {
         const ids = JSON.parse(last.question_ids_json || '[]').map(String);
         hints[id] = {
+          ...hints[id],
           lastPage: Number(row.last_page),
           anchorId: ids.at(-1),
           total: progress?.expectedTotal ?? null,
@@ -143,6 +144,22 @@ class RunLifecycleMethods {
         };
       }
     }
+    // Keep known holes when resetting page-number evidence. A verified tail
+    // must never let a later execution jump over these failed requests.
+    for (const row of this.db
+      .prepare(
+        `SELECT catalog_external_id,page_number,result_type
+      FROM sync_run_catalog_pages WHERE run_id=? ORDER BY page_number`,
+      )
+      .all(Number(runId))) {
+      const id = String(row.catalog_external_id);
+      if (!hints[id]) continue;
+      const gaps = new Set(hints[id].failedPages || []);
+      if (['request_failed', 'parse_failed'].includes(row.result_type)) gaps.add(Number(row.page_number));
+      else gaps.delete(Number(row.page_number));
+      hints[id].failedPages = [...gaps].sort((a, b) => a - b);
+    }
+    for (const hint of Object.values(hints)) if (hint.failedPages?.length) hint.finished = false;
     // Once a refill pass reaches every observed tail, the next pass starts a
     // fresh audit. Hints never turn inherited pages into current scan proof.
     const values = Object.values(hints);

@@ -242,8 +242,9 @@ test('Collector 最小化失败时返回 false 且不误报成功', async () => 
     logged.some((line) => line.includes('已最小化')),
     false,
   );
+  assert.equal(warned.length, 0);
   assert.equal(
-    warned.some((line) => line.includes('未生效')),
+    logged.some((line) => line.includes('窗口保持展开，不影响采集')),
     true,
   );
 });

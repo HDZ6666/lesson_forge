@@ -18,6 +18,7 @@ const INTERRUPTED_CODES = new Set([
   'stop_requested',
   'browser_recycle_failed',
   'browser_context_closed',
+  'list_response_unavailable',
 ]);
 
 /**

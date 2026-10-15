@@ -161,3 +161,34 @@ test('现场接口沿用采集器认证，仅读取对应metadata运行', async 
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('短暂页面验证特征消失不宣称人工处理或接口已恢复', async () => {
+  let polls = 0,
+    waits = 0;
+  const lines = [],
+    originalLog = console.log,
+    originalWarn = console.warn;
+  console.log = (...args) => lines.push(args.join(' '));
+  console.warn = (...args) => lines.push(args.join(' '));
+  try {
+    await waitForVerification(
+      {
+        evaluate: async () =>
+          ++polls === 1 ? { challenge: true, hasContent: false } : { challenge: false, hasContent: true },
+      },
+      {
+        verificationTimeout: 1000,
+        verificationInitialWait: 0,
+        sleepFn: async () => {},
+        onVerificationWait: () => waits++,
+      },
+    );
+    assert.equal(waits, 0);
+    assert.ok(lines.some((line) => line.includes('等待页面稳定')));
+    assert.ok(lines.some((line) => line.includes('尚不代表接口恢复')));
+    assert.ok(lines.every((line) => !line.includes('请在当前 Chrome 窗口人工完成')));
+  } finally {
+    console.log = originalLog;
+    console.warn = originalWarn;
+  }
+});

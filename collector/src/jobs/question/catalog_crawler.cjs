@@ -40,6 +40,7 @@ const { listWindow, postQuestionList } = require('../../sources/zujuan/list_wind
 const { downloadAsset, prefetchAssets } = require('../../assets/download.cjs');
 const { saveRawPage } = require('../../storage/raw_pages.cjs');
 const diagnostics = require('../../shared/diagnostics.cjs');
+const { QuestionSyncError } = require('../../shared/errors.cjs');
 const {
   createJoinTracker,
   nextBaseline,
@@ -196,6 +197,8 @@ function createCatalogCrawler(ctx) {
       joinTracker: createJoinTracker(baseline, opts),
       joinPlan: null,
       gapPages: [],
+      responseRecoveryPages: new Set(),
+      responseRecoveries: 0,
       successPages: new Map(),
       savedEntries: hasPageOne ? savedPages : [],
       duplicateStreak: 0,
@@ -381,6 +384,10 @@ function createCatalogCrawler(ctx) {
   function trackPage(state, row, saved) {
     const page = Number(row.pageNumber);
     const type = saved?.resultType;
+    if ([PAGE_RESULT.SUCCESS, PAGE_RESULT.NO_NEW_QUESTIONS, PAGE_RESULT.EMPTY_PAGE].includes(type)) {
+      state.responseRecoveryPages.delete(page);
+      if (!state.responseRecoveryPages.size) state.responseRecoveries = 0;
+    }
     if (type === PAGE_RESULT.SUCCESS || type === PAGE_RESULT.NO_NEW_QUESTIONS) {
       const ids = (row.parsed?.questionIds || []).map((value) => normalizeId(value)).filter(Boolean);
       state.successPages.set(page, ids);
@@ -395,7 +402,9 @@ function createCatalogCrawler(ctx) {
             ...opts,
           });
           state.joinPlan = plan;
-          state.gapPages = plan.gapPages.filter((gap) => !state.successPages.has(gap));
+          state.gapPages = [...new Set([...state.gapPages, ...plan.gapPages])].filter(
+            (gap) => !state.successPages.has(gap),
+          );
           diagnostics.write('incremental_head_joined', {
             stage: 'collection',
             runId,
@@ -640,6 +649,7 @@ function createCatalogCrawler(ctx) {
         pageNumber: row.pageNumber,
         resultType,
         errorCode: row.error.code || 'request_failed',
+        rawSnapshot: row.error.details?.evidence,
         queryFingerprint: state.scopeKey,
         filterJson: state.filterJson,
         expectedTotal: state.expectedTotal,
@@ -740,6 +750,7 @@ function createCatalogCrawler(ctx) {
 
   function noteFetchSlot(state, pageNumber, saved) {
     const resultType = saved?.resultType || (saved?.empty ? PAGE_RESULT.EMPTY_PAGE : PAGE_RESULT.SUCCESS);
+    session.notePageResult(resultType);
     const questionCount = Array.isArray(saved?.questions) ? saved.questions.length : saved?.empty ? 0 : null;
     let status = 'saved';
     if (saved?.empty || resultType === PAGE_RESULT.EMPTY_PAGE) status = 'empty';
@@ -791,8 +802,12 @@ function createCatalogCrawler(ctx) {
       resumeCoverageGaps.push(String(state.catalog.externalId));
       persistResumeScope();
       await persistCatalogPage(state, pageNumber, parsed);
+      const shift = pageNumber - hint.lastPage;
+      state.gapPages = [...new Set([...state.gapPages, ...(hint.failedPages || []).map((gap) => Number(gap) + shift)])]
+        .filter((gap) => gap >= 1 && gap <= explicitLastPage && !state.successPages.has(gap))
+        .sort((a, b) => a - b);
       state.nextPage = pageNumber + 1;
-      if (hint.finished && growth < DEFAULT_PAGE_CAPACITY) finishCatalogScan(state);
+      if (hint.finished && !state.gapPages.length && growth < DEFAULT_PAGE_CAPACITY) finishCatalogScan(state);
       console.log(
         `[续采] catalog=${state.catalog.externalId} 边界题 ${hint.anchorId} 已在当前 page=${pageNumber} 复核`,
       );
@@ -845,7 +860,12 @@ function createCatalogCrawler(ctx) {
         break;
       }
       if (opts.limit > 0 && counters.questionsSeen >= opts.limit) break;
-      if (opts.catalogPageLimit != null && !opts.maxPagesProvided && state.nextPage > explicitLastPage) {
+      if (
+        !state.gapPages.length &&
+        opts.catalogPageLimit != null &&
+        !opts.maxPagesProvided &&
+        state.nextPage > explicitLastPage
+      ) {
         // Finish this directory, then move on. A bounded traversal is
         // not evidence that every source question has been collected.
         finishCatalogScan(state, { pageLimitReached: true, stallReason: 'configured_page_limit' });
@@ -855,6 +875,7 @@ function createCatalogCrawler(ctx) {
       // This keeps an explicitly configured safetyPageLimit of 1000 from
       // turning the intentional policy stop into a stalled catalog.
       if (
+        !state.gapPages.length &&
         opts.limitTo1000Pages === true &&
         !opts.maxPagesProvided &&
         explicitLastPage === SITE_PAGE_LIMIT &&
@@ -866,11 +887,11 @@ function createCatalogCrawler(ctx) {
         });
         break;
       }
-      if (state.nextPage > safetyPageLimit) {
+      if (!state.gapPages.length && state.nextPage > safetyPageLimit) {
         finishCatalogScan(state, { stalled: true, stallReason: 'pagination_safety_limit' });
         break;
       }
-      if (state.nextPage > explicitLastPage) {
+      if (!state.gapPages.length && state.nextPage > explicitLastPage) {
         // `--max-pages` is an explicit diagnostic truncation and keeps
         // its historical incomplete-run semantics.
         break;
@@ -968,6 +989,30 @@ function createCatalogCrawler(ctx) {
         if (opts.limit > 0 && counters.questionsSeen >= opts.limit) break catalogPages;
       }
       saveCandidate(state);
+      const responseFailures = rows.filter((row) => ['unexpected_html', 'http_405'].includes(row.error?.code));
+      if (responseFailures.length) {
+        for (const row of responseFailures) state.responseRecoveryPages.add(row.pageNumber);
+        const gaps = [...state.responseRecoveryPages].sort((a, b) => a - b);
+        if (state.responseRecoveries >= 1) {
+          diagnostics.write('list_response_recovery_exhausted', {
+            catalogId: state.catalog.externalId,
+            pages: gaps,
+            code: responseFailures[0].error.code,
+          });
+          throw new QuestionSyncError(
+            `目录 ${state.catalog.externalId} 题目列表连续异常，恢复后原页仍失败：${responseFailures[0].error.message}；已保存成果保留，缺页 ${gaps.join('、')} 等待后续补采`,
+            'list_response_unavailable',
+          );
+        }
+        state.responseRecoveries += 1;
+        state.gapPages = [...new Set([...gaps, ...state.gapPages])].sort((a, b) => a - b);
+        console.warn(
+          `[恢复] 目录 ${state.catalog.externalId} 请求异常，暂停向后翻页；恢复会话后优先补采 ${gaps.join('、')} 页`,
+        );
+        diagnostics.write('list_response_recovery_started', { catalogId: state.catalog.externalId, pages: gaps });
+        await session.recoverListResponse();
+        continue;
+      }
       if (state.duplicateStreak >= incremental.duplicateStopPages) {
         // Different page numbers keep returning one page: stop paging
         // with the real reason instead of walking to the window end.

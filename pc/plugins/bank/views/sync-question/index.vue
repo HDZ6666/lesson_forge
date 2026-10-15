@@ -6,6 +6,7 @@
         <p>计划发现教材后，逐本任务会全部列在这里。按名称或日期查看同一轮同步，跟进入库结果。</p>
       </div>
       <div class="heading-actions">
+        <el-button type="primary" plain @click="openQueue">队列排序与置顶</el-button>
         <el-button v-if="activeTab==='tasks'" :icon="Refresh" :loading="loading" @click="loadTasks">刷新</el-button>
         <el-button v-hasPermi="['bank:sync:question:add', 'bank:sync:run']" plain :icon="Plus" @click="openCreate">手动同步一本</el-button>
       </div>
@@ -184,6 +185,7 @@ import {
   unwrapSyncTaskPage,
 } from '../../utils/sync-task'
 
+function openQueue(){router.push({path:'/sync-center/plans',query:{subjectId:filters.subjectId||1,section:'queue'}})}
 const route = useRoute()
 const activeTab = ref(route.query.tab === 'issues' ? 'issues' : 'tasks')
 const advancedFilters = ref(false)

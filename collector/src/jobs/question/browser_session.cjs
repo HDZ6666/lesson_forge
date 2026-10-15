@@ -17,6 +17,7 @@
 
 const { QuestionSyncError } = require('../../shared/errors.cjs');
 const { sleep } = require('../../shared/utils.cjs');
+const diagnostics = require('../../shared/diagnostics.cjs');
 const { isCookieSwitchError, isTextbookFatalError } = require('../../sources/zujuan/response_classifier.cjs');
 const {
   chooseCollectorPage,
@@ -79,6 +80,8 @@ class BrowserSession {
         MIN_PAGES_BETWEEN_PRESSURE_RECYCLES,
       ),
       pagesSince: 0,
+      savedSince: 0,
+      failedSince: 0,
       count: 0,
     };
   }
@@ -122,6 +125,18 @@ class BrowserSession {
     this.recycle.pagesSince += Number(count) || 0;
   }
 
+  notePageResult(result) {
+    if (['success', 'no_new_questions'].includes(result)) this.recycle.savedSince += 1;
+    else if (result !== 'empty_page') this.recycle.failedSince += 1;
+  }
+
+  async recoverListResponse() {
+    this.assertNotStopped();
+    this.opts.sourceControl?.assertAllowed?.();
+    if (this.canRecycle()) await this.recycleNow('题目列表持续返回异常内容，保留同一档案恢复');
+    else await navigateToTextbook(this.page, initialTextbookUrl(this.opts), this.opts);
+  }
+
   // Only a browser this run launched itself can be recycled.  A CDP-attached
   // browser belongs to someone else, and injected test contexts opt in
   // through `dependencies.reopenBrowser`.
@@ -134,7 +149,8 @@ class BrowserSession {
 
   recycleReason() {
     const { recycle } = this;
-    if (recycle.pages > 0 && recycle.pagesSince >= recycle.pages) return `已连续采集 ${recycle.pagesSince} 页`;
+    if (recycle.pages > 0 && recycle.pagesSince >= recycle.pages)
+      return `已调度 ${recycle.pagesSince} 页（含失败页和补采页）`;
     const current = recycle.browserMb > 0 ? this.browserMb() : null;
     if (current != null && current >= recycle.browserMb) return `Chrome 占用 ${current}MB`;
     const pressure = this.resourceGuard.status({ fresh: true }).pressure;
@@ -146,6 +162,11 @@ class BrowserSession {
 
   async recycleNow(reason) {
     const before = this.browserMb();
+    const pageStats = {
+      scheduled: this.recycle.pagesSince,
+      saved: this.recycle.savedSince,
+      failed: this.recycle.failedSince,
+    };
     this.heartbeat('browser_recycle');
     if (typeof this.dependencies.reopenBrowser === 'function') {
       const reopened = await this.dependencies.reopenBrowser({ context: this.context, page: this.page, reason });
@@ -162,12 +183,17 @@ class BrowserSession {
       this.page = this.context.pages?.()[0] || (await this.context.newPage());
     }
     this.recycle.pagesSince = 0;
+    this.recycle.savedSince = 0;
+    this.recycle.failedSince = 0;
     this.recycle.count += 1;
     // List requests are built from options, not page state, but they run
     // inside the page origin, so return to the textbook page first.
     await navigateToTextbook(this.page, initialTextbookUrl(this.opts), this.opts);
     const after = this.browserMb();
-    console.log(`[浏览器] 第 ${this.recycle.count} 次回收（${reason}）：Chrome ${before ?? '?'}MB → ${after ?? '?'}MB`);
+    console.log(
+      `[浏览器] 第 ${this.recycle.count} 次回收（${reason}）：Chrome ${before ?? '?'}MB → ${after ?? '?'}MB；本浏览器调度 ${pageStats.scheduled} 页次，成功保存 ${pageStats.saved} 页次，失败 ${pageStats.failed} 页次`,
+    );
+    diagnostics.write('browser_recycled', { reason, ...pageStats, beforeMb: before, afterMb: after });
     this.heartbeat('browser_recycled');
   }
 

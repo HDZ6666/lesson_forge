@@ -6,6 +6,7 @@ from sqlalchemy import select
 
 from plugins.bank.controller.sync_plan_controller import PlanAction, SingleBook
 from plugins.bank.entity.do.bank_do import (
+    QbSyncBookState,
     QbSyncCycle,
     QbSyncIssue,
     QbSyncJob,
@@ -21,6 +22,60 @@ from tests.plugins.bank.test_sync_flow_acceptance import finish_book, setup
 
 def _now():
     return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+@pytest.mark.asyncio
+async def test_discovery_scopes_never_replace_question_execution_links(bank_db, monkeypatch):
+    pid, jobs = await setup(bank_db, monkeypatch)
+    plan = await bank_db.get(QbSyncPlan, pid)
+    discovery = await bank_db.get(QbSyncJob, plan.discovery_processed_task_id)
+    bank_db.add(QbSyncJobScope(run_id=discovery.run_id, subject_id=1, local_version_id=1,
+        local_textbook_id=2, source_provider='zujuan', external_version_id='v1',
+        external_textbook_id='tb2', status='completed', create_time=_now(), update_time=_now()))
+    state = await bank_db.scalar(select(QbSyncBookState).where(
+        QbSyncBookState.plan_id == pid, QbSyncBookState.textbook_id == 2))
+    state_id, expected_id = state.state_id, jobs[1].run_id
+    state.last_task_id = discovery.run_id  # Exact production corruption.
+    await bank_db.commit()
+    books = await sync_plans.list_books(bank_db, pid, display=True)
+    assert next(b for b in books if b['textbookId'] == 2)['lastTaskId'] is None
+    await tick(bank_db, pid)
+    await tick(bank_db, pid)
+    state = await bank_db.get(QbSyncBookState, state_id, populate_existing=True)
+    assert state.last_task_id == expected_id
+    books = await sync_plans.list_books(bank_db, pid, display=True)
+    assert all(b['latestExecutionId'] == b['lastTaskId'] and b['executionCount'] == 0 for b in books)
+    queue = await plan_control.plan_queue(bank_db, pid)
+    assert len(queue['queue']) == 2
+    assert all(row['versionName'] == '版本' and row['externalTextbookId'] in ('tb1', 'tb2') for row in queue['queue'])
+
+
+@pytest.mark.asyncio
+async def test_discovery_only_link_is_repaired_and_missing_book_is_queued(bank_db, monkeypatch):
+    from sqlalchemy import delete
+
+    from plugins.bank.entity.do.bank_do import QbQuestionTaskReview
+    pid, jobs = await setup(bank_db, monkeypatch)
+    plan = await bank_db.get(QbSyncPlan, pid)
+    discovery = await bank_db.get(QbSyncJob, plan.discovery_processed_task_id)
+    bank_db.add(QbSyncJobScope(run_id=discovery.run_id, subject_id=1, local_version_id=1,
+        local_textbook_id=2, source_provider='zujuan', external_version_id='v1',
+        external_textbook_id='tb2', status='completed', create_time=_now(), update_time=_now()))
+    await bank_db.execute(delete(QbSyncJobScope).where(QbSyncJobScope.run_id == jobs[1].run_id))
+    await bank_db.execute(delete(QbQuestionTaskReview).where(QbQuestionTaskReview.task_id == jobs[1].run_id))
+    await bank_db.execute(delete(QbSyncJob).where(QbSyncJob.run_id == jobs[1].run_id))
+    state = await bank_db.scalar(select(QbSyncBookState).where(
+        QbSyncBookState.plan_id == pid, QbSyncBookState.textbook_id == 2))
+    state_id, discovery_id = state.state_id, discovery.run_id
+    state.last_task_id = discovery_id
+    # An unreleased discovery key must not make its textbook scopes "busy".
+    discovery.dispatch_book_key = 'discovery-only'
+    await bank_db.commit()
+    await tick(bank_db, pid)
+    state = await bank_db.get(QbSyncBookState, state_id, populate_existing=True)
+    linked = await bank_db.get(QbSyncJob, state.last_task_id)
+    assert linked.task_module == 'question' and linked.status == 'queued'
+    assert linked.run_id != discovery_id
 
 
 @pytest.mark.asyncio

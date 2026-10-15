@@ -79,6 +79,9 @@ function classifyQuestionResponse(result) {
   if (RETRYABLE_HTTP.has(status)) {
     return { kind: 'retry', code: `http_${status}`, status, text, throttled: false };
   }
+  if (status === 405 && isExplicitChallengeText(text)) {
+    return { kind: 'verification', code: 'http_405', status, text };
+  }
   if (status >= 400) return { kind: 'fatal', code: `http_${status}`, status, text };
   const envelope = parseJsonEnvelope(text);
   if (envelope && envelope.code != null) {

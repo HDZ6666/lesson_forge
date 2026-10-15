@@ -5,7 +5,9 @@
  */
 
 const path = require('node:path');
+const fs = require('node:fs');
 const zlib = require('node:zlib');
+const diagnostics = require('../shared/diagnostics.cjs');
 
 const { jsonStringify, nowIso, safeFilePart, sha256, writeFileAtomic } = require('../shared/utils.cjs');
 const { questionListApiUrl } = require('../sources/zujuan/urls.cjs');
@@ -43,7 +45,47 @@ function saveRawHtml(dataDir, runId, type, key, html) {
   return target;
 }
 
+// Error evidence is independent of optional full successful-page snapshots.
+// Keep a bounded, inert text excerpt; never save cookies or executable scripts.
+function saveListFailure(options, catalog, pageNumber, response, classification) {
+  const source = String(response.text || '');
+  const title = (source.match(/<title[^>]*>([\s\S]*?)<\/title>/i) || [])[1] || '';
+  const excerpt = source
+    .slice(0, 65536)
+    .replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 4000);
+  const evidence = diagnostics.scrub({
+    capturedAt: nowIso(),
+    catalogId: String(catalog?.externalId || ''),
+    pageNumber,
+    status: Number(response.status || 0),
+    code: classification.code,
+    contentType: response.headers?.['content-type'] || null,
+    title: title.replace(/<[^>]+>/g, '').slice(0, 200),
+    responseBytes: Buffer.byteLength(source),
+    contentHash: sha256(source),
+    excerpt,
+  });
+  let filePath = null;
+  if (options.dataDir && options.runId) {
+    filePath = path.join(
+      options.dataDir,
+      'raw',
+      evidence.capturedAt.slice(0, 10),
+      `run-${options.runId}`,
+      `list-failure-${safeFilePart(catalog?.externalId)}-${pageNumber}.json.gz`,
+    );
+    writeFileAtomic(filePath, zlib.gzipSync(JSON.stringify(evidence)));
+    fs.chmodSync(filePath, 0o600);
+  }
+  return { ...evidence, filePath };
+}
+
 module.exports = {
   saveRawHtml,
   saveRawPage,
+  saveListFailure,
 };

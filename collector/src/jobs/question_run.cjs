@@ -199,6 +199,7 @@ async function runSync(options, dependencies = {}) {
       resume: opts.resume,
       resumeRunId: opts.resumeRunId,
     });
+    opts.runId = runId;
     let resumeHints = {};
     if (store.lastBeginMeta?.reused || store.lastBeginMeta?.clonedFrom) {
       resumeHints = store.resetRunScan(runId);

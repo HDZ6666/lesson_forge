@@ -139,7 +139,7 @@ async function minimizeCollectorWindowWithLog(context, options, page = null) {
   if (minimized) {
     console.log('[环境] Chrome 已最小化，避免挡住当前工作');
   } else {
-    console.warn('[环境] Chrome 自动最小化未生效，采集仍会继续');
+    console.log('[环境] Chrome 窗口保持展开，不影响采集');
   }
   return minimized;
 }
@@ -592,6 +592,7 @@ async function waitForVerificationInner(page, options = {}) {
     await wait(Math.min(initialWait, remaining));
   }
   let announced = false;
+  let challengeSince = null;
   while (true) {
     let state = { challenge: false, text: '', title: '' };
     if (page && typeof page.evaluate === 'function') {
@@ -624,16 +625,21 @@ async function waitForVerificationInner(page, options = {}) {
       Boolean(state?.challenge) ||
       (!state?.hasContent && isProtectionText(`${state?.title || ''} ${state?.text || ''}`));
     if (!challenge) {
+      if (challengeSince != null) console.log('[验证] 页面验证特征已消失，继续检查题目接口；尚不代表接口恢复');
       if (requiresProbe) {
         console.warn('[验证] 当前页未显示挑战控件；将以间隔 API probe，恢复后继续同一目录/页。');
       }
       return state;
     }
-    if (!announced) {
+    if (challengeSince == null) {
+      challengeSince = Date.now();
+      console.log('[验证] 页面出现验证特征，正在等待页面稳定');
+    }
+    if (!announced && (requiresProbe || Date.now() - challengeSince >= 2000)) {
       console.warn('[验证] 检测到验证/防护页面，请在当前 Chrome 窗口人工完成验证；不会自动拖动滑块。');
       announced = true;
     }
-    notifyWait(state);
+    if (announced) notifyWait(state);
     if (timeout >= 0 && Date.now() - startedAt >= timeout) {
       throw new VerificationRequiredError('人工验证等待超时，已保留当前浏览器档案和页码断点。', state);
     }
