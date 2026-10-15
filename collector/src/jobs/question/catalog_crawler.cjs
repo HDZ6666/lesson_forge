@@ -188,6 +188,7 @@ function createCatalogCrawler(ctx) {
           : null,
       candidateThrough,
       candidateRunId: candidate ? candidateRun : null,
+      candidateIds: new Map((candidate?.headPages || []).map((item) => [Number(item.page), item.ids || []])),
       candidateCovered: 0,
       candidateShift: 0,
       trackBaseline,
@@ -292,12 +293,7 @@ function createCatalogCrawler(ctx) {
     if (!state.trackBaseline) return;
     const windowReason = ['configured_page_limit', 'page_limit_1000'].includes(String(stallReason || ''));
     const joined = state.joinPlan ? state.joinTracker.joined : null;
-    const successPages = new Map(state.successPages);
-    // Pages the continued head already saved count as covered.
-    for (let page = 1; page <= state.candidateCovered; page += 1) {
-      const current = page + state.candidateShift;
-      if (!successPages.has(current)) successPages.set(current, []);
-    }
+    const successPages = withCarriedCoverage(state);
     const { confirmed, candidate } = nextBaseline({
       previous: state.baseline,
       join: joined,
@@ -329,6 +325,22 @@ function createCatalogCrawler(ctx) {
     } catch (error) {
       console.warn(`[增量] catalog=${state.catalog.externalId} 基线写入失败：${error.message}`);
     }
+  }
+
+  /**
+   * This run's successful pages plus the range a continued unfinished head
+   * already saved (shifted by new insertions). Only the candidate's
+   * contiguous successful range is carried, so a page that actually failed
+   * is never counted as covered; its known question IDs are kept so the
+   * head can still be matched next time.
+   */
+  function withCarriedCoverage(state) {
+    const successPages = new Map(state.successPages);
+    for (let page = 1; page <= state.candidateCovered; page += 1) {
+      const current = page + state.candidateShift;
+      if (!successPages.has(current)) successPages.set(current, state.candidateIds?.get(page) || []);
+    }
+    return successPages;
   }
 
   function contiguousThrough(pages) {
@@ -424,9 +436,11 @@ function createCatalogCrawler(ctx) {
 
   function saveCandidate(state) {
     if (!state.trackBaseline || state.joinPlan || state.successPages.size === 0) return;
+    // Carry what an earlier interrupted head already saved, so a second or
+    // later interruption does not forget it (R05).
     const { candidate } = nextBaseline({
       previous: state.baseline,
-      successPages: state.successPages,
+      successPages: withCarriedCoverage(state),
       windowEnd: explicitLastPage,
       opts,
     });

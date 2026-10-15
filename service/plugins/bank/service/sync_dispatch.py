@@ -283,6 +283,33 @@ async def settling_book_task(db):
     ).order_by(QbSyncJob.run_id).limit(1))
 
 
+def collection_resource_wait(row, reason, now):
+    """Hold a book for host resources: back off 60 s, 120 s, ... up to 10 min
+    (configurable) and log the wait once rather than on every attempt."""
+    from plugins.bank.service import diagnostics
+    options = row.options_json or {}
+    streak = int(options.get('resourceWaitStreak') or 0)
+    if streak == 0:
+        diagnostics.event('collection_resource_wait_entered', stage='dispatch', taskId=row.run_id, reason=reason)
+    base = configured_limit('BANK_COLLECTION_RESOURCE_WAIT_MIN_SECONDS') or 60
+    ceiling = configured_limit('BANK_COLLECTION_RESOURCE_WAIT_MAX_SECONDS') or 600
+    delay = min(ceiling, base * 2 ** min(streak, 10))
+    row.options_json = {**options, 'resourceWaitStreak': streak + 1, 'resourceWaitReason': str(reason or '')[:300]}
+    row.dispatch_error = str(reason or '主机资源不足，等待恢复')[:500]
+    row.dispatch_not_before = now + timedelta(seconds=delay)
+
+
+def collection_resource_recovered(row):
+    options = row.options_json or {}
+    streak = int(options.get('resourceWaitStreak') or 0)
+    if not streak:
+        return
+    from plugins.bank.service import diagnostics
+    diagnostics.event('collection_resource_wait_recovered', stage='dispatch', taskId=row.run_id,
+                      checks=streak, reason=options.get('resourceWaitReason'))
+    row.options_json = {k: v for k, v in options.items() if k not in ('resourceWaitStreak', 'resourceWaitReason')}
+
+
 async def claim_next(db, *, task_id=None) -> dict | None:
     """Only a successful slot INSERT/UPDATE grants execution across processes."""
     now = datetime.now()
@@ -315,18 +342,10 @@ async def claim_next(db, *, task_id=None) -> dict | None:
         except ServiceException as exc:
             host = {'paused': True, 'reason': exc.message}
         if host.get('paused'):
-            # Back off 60 s, 120 s, ... up to 10 min instead of a fixed
-            # retry, and log the wait once rather than on every attempt.
-            options = row.options_json or {}
-            streak = int(options.get('resourceWaitStreak') or 0)
-            if streak == 0:
-                from plugins.bank.service import diagnostics
-                diagnostics.event('collection_resource_wait_entered', taskId=row.run_id, reason=host.get('reason'))
-            row.options_json = {**options, 'resourceWaitStreak': streak + 1}
-            row.dispatch_error = host.get('reason') or '主机资源不足，等待恢复'
-            row.dispatch_not_before = due_now + timedelta(seconds=min(600, 60 * 2 ** min(streak, 4)))
+            collection_resource_wait(row, host.get('reason'), due_now)
             await db.commit()
             return None
+        collection_resource_recovered(row)
     if reason:
         row.dispatch_error = reason
         row.dispatch_not_before = due_now + timedelta(seconds=30)
@@ -453,8 +472,13 @@ async def dispatch_once(*, session_factory=None, client=None) -> int:
         async with session_factory() as db:
             row = await db.get(QbSyncJob, due, with_for_update=True, populate_existing=True)
             if row and row.status == 'queued' and row.active_slot is None:
-                row.dispatch_error = str(backlog_reason or local_reason)[:500]
-                row.dispatch_not_before = await _clock(db) + timedelta(seconds=30)
+                if local_reason:
+                    # The real entry point uses the same wait as claim_next:
+                    # one entered event, growing backoff, a recovered event (R10).
+                    collection_resource_wait(row, local_reason, await _clock(db))
+                else:
+                    row.dispatch_error = str(backlog_reason)[:500]
+                    row.dispatch_not_before = await _clock(db) + timedelta(seconds=30)
                 await db.commit()
         return 0
     # Reclaim one eligible old result between books, while the collector is idle.

@@ -17,6 +17,7 @@ from plugins.bank.entity.do.bank_do import (
     QbSyncControl,
     QbSyncCycle,
     QbSyncIssue,
+    QbSyncIssueTask,
     QbSyncJob,
     QbSyncJobScope,
     QbSyncPlan,
@@ -172,8 +173,22 @@ def plan_dump(row):
         'lastDiscoveryTaskId': row.discovery_task_id or row.discovery_processed_task_id or None,
         'discoveryNextAt': utc_datetime(row.discovery_next_at),
         'discoveryError': row.discovery_error,
+        # What a discovery failure means now (R13): no list yet, source
+        # protection (public wait), or an ordinary failure that continues the
+        # known list unrefreshed.
+        'discoveryFailure': discovery_failure(row),
         'revision': row.revision,
     }
+
+
+def discovery_failure(row):
+    if not row.discovery_error:
+        return None
+    if _SOURCE_PROTECTION.search(row.discovery_error):
+        return 'source_protection'
+    if not row.textbook_order:
+        return 'no_list'
+    return 'stale_list'
 
 
 async def list_plans(db, subject_id=None):
@@ -580,6 +595,12 @@ async def tick_plan(db, plan_id, *, client):
                                                recover_gaps=not pending):
                 await db.commit()
                 return
+        if not pending and await _round_work_open(db, jobs):
+            # A manual execution of this round (an isolated book retried, or a
+            # book re-run after it was accounted for) keeps the round open
+            # until it is collected, verified and imported (R02).
+            await db.commit()
+            return
         if not pending:
             if await _settle_round(db,plan,books,states,jobs,scopes,eligible,targets,now) is False:
                 await db.commit()
@@ -606,6 +627,38 @@ async def tick_plan(db, plan_id, *, client):
         await db.execute(update(QbSyncPlan).where(QbSyncPlan.plan_id==plan_id,QbSyncPlan.worker_token==token)
                          .values(worker_token=None,lease_until=None,next_check_at=now+timedelta(seconds=30),update_time=now))
         await db.commit()
+
+
+async def open_issue_snapshot(db, task_ids):
+    """Unresolved problems of a round frozen when it ends (R11).
+
+    Later repairs, recurrences or relinking change the live issue rows, never
+    this summary; only ids, kinds and short reasons are kept, no logs or stems.
+    """
+    if not task_ids:
+        return {'openIssueCountAtEnd': 0, 'openIssuesAtEnd': []}
+    linked = select(QbSyncIssueTask.issue_id).where(QbSyncIssueTask.task_id.in_(task_ids))
+    rows = (await db.scalars(select(QbSyncIssue).where(
+        or_(QbSyncIssue.issue_id.in_(linked), QbSyncIssue.latest_task_id.in_(task_ids)),
+        QbSyncIssue.status != 'resolved').order_by(QbSyncIssue.issue_id))).all()
+    return {'openIssueCountAtEnd': len(rows),
+            'openIssuesAtEnd': [{'issueId': r.issue_id, 'textbookId': r.textbook_id, 'errorType': r.error_type,
+                                 'status': r.status, 'reason': (r.reason or '')[:120]} for r in rows[:50]]}
+
+
+async def _round_work_open(db, jobs):
+    """True while any execution of this round is queued, running or held.
+
+    Saved results still waiting for verification or import are checked by
+    ``_settle_round`` itself, which also records what the round waits on.
+    """
+    for job in jobs:
+        if job.task_module != 'question':
+            continue
+        if (job.status not in TERMINAL or job.active_slot is not None or job.dispatch_book_key is not None
+                or (job.options_json or {}).get('planResumePending')):
+            return True
+    return False
 
 
 async def _round_public_wait(db, client):
@@ -649,7 +702,26 @@ async def _recover_round_collection(db, plan, states, jobs, scopes, eligible, no
             # Clearing the source pause is a user action. The plan only
             # resumes collection after that explicit verification succeeds.
             try:
-                await SyncRunService.resume_question(db, job.run_id)
+                if scope is not None and int(options.get('workflowVersion', 1)) >= 2:
+                    # A linked execution continues the saved result; the
+                    # blocked execution keeps its status, times and Collector
+                    # run, so history and the original import stay intact (R01).
+                    inherited = {k: v for k, v in options.items() if k in (
+                        'autoPlanId', 'autoPlanName', 'autoCycleNo', 'autoCycleName', 'manualPlanId',
+                        'manualSingle', 'supplementId', 'allowWhilePlanPaused')}
+                    inherited.update(resumeFirst=True, planSourceResumeOf=job.run_id,
+                                     syncMode=options.get('syncMode') or 'incremental')
+                    job_id, state_id = job.run_id, state.state_id
+                    resumed = await SyncTaskService.create_question(db, {
+                        'versionId': scope.local_version_id, 'textbookId': scope.local_textbook_id,
+                        'listConcurrency': options.get('listConcurrency', 8),
+                        'limitTo1000Pages': bool(options.get('limitTo1000Pages'))},
+                        'automatic', automatic_options=inherited, resume_task_id=job_id)
+                    job = await db.get(QbSyncJob, job_id, populate_existing=True)
+                    state = await db.get(QbSyncBookState, state_id, populate_existing=True)
+                    state.last_task_id = resumed.get('taskId') or resumed['runId']
+                else:
+                    await SyncRunService.resume_question(db, job.run_id)
             except ServiceException as exc:
                 cycle = await db.scalar(select(QbSyncCycle).where(
                     QbSyncCycle.plan_id == plan.plan_id, QbSyncCycle.cycle_no == plan.cycle_no))
@@ -759,7 +831,8 @@ async def _settle_round(db, plan, books, states, jobs, scopes, eligible, targets
              'completeCount':sum(1 for j in jobs if j.run_id in latest and not (j.options_json or {}).get('planOutcome',{}).get('needsRefill',True)),
              'newQuestionCount':new_questions,'newRelationCount':new_relations,
              'problemCount':len(problems),'problemTextbookIds':problems[:50],
-             'decision':decision,'sessionNo':plan.session_no,'roundNo':plan.session_round}
+             'decision':decision,'sessionNo':plan.session_no,'roundNo':plan.session_round,
+             **await open_issue_snapshot(db,[j.run_id for j in jobs])}
     if cycle:
         cycle.status='completed';cycle.finished_at=now
         cycle.summary_json={**{k:v for k,v in (cycle.summary_json or {}).items() if k.startswith('discovery') or k=='note'},**summary}
@@ -818,9 +891,11 @@ async def session_log(db, plan_id, session_no=None):
             QbQuestionImportIntake.task_id.in_(ids)))).all()) if ids else collections.Counter()
         imports=(await db.execute(select(QbQuestionImport.status,QbQuestionImport.accepted_count,
             QbQuestionImport.quarantined_count).where(QbQuestionImport.task_id.in_(ids)))).all() if ids else []
-        issues=await db.scalar(select(func.count()).select_from(QbSyncIssue).where(
+        live=await db.scalar(select(func.count()).select_from(QbSyncIssue).where(
             QbSyncIssue.latest_task_id.in_(ids),QbSyncIssue.status!='resolved')) if ids else 0
         summary=cycle.summary_json or {}
+        # A finished round reports what was open when it ended; the live count is separate.
+        issues=summary['openIssueCountAtEnd'] if 'openIssueCountAtEnd' in summary else live
         rounds.append({'cycleNo':cycle.cycle_no,'roundNo':cycle.round_no,'legacy':bool(cycle.legacy),
                        'status':cycle.status,'endReason':cycle.end_reason,'targetCount':len(cycle.targets or []),
                        'skippedCount':summary.get('skippedCount'),'problemCount':summary.get('problemCount'),
@@ -829,7 +904,8 @@ async def session_log(db, plan_id, session_no=None):
                        'imports':{'count':len(imports),'completed':sum(1 for r in imports if r.status=='completed'),
                                   'accepted':sum(int(r.accepted_count or 0) for r in imports),
                                   'quarantined':sum(int(r.quarantined_count or 0) for r in imports)},
-                       'openIssueCount':int(issues or 0),
+                       'openIssueCount':int(issues or 0),'openIssueCountNow':int(live or 0),
+                       'openIssuesAtEnd':summary.get('openIssuesAtEnd'),
                        'newQuestionCount':summary.get('newQuestionCount'),'newRelationCount':summary.get('newRelationCount'),
                        'decision':summary.get('decision'),'note':summary.get('note')})
     supplements=(await db.scalars(select(QbSyncSupplement).where(QbSyncSupplement.plan_id==plan_id)
@@ -860,6 +936,14 @@ async def settle_supplements(db, plan_id, now):
     for row in rows:
         job=await db.get(QbSyncJob,row.task_id) if row.task_id else None
         if job is None:
+            # A supplement whose execution was never created (an old failed
+            # create) is closed after a grace period instead of blocking the
+            # subject forever (R03).
+            if row.task_id is None and row.started_at and now-row.started_at>timedelta(minutes=10):
+                row.status='failed'
+                row.finished_at=now
+                row.summary_json={**(row.summary_json or {}),'error':'补采执行未能创建'}
+                continue
             still_open=True
             continue
         # Follow resumes and retries of the same supplement to the latest execution.
@@ -1016,20 +1100,29 @@ async def recover_failed_results(db, now=None):
     issue is maintenance (no further recovery is scheduled).
     """
     now = now or await _clock(db)
-    rows = (await db.execute(select(QbQuestionImport, QbSyncJob, QbSyncPlan)
-        .join(QbSyncJob, QbSyncJob.run_id == QbQuestionImport.task_id)
-        .join(QbSyncJobScope, QbSyncJobScope.scope_id == QbQuestionImport.scope_id)
-        .join(QbSyncPlan, QbSyncPlan.plan_id == QbSyncJob.options_json['autoPlanId'].as_integer())
-        .where(QbQuestionImport.status == 'failed', QbSyncPlan.enabled == 1, QbSyncPlan.control_state == 'active')
-        .order_by(QbQuestionImport.import_id).limit(20))).all()
-    due = []
-    for imported, job, plan in rows:
-        options = job.options_json or {}
-        if options.get('planWorkPaused') or options.get('planImportRetryCount', 0) >= 3:
-            continue
-        if imported.update_time and imported.update_time + timedelta(hours=plan.refill_hours) > now:
-            continue
-        due.append((imported.scope_id, imported.collector_run_id, imported.import_id))
+    # Exhausted and paused rows are filtered before the limit, and the scan
+    # pages forward, so old exhausted failures never starve later due ones (R04).
+    due, cursor = [], 0
+    for _page in range(50):
+        rows = (await db.execute(select(QbQuestionImport, QbSyncJob, QbSyncPlan)
+            .join(QbSyncJob, QbSyncJob.run_id == QbQuestionImport.task_id)
+            .join(QbSyncJobScope, QbSyncJobScope.scope_id == QbQuestionImport.scope_id)
+            .join(QbSyncPlan, QbSyncPlan.plan_id == QbSyncJob.options_json['autoPlanId'].as_integer())
+            .where(QbQuestionImport.status == 'failed', QbQuestionImport.import_id > cursor,
+                   QbSyncPlan.enabled == 1, QbSyncPlan.control_state == 'active',
+                   func.coalesce(QbSyncJob.options_json['planImportRetryCount'].as_integer(), 0) < 3)
+            .order_by(QbQuestionImport.import_id).limit(100))).all()
+        for imported, job, plan in rows:
+            cursor = imported.import_id
+            options = job.options_json or {}
+            if options.get('planWorkPaused') or int(options.get('planImportRetryCount') or 0) >= 3:
+                continue
+            if imported.update_time and imported.update_time + timedelta(hours=plan.refill_hours) > now:
+                continue
+            due.append((imported.scope_id, imported.collector_run_id, imported.import_id))
+        if len(rows) < 100 or len(due) >= 20:
+            break
+    due = due[:20]
     await db.rollback()
     for scope_id, collector_run_id, import_id in due:
         await _retry_saved_scope_results(db, scope_id, now,

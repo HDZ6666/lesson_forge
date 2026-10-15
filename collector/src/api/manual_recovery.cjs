@@ -6,7 +6,9 @@ const { DatabaseSync } = require('node:sqlite');
 const { WebSocketServer } = require('ws');
 const { buildQuestionListRequest } = require('../sources/zujuan/request.cjs');
 const { evaluateFetch } = require('../sources/zujuan/list_window.cjs');
-const { classifyQuestionResponse } = require('../sources/zujuan/response_classifier.cjs');
+const { classifyHtmlProtection, classifyQuestionResponse } = require('../sources/zujuan/response_classifier.cjs');
+const { DEFAULT_SEED_URL } = require('../sources/zujuan/constants.cjs');
+const { ALLOWED_PAGE_HOSTS, assertAllowedUrl } = require('../shared/url_policy.cjs');
 const { parseQuestionListPayload } = require('../sources/zujuan/question_parser.cjs');
 const { launchCollectorContext } = require('../sources/zujuan/session.cjs');
 const { safeEqual } = require('./http.cjs');
@@ -16,7 +18,15 @@ function fail(message, statusCode = 409) {
   error.statusCode = statusCode;
   throw error;
 }
+// Textbook discovery fails on the seed page or the textbook-list request,
+// not on a question page, so it is re-checked against its own request.
+function discoveryTarget(input) {
+  const url = input.seedUrl || DEFAULT_SEED_URL;
+  assertAllowedUrl(url, ALLOWED_PAGE_HOSTS);
+  return { kind: 'discovery', url, request: { url, method: 'GET' }, catalogName: '教材清单发现' };
+}
 function recoveryTarget(dbPath, input) {
+  if (input.kind === 'discovery') return discoveryTarget(input);
   const db = new DatabaseSync(dbPath, { readOnly: true });
   try {
     const run = db.prepare('SELECT * FROM sync_runs WHERE id=?').get(input.collectorRunId);
@@ -197,6 +207,10 @@ class ManualRecovery {
     s.verifiedAt = null;
     try {
       if (new URL(s.page.url()).origin !== 'https://zujuan.xkw.com') fail('请先在浏览器返回组卷网题目页面');
+      if (s.target.kind === 'discovery') {
+        await this.checkDiscovery(s);
+        return this.public(s);
+      }
       const result = await evaluateFetch(s.page, s.target.request.url, s.target.request);
       this.manager.sourceControl.observe(result.status, result.headers, { verification: false });
       const classification = classifyQuestionResponse(result);
@@ -214,6 +228,28 @@ class ManualRecovery {
       s.checking = false;
     }
     return this.public(s);
+  }
+  async checkDiscovery(s) {
+    const result = await s.page.evaluate(async (target) => {
+      try {
+        const response = await fetch(target, { credentials: 'include', headers: { Accept: 'text/html' } });
+        const headers = {};
+        response.headers.forEach((value, key) => {
+          headers[key] = value;
+        });
+        return { status: response.status, headers, text: await response.text() };
+      } catch (error) {
+        return { status: 0, headers: {}, text: '', networkError: String(error?.message || error) };
+      }
+    }, s.target.request.url);
+    this.manager.sourceControl.observe(result.status, result.headers, { verification: false });
+    const protection = classifyHtmlProtection(result.text);
+    if (result.status !== 200 || protection.terminalBlock || protection.transientChallenge || !protection.hasContent)
+      fail(
+        `仍未恢复：教材清单页面 HTTP ${result.status}，${protection.hasContent ? '请核对浏览器提示' : '仍返回验证/防护页面或缺少教材内容'}`,
+      );
+    s.verifiedAt = Date.now();
+    s.message = '检查成功：教材清单页面正常返回，可以恢复教材发现';
   }
   validate(input) {
     const s = this.require(input);

@@ -33,9 +33,17 @@ export function planPhase(plan, progress) {
     if (plan.discoveryStatus === 'completed' && !plan.discoveryRegistered) return '登记教材清单'
     return plan.discoveryStatus === 'queued' ? '等待教材发现' : '发现教材'
   }
-  if (plan.discoveryError) return '教材发现待处理'
+  if (plan.discoveryError && plan.discoveryFailure !== 'stale_list') return '教材发现待处理'
   if (!plan.cycleNo) return '准备教材发现'
   if (progress.finished < progress.total) return '逐本同步中'
   if (plan.cycleState==='running') return '等待成果核验、入库或来源恢复'
   return '本轮已结束，等待下次更新'
+}
+
+/** What a textbook discovery failure means for the plan right now (R13). */
+export function discoveryFailureText(plan = {}) {
+  if (!plan.discoveryError) return ''
+  if (plan.discoveryFailure === 'stale_list') return '教材清单未刷新，继续同步已知教材；可稍后重试教材发现。'
+  if (plan.discoveryFailure === 'source_protection') return '来源要求验证，教材发现和题目同步都在等待；处理验证后自动继续。'
+  return '尚未登记完整教材清单，后续题目任务未启动。'
 }

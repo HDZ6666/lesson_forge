@@ -40,6 +40,22 @@ async def finish_book(
     await db.commit()
 
 
+def _linked_resumes(monkeypatch):
+    """R01: a cleared source block starts a linked execution, never rewrites the old one."""
+    from plugins.bank.service import sync_run_service
+
+    async def summary(*args, **kwargs):
+        return {'counts': {'catalogItemCount': 1, 'questionItemCount': 3, 'questionCatalogCount': 3},
+                'run': {'snapshotLockedAt': datetime.now(timezone.utc).isoformat()}}
+    monkeypatch.setattr(sync_run_service, '_resume_partial_summary', summary)
+
+
+async def _resumed_from(db, old_id):
+    rows = (await db.scalars(select(QbSyncJob).where(QbSyncJob.task_module == 'question')
+                             .execution_options(populate_existing=True))).all()
+    return [r.run_id for r in rows if (r.options_json or {}).get('planSourceResumeOf') == old_id]
+
+
 async def setup(db, mp):
     mp.setenv('BANK_AUTOMATIC_SYNC_ENABLED', '1')
     pid, _ = await registered_plan(db)
@@ -186,7 +202,6 @@ async def test_doc_explicit_start_waits_for_running_supplement(bank_db, monkeypa
 @pytest.mark.asyncio
 @pytest.mark.parametrize('sampled_pause', [True, False])
 async def test_verified_source_resumes_same_session_after_saved_import(bank_db, monkeypatch, sampled_pause):
-    from plugins.bank.service.sync_run_service import SyncRunService
 
     pid, jobs = await setup(bank_db, monkeypatch)
     await finish_book(bank_db, jobs[0])
@@ -199,26 +214,22 @@ async def test_verified_source_resumes_same_session_after_saved_import(bank_db, 
             return {'ok': True, 'sourceControl': {'paused': self.paused, 'reason': '来源防护'}}
 
     source = Source()
-    calls = []
-
-    async def resume(db, task_id):
-        calls.append(task_id)
-        job = await db.get(QbSyncJob, task_id)
-        job.status = 'queued'
-
-    monkeypatch.setattr(SyncRunService, 'resume_question', resume)
+    blocked_id = jobs[1].run_id
+    _linked_resumes(monkeypatch)
     for _ in range(2 if sampled_pause else 0):
         plan = await bank_db.get(QbSyncPlan, pid)
         plan.next_check_at = None
         await bank_db.commit()
         await sync_plans.tick_plan(bank_db, pid, client=source)
-    assert calls == []
+    assert await _resumed_from(bank_db, blocked_id) == []
     source.paused = False  # Represents the explicit source verification/resume action.
     plan = await bank_db.get(QbSyncPlan, pid)
     plan.next_check_at = None
     await bank_db.commit()
     await sync_plans.tick_plan(bank_db, pid, client=source)
-    assert calls == [jobs[1].run_id]
+    assert len(await _resumed_from(bank_db, blocked_id)) == 1
+    old = await bank_db.get(QbSyncJob, blocked_id, populate_existing=True)
+    assert old.status == 'blocked', 'the blocked execution keeps its history'
     plan = await bank_db.get(QbSyncPlan, pid, populate_existing=True)
     assert (plan.session_no, plan.session_round, plan.cycle_state) == (1, 1, 'running')
 
@@ -335,7 +346,6 @@ async def test_shared_failure_does_not_settle_round(bank_db, monkeypatch, blocke
 
 @pytest.mark.asyncio
 async def test_source_block_in_middle_resumes_before_next_book(bank_db, monkeypatch):
-    from plugins.bank.service.sync_run_service import SyncRunService
 
     pid, jobs = await setup(bank_db, monkeypatch)
     key = jobs[0].dispatch_book_key
@@ -345,15 +355,8 @@ async def test_source_block_in_middle_resumes_before_next_book(bank_db, monkeypa
     await sync_dispatch.release_finished_books(bank_db)
     assert jobs[0].options_json['planSourceResumePending']
     assert await sync_dispatch.claim_next(bank_db) is None
-    calls = []
-
-    async def resume(db, task_id):
-        calls.append(task_id)
-        job = await db.get(QbSyncJob, task_id)
-        job.status = 'queued'
-        job.dispatch_book_key = key
-
-    monkeypatch.setattr(SyncRunService, 'resume_question', resume)
+    blocked_id = jobs[0].run_id
+    _linked_resumes(monkeypatch)
 
     class Verified:
         def health(self):
@@ -363,5 +366,6 @@ async def test_source_block_in_middle_resumes_before_next_book(bank_db, monkeypa
     plan.next_check_at = None
     await bank_db.commit()
     await sync_plans.tick_plan(bank_db, pid, client=Verified())
-    assert calls == [jobs[0].run_id]
-    assert (await sync_dispatch.claim_next(bank_db))['taskId'] == jobs[0].run_id
+    resumed = await _resumed_from(bank_db, blocked_id)
+    assert len(resumed) == 1
+    assert (await sync_dispatch.claim_next(bank_db))['taskId'] == resumed[0]

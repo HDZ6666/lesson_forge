@@ -34,6 +34,7 @@ class ResourceWait:
         self.next_check: float = 0.0
         self.interval: float = 0.0
         self.checks = 0
+        self.loaded = False
 
     @property
     def waiting(self) -> bool:
@@ -41,10 +42,38 @@ class ResourceWait:
 
     def reset(self) -> None:
         self.__init__()
+        self.loaded = True
+
+    async def _adopt_persisted(self, session_factory: Any, now: float) -> None:
+        """After a restart, continue the wait the database still shows (R09).
+
+        A process starts with no reason in memory; without this a recovered
+        host would leave ``active: true`` on the page forever, and a host
+        still short would start a second, unrelated wait.
+        """
+        self.loaded = True
+        if session_factory is None:
+            return
+        from plugins.bank.entity.do.bank_do import QbSyncControl
+        try:
+            async with session_factory() as db:
+                row = await db.get(QbSyncControl, 1)
+                state = (row.resource_wait_json if row else None) or {}
+        except Exception as exc:  # A diagnostics read must never stop the worker.
+            diagnostics.event('resource_wait_load_failed', errorType=type(exc).__name__)
+            return
+        if state.get('active'):
+            self.reason = state.get('reason') or '等待主机资源恢复'
+            self.since = now
+            self.checks = int(state.get('checks') or 0)
+            self.interval = float(state.get('intervalSeconds') or 0)
+            self.next_check = now
 
     async def allow(self, session_factory: Any, *, root=None, check=None, clock=time.monotonic) -> bool:
         """True when heavy import work may be claimed now."""
         now = clock()
+        if not self.loaded:
+            await self._adopt_persisted(session_factory, now)
         if self.waiting and now < self.next_check:
             return False
         check = check or (lambda: assert_import_resources(root=root))

@@ -2,7 +2,7 @@
 import asyncio
 import re
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 
 from exceptions.exception import ServiceException
 from plugins.bank.entity.do.bank_do import QbSyncJob, QbSyncJobScope
@@ -24,7 +24,7 @@ async def open_browser(db, subject_id, owner):
         QbSyncJob.task_module == 'question', QbSyncJob.status == 'blocked',
         QbSyncJob.error_message == source.get('reason')).order_by(QbSyncJob.run_id.desc()).limit(1))).first()
     if not result:
-        raise ServiceException(message='没有匹配的题目列表阻断任务；本版人工浏览器处理支持题目列表验证')
+        return await _open_discovery(db, subject_id, owner, source)
     row, scope = result
     match = re.search(r'目录\s+(\S+)\s+第\s+(\d+)\s+页', row.error_message or '')
     if not match or not scope.snapshot_locked_at:
@@ -41,15 +41,56 @@ async def open_browser(db, subject_id, owner):
     return state, {**result,'textbookName':name,'savedCount':count}
 
 
+async def _open_discovery(db, subject_id, owner, source):
+    """Textbook discovery blocked by source protection (R07).
+
+    The browser re-checks the discovery request itself, not a question page;
+    finishing only lets the plan run discovery again, it never lifts a pause
+    the user set.
+    """
+    row = await db.scalar(select(QbSyncJob).where(
+        QbSyncJob.task_module == 'textbook', QbSyncJob.status.in_(('blocked', 'failed')),
+        QbSyncJob.error_message == source.get('reason'),
+        or_(QbSyncJob.subject_id == subject_id, QbSyncJob.subject_id.is_(None)),
+    ).order_by(QbSyncJob.run_id.desc()).limit(1))
+    if row is None:
+        raise ServiceException(message='没有匹配的题目列表或教材发现阻断任务，无法确定要复核的请求')
+    state = {'owner': owner, 'taskId': row.run_id, 'kind': 'discovery'}
+    seed = (row.options_json or {}).get('seedUrl')
+    # Only a plain read happened here (no row locks), so nothing is held
+    # across the Collector call.
+    result = await call('open', {**state, **({'seedUrl': seed} if seed else {})})
+    return state, {**result, 'textbookName': '教材清单发现', 'savedCount': 0}
+
+
+async def _finish_discovery(db, payload, state):
+    from plugins.bank.entity.do.bank_do import QbSyncPlan
+    from plugins.bank.service.incremental_import import _clock
+    now = await _clock(db)
+    plans = (await db.scalars(select(QbSyncPlan).where(
+        QbSyncPlan.discovery_processed_task_id == state['taskId']).with_for_update())).all()
+    for plan in plans:
+        # Discovery runs again on the next tick; a plan the user paused stays paused.
+        plan.discovery_next_at = now
+    await db.commit()
+    await call('finish', payload)
+    return {'taskId': state['taskId'], 'message': '浏览器已交回，教材发现将重新执行，来源队列已恢复'}
+
+
 async def finish_browser(db, session_id, state, operator):
     from plugins.bank.service.task_service import SyncTaskService
     payload = {'sessionId':session_id,'owner':state['owner']}
     await call('validate', payload)
+    if state.get('kind') == 'discovery':
+        return await _finish_discovery(db, payload, state)
     row = await db.get(QbSyncJob, state['taskId'])
     scope = await db.scalar(select(QbSyncJobScope).where(QbSyncJobScope.run_id == row.run_id))
     options = row.options_json or {}
     inherited = {k:v for k,v in options.items() if k in
-                 ('autoPlanId','autoPlanName','autoCycleNo','autoCycleName','manualPlanId','manualSingle','supplementId')}
+                 ('autoPlanId','autoPlanName','autoCycleNo','autoCycleName','manualPlanId','manualSingle','supplementId',
+                  'syncMode','allowWhilePlanPaused')}
+    # A full scan resumes as a full scan; incremental stays incremental (R08).
+    inherited['syncMode'] = options.get('syncMode') or 'incremental'
     inherited.update(manualDispatchRequested=True, resumeFirst=True)
     # Source remains paused while the durable refill is queued. Closing the
     # browser and clearing source pause is the final step.

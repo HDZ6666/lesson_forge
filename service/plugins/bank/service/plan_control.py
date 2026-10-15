@@ -165,7 +165,13 @@ async def reconcile_controls(session_factory):
                 plan.next_cycle_at=now+timedelta(days=plan.refresh_days) if plan.auto_update else None
                 plan.session_end_reason='user_end'
                 cycle=await db.scalar(select(QbSyncCycle).where(QbSyncCycle.plan_id==plan_id,QbSyncCycle.cycle_no==plan.cycle_no))
-                if cycle:cycle.status='stopped';cycle.finished_at=now;cycle.end_reason='user_end'
+                if cycle:
+                    cycle.status='stopped';cycle.finished_at=now;cycle.end_reason='user_end'
+                    from plugins.bank.service.sync_plans import open_issue_snapshot
+                    round_ids=list((await db.scalars(select(QbSyncJob.run_id).where(
+                        QbSyncJob.options_json['autoPlanId'].as_integer()==plan_id,
+                        QbSyncJob.options_json['autoCycleNo'].as_integer()==plan.cycle_no))).all())
+                    cycle.summary_json={**(cycle.summary_json or {}),**await open_issue_snapshot(db,round_ids)}
                 if plan.discovery_task_id:
                     plan.discovery_processed_task_id=max(plan.discovery_processed_task_id or 0,plan.discovery_task_id)
                     plan.discovery_task_id=None
@@ -229,12 +235,13 @@ async def set_order(db, plan_id, payload):
     ids=payload.textbook_ids
     if len(set(ids))!=len(ids) or set(ids)!=valid:
         raise ServiceException(message='教材清单已变化，请刷新后重新排序')
+    # Compare against the order the user saw before this change (R12).
+    previous=[b['textbookId'] for b in books]
     plan.textbook_order=ids;plan.revision+=1
     ranks={id:i for i,id in enumerate(ids)}
     rows=(await db.execute(select(QbSyncJob,QbSyncJobScope.local_textbook_id)
         .join(QbSyncJobScope,QbSyncJobScope.run_id==QbSyncJob.run_id)
         .where(owned_condition(plan_id),QbSyncJob.status=='queued',QbSyncJob.active_slot.is_(None)).with_for_update())).all()
-    previous=list(plan.textbook_order or [])
     for job,book_id in rows:job.dispatch_rank=ranks.get(book_id,len(ids))
     await db.commit()
     from plugins.bank.service import diagnostics
@@ -299,30 +306,52 @@ async def sync_book_once(db, plan_id, textbook_id, payload, operator):
         options.update(autoCycleNo=None, supplementId=supplement.supplement_id,
                        autoCycleName=f'单本补采 #{supplement.supplement_id} · {book.textbook_name}')
     await db.commit()
-    if previous_id:
-        result = await SyncTaskService.retry_question(db, previous_id, operator, settings=payload, execution_options=options)
-    else:
-        result = await SyncTaskService.create_question(db, {'versionId': book.version_id, 'textbookId': textbook_id,
-            'listConcurrency': payload.list_concurrency, 'allowPaused': payload.allow_paused}, operator,
-            automatic_options=options)
-    task_id=result.get('taskId') or result['runId']
-    row=await db.get(QbSyncJob,task_id,with_for_update=True)
-    row.dispatch_priority=(await db.scalar(select(func.max(QbSyncJob.dispatch_priority))) or 0)+1
-    state=await db.scalar(select(QbSyncBookState).where(QbSyncBookState.plan_id==plan_id,QbSyncBookState.textbook_id==textbook_id))
-    if state is None:
-        state=QbSyncBookState(plan_id=plan_id,textbook_id=textbook_id,enabled=1,last_cycle_no=0,revision=1)
-        db.add(state)
-    state.last_manual_task_id=task_id
-    state.last_task_id=task_id
-    if options.get('supplementId'):
-        from plugins.bank.entity.do.bank_do import QbSyncSupplement
-        supplement=await db.get(QbSyncSupplement,options['supplementId'])
-        supplement.task_id=task_id
-        from plugins.bank.service import diagnostics
-        diagnostics.event('supplement_started', stage='plan', planId=plan_id, supplementId=supplement.supplement_id,
-                          textbookId=textbook_id, taskId=task_id, syncMode=supplement.sync_mode, operator=operator)
-    await db.commit()
+    try:
+        if previous_id:
+            result = await SyncTaskService.retry_question(db, previous_id, operator, settings=payload, execution_options=options)
+        else:
+            result = await SyncTaskService.create_question(db, {'versionId': book.version_id, 'textbookId': textbook_id,
+                'listConcurrency': payload.list_concurrency, 'allowPaused': payload.allow_paused}, operator,
+                automatic_options=options)
+        task_id=result.get('taskId') or result['runId']
+        row=await db.get(QbSyncJob,task_id,with_for_update=True)
+        row.dispatch_priority=(await db.scalar(select(func.max(QbSyncJob.dispatch_priority))) or 0)+1
+        state=await db.scalar(select(QbSyncBookState).where(QbSyncBookState.plan_id==plan_id,QbSyncBookState.textbook_id==textbook_id))
+        if state is None:
+            state=QbSyncBookState(plan_id=plan_id,textbook_id=textbook_id,enabled=1,last_cycle_no=0,revision=1)
+            db.add(state)
+        state.last_manual_task_id=task_id
+        state.last_task_id=task_id
+        if options.get('supplementId'):
+            from plugins.bank.entity.do.bank_do import QbSyncSupplement
+            supplement=await db.get(QbSyncSupplement,options['supplementId'])
+            supplement.task_id=task_id
+            from plugins.bank.service import diagnostics
+            diagnostics.event('supplement_started', stage='plan', planId=plan_id, supplementId=supplement.supplement_id,
+                              textbookId=textbook_id, taskId=task_id, syncMode=supplement.sync_mode, operator=operator)
+        await db.commit()
+    except Exception as exc:
+        # The supplement row was committed before the execution existed; a
+        # failed create must close it, or it would block every wake-up (R03).
+        await db.rollback()
+        if options.get('supplementId'):
+            await fail_supplement(db, options['supplementId'], getattr(exc, 'message', None) or str(exc))
+        raise
     return {'taskId':task_id,'existing':False}
+
+
+async def fail_supplement(db, supplement_id, reason):
+    from plugins.bank.entity.do.bank_do import QbSyncSupplement
+    from plugins.bank.service import diagnostics
+    row=await db.get(QbSyncSupplement,supplement_id,with_for_update=True,populate_existing=True)
+    if row is None or row.status!='running':
+        return
+    row.status='failed'
+    row.finished_at=await _clock(db)
+    row.summary_json={**(row.summary_json or {}),'error':str(reason or '创建补采执行失败')[:500]}
+    await db.commit()
+    diagnostics.event('supplement_failed', stage='plan', planId=row.plan_id, supplementId=supplement_id,
+                      reason=row.summary_json['error'])
 
 
 def _plan_jobs_query(plan_id):

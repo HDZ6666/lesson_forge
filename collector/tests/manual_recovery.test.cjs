@@ -109,3 +109,32 @@ test('远程画面桥接拒绝未授权连接，授权后传输 RFB 字节', asy
   await new Promise((resolve) => server.close(resolve));
   await new Promise((resolve) => tcp.close(resolve));
 });
+test('教材发现防护按发现请求复核：仍是验证页不通过，恢复后才允许继续', async () => {
+  const { recovery: r, manager, resumed } = fixture();
+  const observed = [];
+  manager.sourceControl.observe = (status) => observed.push(status);
+  const { recoveryTarget } = require('../src/api/manual_recovery.cjs');
+  const target = recoveryTarget('/nonexistent.sqlite', { kind: 'discovery' });
+  assert.equal(target.kind, 'discovery');
+  assert.match(target.url, /^https:\/\/zujuan\.xkw\.com\//);
+  assert.throws(() => recoveryTarget('/nonexistent.sqlite', { kind: 'discovery', seedUrl: 'https://example.com/' }));
+  let html = '<html><title>验证</title><div id="parm_0"></div>滑动验证</html>';
+  r.current = {
+    id: 'one',
+    owner: '1',
+    revision: 3,
+    input: { kind: 'discovery' },
+    target,
+    expires: Date.now() + 60000,
+    page: { url: () => target.url, evaluate: async () => ({ status: 200, headers: {}, text: html }) },
+  };
+  let result = await r.check({ sessionId: 'one', owner: '1' });
+  assert.equal(result.verified, false);
+  assert.match(result.message, /教材清单/);
+  html = '<div id="chapter_textbooks"><a href="/czsx/zj261314/">七年级上册</a></div>';
+  r.current.checkedAt = 0;
+  result = await r.check({ sessionId: 'one', owner: '1' });
+  assert.equal(result.verified, true);
+  assert.deepEqual(observed, [200, 200]);
+  assert.equal(resumed(), 0, 'checking alone never resumes the source');
+});
