@@ -14,19 +14,18 @@ collector/
   zujuan_question_sync.cjs     题库内容采集 CLI 入口（实现在 src/jobs、src/cli）
   zujuan_metadata_sync.cjs     版本 / 教材发现 CLI 入口（实现在 src/jobs、src/cli）
   qbpkg.cjs                    离线包构建（兼容的离线发布路径）
-  lib/api_store.cjs            只读查询 facade，实现在 src/storage/readers/
-  lib/run_snapshots.cjs        运行快照 schema 与不可变触发器
-  lib/qbpkg/                   qbpkg 实现
+  lib/                         兼容 facade（service 契约依赖这些路径），实现都在 src/
   src/
-    shared/                    工具、文件锁、URL 白名单、HTML 小解析器、错误类
+    shared/                    工具、文件锁、URL 白名单、HTML 小解析器、错误类、配置注册表（config.cjs）
     sources/zujuan/            常量、URL、目录/题目/元数据解析、请求、响应分类、Chrome 会话、8 路列表窗口
     policies/                  分页边界、重试/限速、完整性判定（纯函数）
     assets/                    素材下载与公式 SVG 回退
-    storage/                   SQLite schema、题库/元数据 store、续采校验、原始页、只读 readers
-    jobs/                      单次运行（question_run、metadata_run）、结构化事件
-    api/                       路由、HTTP 边界、publicJob 投影、job 持久化与编排
+    storage/                   SQLite schema、运行快照与不可变触发器、题库/元数据 store、续采校验、原始页、只读 readers
+    qbpkg/                     离线包构建与校验
+    jobs/                      单次运行（question_run、metadata_run）、结构化事件；question/ 为内容运行的浏览器会话、目录爬取、封存三个阶段
+    api/                       路由、HTTP 边界、publicJob 投影、job 持久化与编排、读取线程池、/metrics
     cli/                       两个采集脚本的参数解析与入口
-  legacy/                      旧页面点击采集器 zujuan_sync.cjs 及其 cron 包装脚本
+  legacy/                      旧页面点击采集器 zujuan_sync.cjs 及其 cron 包装脚本（仅本地与测试使用，不进入镜像）
   tests/                       Node 测试；tests/fixtures 为脱敏真实响应；tests/tools 为静态扫描
   data/zujuan.sqlite3          候选库（含 collector_jobs 任务表）
   data/zujuan/assets/          题图和公式（同步 MySQL 前放这里）
@@ -110,6 +109,9 @@ npm start
 - 子进程通过结构化事件上报 `run_created`、`progress`、`heartbeat`、`verification_wait`、`error`、`sealed`、`metadata_run_created`、`metadata_summary`；`server.cjs` 不再从日志文本中解析 run 或计数，日志只作为 `logTail` 诊断。`error` 事件带 `code/message/recoverable/failedPages`，`GET /v1/jobs/:id` 的 `errorCode` 与 `errorMessage` 来自该事件，不会被 CLI 的帮助提示覆盖。
 - 任务持久化在同一 SQLite 的 `collector_jobs` 表：`active_slot` 唯一索引是跨进程互斥（第二个活动任务得到 409）；重启后前一进程遗留的活动任务被封存为 `interrupted`/`failed`、`errorCode=collector_restarted`，对应 run 同时封存，`GET /v1/jobs/:id` 仍能查到历史任务。
 - 直接运行 CLI 时可加隐藏参数 `--events-stdout`，把同样的事件打印为 `@@event` 行。
+- 进度类写入按 `COLLECTOR_PERSIST_INTERVAL_MS`（默认 5000 ms）合并，并在间隔结束时补写最后一次；状态变化、错误和封存总是立即写入。内容没有变化的行不重写。
+- API 的 SQLite 读取（快照分页、运行汇总、实时进度等）在 `COLLECTOR_READER_THREADS` 个工作线程中执行（默认 2，`0` 回到主线程读取），从入队开始计算 `COLLECTOR_READER_TIMEOUT_MS`（默认 25000，需小于 Service 的 30 秒请求超时），包含排队和执行时间；超时返回 504，尚未开始的请求移出队列，已执行的请求中止并替换线程。大查询不再阻塞 `/health` 和任务状态轮询。
+- 成果回收（`POST /v1/runs/{id}/reclaim`）和 WAL 整理在独立维护线程中执行，同一时间只跑一个：同一 run 的重复请求合并到进行中的任务，其他维护请求返回 409 `maintenance_busy`，维护期间启动采集返回 423 `maintenance_busy`，Service 保持任务排队并在 30 秒后重试。每次回收后以及每个任务结束后，会执行 `wal_checkpoint(TRUNCATE)`，把 -wal 文件截回 0；空闲页留给后续采集复用，不做 VACUUM。
 
 ### 新建、重试与续采
 
@@ -133,6 +135,8 @@ npm start
 - `GET /v1/runs/{runId}/snapshot-page`：按 `collection`、`cursor`、`pageSize` 和 `textbookExternalId` 读取一个不可变运行快照页；`collection` 只能是 `catalogs`、`questions`、`questionCatalogs`、`tags` 或 `assets`，响应会受行数和字节上限约束，并返回 `nextCursor`；
 - `GET /v1/runs/{runId}/assets/{sha256}`：按素材 SHA-256 和可选的 `textbookExternalId` 下载素材字节；collector 会校验快照归属、路径安全性、文件大小及实际 SHA-256 后才开始传输；
 - `GET /health` 用于无敏感信息存活检查，`GET /v1/health` 需要认证。
+- `GET /metrics`（需要认证）：Prometheus 文本格式，包含当前任务进度、页数、子进程与 Chrome 内存、浏览器回收次数、内存水位等级、磁盘余量、来源暂停与配额、读取线程、维护任务与落库统计。只读内存状态和两张单行表，可每 15 秒抓取。
+- `GET /v1/config`（需要认证）：当前生效的全部 `COLLECTOR_*` 配置，令牌与主机路径已隐藏。启动时同样把生效值打印到日志；非法值直接拒绝启动，未知的 `COLLECTOR_*` 变量会打印警告。
 - `GET /v1/source-control` 读取固定 `zujuan` 公共暂停；`POST /v1/source-control/resume` 提交读取到的 `expectedRevision` 显式解除人工暂停。沿用 API 认证，不能指定其他 provider、URL 或会话；较新的暂停事件导致 409，解除人工暂停也不能缩短来源要求的冷却。
 - `GET /v1/source-budget` 读取当日共享配额及已用量；没有修改或清零接口。`GET /v1/health` 返回合并的 `sourceControl` 执行门槛，以及独立的 `sourceBudget`、`resources`。`ok=true` 只代表采集器可用；任何来源暂停、配额耗尽或资源不足都会阻止新任务，解除人工暂停不能解除其余限制。
 
@@ -152,8 +156,15 @@ npm start
 | `COLLECTOR_SOURCE_DAILY_DOWNLOAD_MIB` | 每 UTC 日素材响应接收字节上限，包含失败及最终被拒绝的响应块 |
 | `COLLECTOR_MIN_DISK_FREE_MIB` | 数据库、原始页/素材、浏览器配置各存储位置应保留的可用 MiB |
 | `COLLECTOR_MIN_MEMORY_FREE_MIB` | 主机/容器应保留的可用内存 MiB；Linux 使用可回收缓存后的可用估计，并受 cgroup 剩余额度约束 |
+| `COLLECTOR_MEMORY_GRACE_MS` | 内存持续低于 `COLLECTOR_MIN_MEMORY_FREE_MIB` 多少毫秒才拒绝工作；`0` 为单次采样即停止（旧行为） |
+| `COLLECTOR_SOFT_MEMORY_FREE_MIB` | 预警水位：低于它时采集子进程在下一个窗口间安全点回收浏览器，不停止运行 |
+| `COLLECTOR_BROWSER_RECYCLE_PAGES` | 同一浏览器连续采集多少页后回收（默认 400，`0` 关闭） |
+| `COLLECTOR_BROWSER_RECYCLE_MB` | Chrome 进程树（按 PSS 汇总）超过多少 MB 时回收（默认 1000，`0` 关闭） |
+| `COLLECTOR_BROWSER_PRESSURE_MIN_PAGES` | 因主机内存预警触发的两次回收之间至少间隔的页数（默认 40） |
 
 配额在 SQLite 原子领取，跨进程和重启保留；下一 UTC 日使用新的统计行，旧记录不清零。配置的教材本数是启动上限，不能理解为完成产量。请求配额统计程序明确发起的请求，素材重定向逐跳计数，不含 Chrome 自动加载的页面子资源。无人值守启动还检查时长、下载预算及资源水位配置。
+
+浏览器回收（COL-016）：同一 Chrome 上下文连续执行数万次页内请求会持续增长内存。采集子进程在窗口之间（已结算页均已落盘）检查页数、Chrome 进程树占用和主机预警水位，满足任一条件即关闭并用同一持久档案重开上下文，回到教材页后从同一目录同一页继续；回收失败时整轮以 `browser_recycle_failed` 可续采中断，不跳过知识点。心跳额外上报 `browserRssMb`，任务进度返回 `childBrowserRssMb` / `childBrowserRssPeakMb`。通过 CDP 连接的外部浏览器不回收。
 
 资源检查最多缓存一秒；已配置的水位无法测量时暂缓。新启动、主动请求前及父进程 watchdog 都检查低水位；活动任务在安全点停止，保留可封存成果。资源恢复只允许再次派发，不将已结束任务改为成功。素材请求复用浏览器 Cookie，通过流式接收逐块检查 10 MiB 上限、下载配额及资源水位，超过上限立即停止；最终只合并限额内的素材字节。
 
@@ -200,7 +211,7 @@ Publisher 提供 `verify/register/process/publish/rollback/recover/run-pending/c
 
 先按 `taskId/jobId/runId` 定位运行，再看具体目录、页结果、原始错误与快照完整性。SQLite ExperimentalWarning、浏览器最小化警告和 CLI 最后一行帮助文字都不能单独证明采集失败原因。
 
-`npm test` 是离线测试入口，不代表生产整册采集成功；容器退出验证见运行存储说明。新问题和实际验证写入[实施任务清单](../docs/实施任务清单.md)对应项及证据，历史复现只查归档，不再维护旧进度台账。
+`npm test` 是离线测试入口，不代表生产整册采集成功；`npm run check` 依次执行未声明标识符扫描、格式检查和测试，与 CI（`.github/workflows/collector.yml`）一致。容器退出验证见运行存储说明。新问题和实际验证写入[实施任务清单](../docs/实施任务清单.md)对应项及证据，历史复现只查归档，不再维护旧进度台账。
 
 ### 出错页面现场
 

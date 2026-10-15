@@ -53,6 +53,8 @@ function usage() {
   --start-page <n>        每个目录起始页，默认 1
   --max-pages <n>         每个目录最多页数；不传则按来源 total 动态扩展
   --limit-to-1000-pages   每个目录最多请求 1000 页，达到边界后按策略正常结束
+  --catalog-page-limit <n> 每个目录的页数上限（1～10000），到达后保留未完整标记并继续其他目录
+  --sync-mode <m>        incremental（默认，接上历史头部后跳过已保存范围）或 full（窗口内全量扫描）
   --safety-page-limit <n> 分页安全上限，默认 10000，只防止无限非空页
   --limit <n>             本次最多保存题数，便于验收；0 表示不限
   --concurrency <n>       同一 Cookie 列表并发路数，默认 8，最大 16
@@ -100,6 +102,8 @@ function parseArgs(argv = []) {
     maxPages: SITE_PAGE_LIMIT,
     maxPagesProvided: false,
     limitTo1000Pages: false,
+    catalogPageLimit: null,
+    syncMode: 'incremental',
     safetyPageLimit: DEFAULT_PAGINATION_SAFETY_LIMIT,
     limit: 0,
     headless: false,
@@ -131,55 +135,164 @@ function parseArgs(argv = []) {
   for (let index = 0; index < argv.length; index += 1) {
     const flag = argv[index];
     switch (flag) {
-      case '--help': case '-h': options.help = true; break;
-      case '--textbook-id': options.textbookId = String(needValue(index, flag)); index += 1; break;
-      case '--chapter-id': options.chapterId = String(needValue(index, flag)); index += 1; break;
-      case '--bank-id': options.bankId = parsePositiveInt(needValue(index, flag), flag); index += 1; break;
-      case '--bank-path': options.bankPath = String(needValue(index, flag)).trim(); index += 1; break;
-      case '--catalog-id': options.catalogIds.push(String(needValue(index, flag))); index += 1; break;
+      case '--help':
+      case '-h':
+        options.help = true;
+        break;
+      case '--textbook-id':
+        options.textbookId = String(needValue(index, flag));
+        index += 1;
+        break;
+      case '--chapter-id':
+        options.chapterId = String(needValue(index, flag));
+        index += 1;
+        break;
+      case '--bank-id':
+        options.bankId = parsePositiveInt(needValue(index, flag), flag);
+        index += 1;
+        break;
+      case '--bank-path':
+        options.bankPath = String(needValue(index, flag)).trim();
+        index += 1;
+        break;
+      case '--catalog-id':
+        options.catalogIds.push(String(needValue(index, flag)));
+        index += 1;
+        break;
       case '--catalog-level': {
         const level = parsePositiveInt(needValue(index, flag), flag);
         if (![1, 2, 3].includes(level)) throw new Error('--catalog-level 只能是 1、2、3。');
-        options.catalogLevels.push(level); index += 1; break;
+        options.catalogLevels.push(level);
+        index += 1;
+        break;
       }
-      case '--max-catalogs': options.maxCatalogs = parsePositiveInt(needValue(index, flag), flag, { allowZero: true }); index += 1; break;
-      case '--start-page': options.startPage = parsePositiveInt(needValue(index, flag), flag); index += 1; break;
-      case '--max-pages': options.maxPages = parsePositiveInt(needValue(index, flag), flag); options.maxPagesProvided = true; index += 1; break;
-      case '--limit-to-1000-pages': options.limitTo1000Pages = true; break;
-      case '--safety-page-limit': options.safetyPageLimit = parsePositiveInt(needValue(index, flag), flag); index += 1; break;
-      case '--limit': options.limit = parsePositiveInt(needValue(index, flag), flag, { allowZero: true }); index += 1; break;
-      case '--headless': options.headless = true; break;
-      case '--headful': options.headless = false; break;
-      case '--cdp-url': case '--connect-over-cdp': options.cdpUrl = String(needValue(index, flag)).trim(); index += 1; break;
-      case '--delay-min': options.delayMin = parsePositiveInt(needValue(index, flag), flag, { allowZero: true }); index += 1; break;
-      case '--delay-max': options.delayMax = parsePositiveInt(needValue(index, flag), flag, { allowZero: true }); index += 1; break;
-      case '--timeout': options.timeout = parsePositiveInt(needValue(index, flag), flag); index += 1; break;
-      case '--verification-timeout': options.verificationTimeout = parsePositiveInt(needValue(index, flag), flag, { allowZero: true }); index += 1; break;
-      case '--verification-poll': options.verificationPoll = parsePositiveInt(needValue(index, flag), flag, { allowZero: true }); index += 1; break;
-      case '--verification-probe-interval': options.verificationProbeInterval = parsePositiveInt(needValue(index, flag), flag); index += 1; break;
-      case '--no-download-assets': options.downloadAssets = false; break;
-      case '--download-assets': options.downloadAssets = true; break;
-      case '--no-save-raw': options.saveRaw = false; break;
-      case '--no-resume': options.resume = false; break;
-      case '--resume-run-id': options.resumeRunId = parsePositiveInt(needValue(index, flag), flag); index += 1; break;
+      case '--max-catalogs':
+        options.maxCatalogs = parsePositiveInt(needValue(index, flag), flag, { allowZero: true });
+        index += 1;
+        break;
+      case '--start-page':
+        options.startPage = parsePositiveInt(needValue(index, flag), flag);
+        index += 1;
+        break;
+      case '--max-pages':
+        options.maxPages = parsePositiveInt(needValue(index, flag), flag);
+        options.maxPagesProvided = true;
+        index += 1;
+        break;
+      case '--limit-to-1000-pages':
+        options.limitTo1000Pages = true;
+        break;
+      case '--catalog-page-limit':
+        options.catalogPageLimit = parsePositiveInt(needValue(index, flag), flag);
+        if (options.catalogPageLimit > DEFAULT_PAGINATION_SAFETY_LIMIT)
+          throw new Error('--catalog-page-limit 必须为 1 到 10000 的整数');
+        index += 1;
+        break;
+      case '--sync-mode': {
+        const mode = needValue(index, flag);
+        if (!['incremental', 'full'].includes(mode)) throw new Error('--sync-mode 只接受 incremental 或 full');
+        options.syncMode = mode;
+        index += 1;
+        break;
+      }
+      case '--safety-page-limit':
+        options.safetyPageLimit = parsePositiveInt(needValue(index, flag), flag);
+        index += 1;
+        break;
+      case '--limit':
+        options.limit = parsePositiveInt(needValue(index, flag), flag, { allowZero: true });
+        index += 1;
+        break;
+      case '--headless':
+        options.headless = true;
+        break;
+      case '--headful':
+        options.headless = false;
+        break;
+      case '--cdp-url':
+      case '--connect-over-cdp':
+        options.cdpUrl = String(needValue(index, flag)).trim();
+        index += 1;
+        break;
+      case '--delay-min':
+        options.delayMin = parsePositiveInt(needValue(index, flag), flag, { allowZero: true });
+        index += 1;
+        break;
+      case '--delay-max':
+        options.delayMax = parsePositiveInt(needValue(index, flag), flag, { allowZero: true });
+        index += 1;
+        break;
+      case '--timeout':
+        options.timeout = parsePositiveInt(needValue(index, flag), flag);
+        index += 1;
+        break;
+      case '--verification-timeout':
+        options.verificationTimeout = parsePositiveInt(needValue(index, flag), flag, { allowZero: true });
+        index += 1;
+        break;
+      case '--verification-poll':
+        options.verificationPoll = parsePositiveInt(needValue(index, flag), flag, { allowZero: true });
+        index += 1;
+        break;
+      case '--verification-probe-interval':
+        options.verificationProbeInterval = parsePositiveInt(needValue(index, flag), flag);
+        index += 1;
+        break;
+      case '--no-download-assets':
+        options.downloadAssets = false;
+        break;
+      case '--download-assets':
+        options.downloadAssets = true;
+        break;
+      case '--no-save-raw':
+        options.saveRaw = false;
+        break;
+      case '--no-resume':
+        options.resume = false;
+        break;
+      case '--resume-run-id':
+        options.resumeRunId = parsePositiveInt(needValue(index, flag), flag);
+        index += 1;
+        break;
       // The HTTP collector already enforces this acknowledgement before it
       // starts a child.  Accept the established CLI flag so the new script
       // can be selected without widening the server request contract.
-      case '--acknowledge-source-policy': break;
-      case '--db': options.dbPath = path.resolve(cwd, needValue(index, flag)); index += 1; break;
-      case '--data-dir': options.dataDir = path.resolve(cwd, needValue(index, flag)); index += 1; break;
-      case '--profile-dir': options.profileDir = path.resolve(cwd, needValue(index, flag)); index += 1; break;
+      case '--acknowledge-source-policy':
+        break;
+      case '--db':
+        options.dbPath = path.resolve(cwd, needValue(index, flag));
+        index += 1;
+        break;
+      case '--data-dir':
+        options.dataDir = path.resolve(cwd, needValue(index, flag));
+        index += 1;
+        break;
+      case '--profile-dir':
+        options.profileDir = path.resolve(cwd, needValue(index, flag));
+        index += 1;
+        break;
       case '--fallback-profile-dir':
         options.fallbackProfileDirs.push(path.resolve(cwd, needValue(index, flag)));
         index += 1;
         break;
-      case '--concurrency': options.concurrency = parsePositiveInt(needValue(index, flag), flag); index += 1; break;
-      case '--asset-concurrency': options.assetConcurrency = parsePositiveInt(needValue(index, flag), flag); index += 1; break;
+      case '--concurrency':
+        options.concurrency = parsePositiveInt(needValue(index, flag), flag);
+        index += 1;
+        break;
+      case '--asset-concurrency':
+        options.assetConcurrency = parsePositiveInt(needValue(index, flag), flag);
+        index += 1;
+        break;
       // Diagnostic only: mirror structured job events to stdout as
       // `@@event {json}` lines.  The API manager uses the IPC channel.
-      case '--events-stdout': options.eventsStdout = true; break;
-      case '--status': options.statusOnly = true; break;
-      default: throw new Error(`未知参数：${flag}`);
+      case '--events-stdout':
+        options.eventsStdout = true;
+        break;
+      case '--status':
+        options.statusOnly = true;
+        break;
+      default:
+        throw new Error(`未知参数：${flag}`);
     }
   }
   if (!options.textbookId.trim()) throw new Error('--textbook-id 不能为空。');
@@ -189,7 +302,11 @@ function parseArgs(argv = []) {
   options.sourceNamespace = assertMathSource(options);
   if (options.cdpUrl) {
     let parsedCdp;
-    try { parsedCdp = new URL(options.cdpUrl); } catch { throw new Error('--cdp-url 必须是有效的 CDP URL。'); }
+    try {
+      parsedCdp = new URL(options.cdpUrl);
+    } catch {
+      throw new Error('--cdp-url 必须是有效的 CDP URL。');
+    }
     if (!['http:', 'https:', 'ws:', 'wss:'].includes(parsedCdp.protocol)) {
       throw new Error('--cdp-url 只支持 http(s)/ws(s) URL。');
     }
@@ -210,8 +327,9 @@ function parseArgs(argv = []) {
   options.catalogIds = [...new Set(options.catalogIds.map((value) => value.trim()).filter(Boolean))];
   options.catalogLevels = [...new Set(options.catalogLevels)].sort();
   const primaryProfile = path.resolve(options.profileDir);
-  options.fallbackProfileDirs = [...new Set(options.fallbackProfileDirs.map((dir) => path.resolve(dir)))]
-    .filter((dir) => dir !== primaryProfile);
+  options.fallbackProfileDirs = [...new Set(options.fallbackProfileDirs.map((dir) => path.resolve(dir)))].filter(
+    (dir) => dir !== primaryProfile,
+  );
   return options;
 }
 
@@ -219,10 +337,17 @@ async function main() {
   let options;
   try {
     options = parseArgs(process.argv.slice(2));
-    if (options.help) { console.log(usage()); return; }
+    if (options.help) {
+      console.log(usage());
+      return;
+    }
     if (options.statusOnly) {
       const store = new QuestionSyncStore(options.dbPath, { dataDir: options.dataDir });
-      try { console.log(JSON.stringify(store.status(), null, 2)); } finally { store.close(); }
+      try {
+        console.log(JSON.stringify(store.status(), null, 2));
+      } finally {
+        store.close();
+      }
       return;
     }
     await runSync(options);
@@ -247,7 +372,7 @@ function runCli() {
   // handle after its dedicated tab is closed.  This is CLI-only cleanup:
   // all run finally blocks have completed, and we deliberately do not call
   // browser.close() because that browser belongs to the operator.
-  return main().then(options => {
+  return main().then((options) => {
     // Owned browsers have been closed; let IPC/stdout drain and libuv reap
     // children naturally. Only an external CDP transport needs forced exit.
     if (process.connected) process.disconnect();

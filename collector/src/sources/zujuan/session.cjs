@@ -25,11 +25,7 @@ const {
   DEFAULT_VERIFICATION_TIMEOUT,
   SOURCE_CONTENT_SELECTOR,
 } = require('./constants.cjs');
-const {
-  classifyProtectionState,
-  isProtectionText,
-  protectionStopMessage,
-} = require('./response_classifier.cjs');
+const { classifyProtectionState, isProtectionText, protectionStopMessage } = require('./response_classifier.cjs');
 
 async function loadPlaywright() {
   try {
@@ -50,10 +46,7 @@ async function loadPlaywright() {
 function profileLooksWarm(profileDir) {
   const root = String(profileDir || '').trim();
   if (!root) return false;
-  const candidates = [
-    path.join(root, 'Default', 'Network', 'Cookies'),
-    path.join(root, 'Default', 'Cookies'),
-  ];
+  const candidates = [path.join(root, 'Default', 'Network', 'Cookies'), path.join(root, 'Default', 'Cookies')];
   return candidates.some((item) => {
     try {
       return fs.existsSync(item) && fs.statSync(item).size > 0;
@@ -107,9 +100,7 @@ function collectorPageIsBlank(page) {
 }
 
 async function minimizeCollectorWindow(context, page = null) {
-  let target = collectorPageIsOpen(page)
-    ? page
-    : context.pages().find(collectorPageIsOpen);
+  let target = collectorPageIsOpen(page) ? page : context.pages().find(collectorPageIsOpen);
   let created = false;
   let session;
   try {
@@ -244,7 +235,9 @@ function clearStaleProfileLock(profileDir, { hostname = os.hostname(), isAlive =
   const sameHost = lockHost === String(hostname);
   if (sameHost && isAlive(lockPid)) return { cleared: false, reason: 'live', lockHost, lockPid };
   for (const name of SINGLETON_FILES) {
-    try { fs.unlinkSync(path.join(root, name)); } catch {}
+    try {
+      fs.unlinkSync(path.join(root, name));
+    } catch {}
   }
   return {
     cleared: true,
@@ -254,27 +247,40 @@ function clearStaleProfileLock(profileDir, { hostname = os.hostname(), isAlive =
   };
 }
 
+/**
+ * Launch options shared by every Chrome that opens the collector profile:
+ * the crawl and the manual-recovery window. One definition keeps both on the
+ * same flags, so Chrome never sees the profile opened two different ways.
+ * `minimize: false` (manual recovery) keeps the window in front for the admin.
+ */
+function collectorLaunchOptions(options = {}) {
+  const headless = options.headless === true;
+  const minimize = !headless && options.minimize !== false;
+  const launchOptions = {
+    channel: 'chrome',
+    headless,
+    locale: 'zh-CN',
+    viewport: options.viewport || { width: 1440, height: 1000 },
+    ignoreDefaultArgs: ['--enable-automation'],
+  };
+  if (!headless) {
+    launchOptions.args = [
+      ...(minimize ? ['--start-minimized'] : []),
+      '--hide-crash-restore-bubble',
+      '--disable-session-crashed-bubble',
+      '--noerrdialogs',
+    ];
+  }
+  return launchOptions;
+}
+
 async function launchCollectorContext(playwright, options) {
   const stale = clearStaleProfileLock(options.profileDir);
   if (stale.cleared) {
     console.warn(`[环境] 清除过期的 Chrome profile 锁（${stale.reason}：${stale.lockHost}-${stale.lockPid ?? '?'}）`);
   }
   markProfileCleanExit(options.profileDir);
-  const launchOptions = {
-    channel: 'chrome',
-    headless: options.headless === true,
-    locale: 'zh-CN',
-    viewport: { width: 1440, height: 1000 },
-    ignoreDefaultArgs: ['--enable-automation'],
-  };
-  if (!options.headless) {
-    launchOptions.args = [
-      '--start-minimized',
-      '--hide-crash-restore-bubble',
-      '--disable-session-crashed-bubble',
-      '--noerrdialogs',
-    ];
-  }
+  const launchOptions = collectorLaunchOptions(options);
   const context = await playwright.chromium.launchPersistentContext(options.profileDir, launchOptions);
   try {
     diagnostics.instrumentBrowser(context);
@@ -282,7 +288,7 @@ async function launchCollectorContext(playwright, options) {
     context.setDefaultNavigationTimeout(options.timeout);
     await dismissStaleCollectorTabs(context);
     const page = await prepareCollectorPage(context);
-    if (!options.headless) {
+    if (!options.headless && options.minimize !== false) {
       await minimizeCollectorWindowWithLog(context, options, page);
     }
     return context;
@@ -294,7 +300,9 @@ async function launchCollectorContext(playwright, options) {
 
 async function closeCollectorContext(context) {
   if (!context) return;
-  try { await context.close(); } catch {}
+  try {
+    await context.close();
+  } catch {}
 }
 
 async function connectCollectorOverCDP(playwright, options) {
@@ -331,32 +339,21 @@ async function chooseCollectorPage(context, preferredPage = null) {
 }
 
 async function launchFreshCollectorSession(playwright, options) {
-  const launchOptions = {
-    channel: 'chrome',
-    headless: options.headless === true,
-    ignoreDefaultArgs: ['--enable-automation'],
-  };
-  if (options.headless !== true) {
-    launchOptions.args = [
-      '--start-minimized',
-      '--hide-crash-restore-bubble',
-      '--disable-session-crashed-bubble',
-      '--noerrdialogs',
-    ];
-  }
+  // Same flags as the persistent profile; locale and viewport belong to the
+  // context here rather than the browser launch.
+  const { locale, viewport, ...launchOptions } = collectorLaunchOptions(options);
   const browser = await playwright.chromium.launch(launchOptions);
   try {
-    const context = await browser.newContext({
-      locale: 'zh-CN',
-      viewport: { width: 1440, height: 1000 },
-    });
+    const context = await browser.newContext({ locale, viewport });
     diagnostics.instrumentBrowser(context);
     context.setDefaultTimeout(options.timeout);
     context.setDefaultNavigationTimeout(options.timeout);
     const page = await context.newPage();
     return { browser, context, page };
   } catch (error) {
-    try { await browser.close(); } catch {}
+    try {
+      await browser.close();
+    } catch {}
     throw error;
   }
 }
@@ -405,10 +402,7 @@ async function settleSourcePage(page, options, extras = {}) {
   if (lastState.terminalBlock || lastState.transientChallenge || lastState.hasChallengeInputs) {
     throw new StopCrawlError(protectionStopMessage(lastState), 'challenge');
   }
-  throw new StopCrawlError(
-    `${label} 未出现来源内容（${lastState.title || '无标题'}），可能仍在防护页。`,
-    'challenge',
-  );
+  throw new StopCrawlError(`${label} 未出现来源内容（${lastState.title || '无标题'}），可能仍在防护页。`, 'challenge');
 }
 
 async function detectBlockedPage(page) {
@@ -448,9 +442,14 @@ async function safeGoto(page, url, gate, options, label) {
         throw new StopCrawlError(`HTTP ${status}，任务已熔断。`, `http_${status}`);
       }
       if (retryableStatuses.has(status)) {
-        const retryMs = retryAfterMsFromResponse(response) ?? 1000 * (2 ** attempt) + randomBetween(0, 1000);
+        const retryMs = retryAfterMsFromResponse(response) ?? 1000 * 2 ** attempt + randomBetween(0, 1000);
         if (attempt === 3) throw new StopCrawlError(`HTTP ${status}，重试耗尽。`, `http_${status}`);
-        diagnostics.write('request_retry_scheduled',{url:diagnostics.safeUrl(target),attempt,delayMs:retryMs,status});
+        diagnostics.write('request_retry_scheduled', {
+          url: diagnostics.safeUrl(target),
+          attempt,
+          delayMs: retryMs,
+          status,
+        });
         console.warn(`[重试] ${label} 返回 HTTP ${status}，等待 ${(retryMs / 1000).toFixed(1)} 秒`);
         await sleep(retryMs);
         continue;
@@ -463,8 +462,13 @@ async function safeGoto(page, url, gate, options, label) {
       if (error instanceof StopCrawlError) throw error;
       lastError = error;
       if (attempt === 3) break;
-      const backoff = 1000 * (2 ** attempt) + randomBetween(0, 1000);
-      diagnostics.write('request_retry_scheduled',{url:diagnostics.safeUrl(target),attempt,delayMs:backoff,message:error.message});
+      const backoff = 1000 * 2 ** attempt + randomBetween(0, 1000);
+      diagnostics.write('request_retry_scheduled', {
+        url: diagnostics.safeUrl(target),
+        attempt,
+        delayMs: backoff,
+        message: error.message,
+      });
       console.warn(`[重试] ${label} 失败：${error.message}；等待 ${(backoff / 1000).toFixed(1)} 秒`);
       await sleep(backoff);
     }
@@ -482,14 +486,24 @@ async function inspectRobots(context, options) {
       timeout: Math.min(options.timeout, 10000),
       failOnStatusCode: false,
     });
-    try { options.sourceControl?.observe(response.status(), response.headers(), { verification: false }); }
-    catch (error) { try { await response.dispose?.(); } catch {} throw error; }
+    try {
+      options.sourceControl?.observe(response.status(), response.headers(), { verification: false });
+    } catch (error) {
+      try {
+        await response.dispose?.();
+      } catch {}
+      throw error;
+    }
     if ([401, 403].includes(response.status())) {
-      try { await response.dispose?.(); } catch {}
+      try {
+        await response.dispose?.();
+      } catch {}
       return { status: 'unavailable', reason: `HTTP ${response.status()}` };
     }
     const text = await response.text();
-    try { await response.dispose?.(); } catch {}
+    try {
+      await response.dispose?.();
+    } catch {}
     if (!/^\s*user-agent\s*:/im.test(text)) {
       return { status: 'unknown', reason: '返回内容不是可解析的 robots.txt（可能是 JS 防护页）' };
     }
@@ -524,25 +538,31 @@ async function bringVerificationPageToFront(page) {
 
 async function waitForVerificationInner(page, options = {}) {
   const timeoutValue = Number(options.verificationTimeout ?? DEFAULT_VERIFICATION_TIMEOUT);
-  const timeout = Number.isFinite(timeoutValue) && timeoutValue >= 0
-    ? timeoutValue : DEFAULT_VERIFICATION_TIMEOUT;
+  const timeout = Number.isFinite(timeoutValue) && timeoutValue >= 0 ? timeoutValue : DEFAULT_VERIFICATION_TIMEOUT;
   const pollValue = Number(options.verificationPoll ?? DEFAULT_VERIFICATION_POLL);
   const poll = Math.max(100, Number.isFinite(pollValue) ? pollValue : DEFAULT_VERIFICATION_POLL);
   const requiresProbe = options.requireProbe === true;
   options.sourceControl?.assertAllowed();
   const probeValue = Number(options.verificationProbeInterval ?? DEFAULT_VERIFICATION_PROBE_INTERVAL);
-  const probeInterval = Math.max(100, Number.isFinite(probeValue)
-    ? probeValue : DEFAULT_VERIFICATION_PROBE_INTERVAL);
+  const probeInterval = Math.max(100, Number.isFinite(probeValue) ? probeValue : DEFAULT_VERIFICATION_PROBE_INTERVAL);
   const wait = options.sleepFn || sleep;
   const startedAt = Date.now();
   // Structured hook for the job manager: a human-verification wait is
   // legitimate inactivity, so the caller can keep its stall detector alive.
-  let waitLogged=false;
+  let waitLogged = false;
   const notifyWait = (state) => {
-    if(!waitLogged){waitLogged=true;diagnostics.write('verification_wait_enter',{episodeId:options.diagnosticEpisodeId,reason:options.verificationReason || 'verification'});}
+    if (!waitLogged) {
+      waitLogged = true;
+      diagnostics.write('verification_wait_enter', {
+        episodeId: options.diagnosticEpisodeId,
+        reason: options.verificationReason || 'verification',
+      });
+    }
     if (typeof options.onVerificationWait !== 'function') return;
     let url = '';
-    try { url = state?.url || (typeof page?.url === 'function' ? String(page.url()) : ''); } catch {}
+    try {
+      url = state?.url || (typeof page?.url === 'function' ? String(page.url()) : '');
+    } catch {}
     try {
       options.onVerificationWait({
         reason: options.verificationReason || 'verification',
@@ -554,19 +574,19 @@ async function waitForVerificationInner(page, options = {}) {
   if (requiresProbe) {
     await bringVerificationPageToFront(page);
     let currentUrl = '';
-    try { currentUrl = typeof page?.url === 'function' ? String(page.url()) : ''; } catch {}
+    try {
+      currentUrl = typeof page?.url === 'function' ? String(page.url()) : '';
+    } catch {}
     console.warn(
       `[验证] 题目 API 返回 ${options.verificationReason || '验证/防护'}，请在当前 Chrome 窗口人工恢复${currentUrl ? `（${currentUrl}）` : ''}；不会自动绕过滑块。`,
     );
     notifyWait({ url: currentUrl });
   }
   const configuredInitialWait = Number(options.verificationInitialWait ?? poll);
-  const initialWait = timeout === 0 ? 0 : Math.max(
-    0,
-    requiresProbe
-      ? Math.max(configuredInitialWait, probeInterval)
-      : configuredInitialWait,
-  );
+  const initialWait =
+    timeout === 0
+      ? 0
+      : Math.max(0, requiresProbe ? Math.max(configuredInitialWait, probeInterval) : configuredInitialWait);
   if (initialWait > 0) {
     const remaining = Math.max(0, timeout - (Date.now() - startedAt));
     await wait(Math.min(initialWait, remaining));
@@ -582,9 +602,14 @@ async function waitForVerificationInner(page, options = {}) {
           const combined = `${title}\n${text}`;
           const hasContent = Boolean(document.querySelector(contentSelector));
           return {
-            challenge: Boolean(document.querySelector(
-              '#parm_0, #parm_1, [class*="slider"], [class*="captcha"], [data-captcha="true"]',
-            )) || (!hasContent && /验证码|滑块|安全验证|请按住滑块|拖动滑块|challenge|captcha|access denied/i.test(combined)),
+            challenge:
+              Boolean(
+                document.querySelector(
+                  '#parm_0, #parm_1, [class*="slider"], [class*="captcha"], [data-captcha="true"]',
+                ),
+              ) ||
+              (!hasContent &&
+                /验证码|滑块|安全验证|请按住滑块|拖动滑块|challenge|captcha|access denied/i.test(combined)),
             hasContent,
             title,
             text: text.slice(0, 1000),
@@ -595,8 +620,9 @@ async function waitForVerificationInner(page, options = {}) {
         state = { challenge: true, text: error.message, title: '' };
       }
     }
-    const challenge = Boolean(state?.challenge)
-      || (!state?.hasContent && isProtectionText(`${state?.title || ''} ${state?.text || ''}`));
+    const challenge =
+      Boolean(state?.challenge) ||
+      (!state?.hasContent && isProtectionText(`${state?.title || ''} ${state?.text || ''}`));
     if (!challenge) {
       if (requiresProbe) {
         console.warn('[验证] 当前页未显示挑战控件；将以间隔 API probe，恢复后继续同一目录/页。');
@@ -617,21 +643,31 @@ async function waitForVerificationInner(page, options = {}) {
 }
 
 async function waitForVerification(page, options = {}) {
-  const started=performance.now();
-  const episodeId=require('node:crypto').randomUUID();
-  const detail={episodeId,reason:options.verificationReason || 'verification',requiresProbe:options.requireProbe===true};
-  diagnostics.write('verification_check_started',detail);
+  const started = performance.now();
+  const episodeId = require('node:crypto').randomUUID();
+  const detail = {
+    episodeId,
+    reason: options.verificationReason || 'verification',
+    requiresProbe: options.requireProbe === true,
+  };
+  diagnostics.write('verification_check_started', detail);
   try {
-    const result=await waitForVerificationInner(page,{...options,diagnosticEpisodeId:episodeId});
-    diagnostics.write('verification_page_clear',{...detail,elapsedMs:Math.round(performance.now()-started)});
+    const result = await waitForVerificationInner(page, { ...options, diagnosticEpisodeId: episodeId });
+    diagnostics.write('verification_page_clear', { ...detail, elapsedMs: Math.round(performance.now() - started) });
     return result;
-  } catch(error) {
-    diagnostics.write('verification_wait_failed',{...detail,elapsedMs:Math.round(performance.now()-started),code:error.code,message:error.message});
+  } catch (error) {
+    diagnostics.write('verification_wait_failed', {
+      ...detail,
+      elapsedMs: Math.round(performance.now() - started),
+      code: error.code,
+      message: error.message,
+    });
     throw error;
   }
 }
 
 module.exports = {
+  collectorLaunchOptions,
   applyInitialChromeMode,
   bringVerificationPageToFront,
   canFallbackToHeaded,

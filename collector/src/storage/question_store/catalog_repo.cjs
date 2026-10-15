@@ -15,7 +15,9 @@ class CatalogRepoMethods {
   _insertCatalogNode(node, observedAt) {
     const externalId = normalizeId(node.externalId);
     if (!externalId || !node.name) return;
-    this.db.prepare(`
+    this.db
+      .prepare(
+        `
       INSERT INTO textbook_nodes (
         provider, external_id, textbook_external_id, parent_external_id,
         node_level, node_type, name, source_path,
@@ -36,24 +38,26 @@ class CatalogRepoMethods {
         is_knowledge = excluded.is_knowledge,
         sort_order = excluded.sort_order,
         catalog_path = excluded.catalog_path
-    `).run(
-      PROVIDER,
-      externalId,
-      sqliteValue(node.textbookExternalId),
-      sqliteValue(node.parentExternalId),
-      sqliteValue(node.level),
-      sqliteValue(node.type || node.nodeType),
-      String(node.name),
-      sqliteValue(node.sourcePath),
-      observedAt,
-      observedAt,
-      jsonStringify(node.raw || node),
-      sqliteValue(node.categoryId),
-      sqliteValue(node.catelogTokpointId),
-      node.isKnowledge ? 1 : 0,
-      sqliteValue(node.sortOrder),
-      sqliteValue(node.path || node.name),
-    );
+    `,
+      )
+      .run(
+        PROVIDER,
+        externalId,
+        sqliteValue(node.textbookExternalId),
+        sqliteValue(node.parentExternalId),
+        sqliteValue(node.level),
+        sqliteValue(node.type || node.nodeType),
+        String(node.name),
+        sqliteValue(node.sourcePath),
+        observedAt,
+        observedAt,
+        jsonStringify(node.raw || node),
+        sqliteValue(node.categoryId),
+        sqliteValue(node.catelogTokpointId),
+        node.isKnowledge ? 1 : 0,
+        sqliteValue(node.sortOrder),
+        sqliteValue(node.path || node.name),
+      );
   }
 
   saveCatalogTree(runId, textbookId, nodes, observedAt = nowIso()) {
@@ -63,7 +67,9 @@ class CatalogRepoMethods {
         const externalId = normalizeId(node.externalId);
         if (!externalId || !node.name) continue;
         this._insertCatalogNode(node, observedAt);
-        this.db.prepare(`
+        this.db
+          .prepare(
+            `
           INSERT INTO sync_run_catalog_items (
             run_id, provider, textbook_external_id, catalog_external_id,
             parent_external_id, node_level, node_type, name, source_path,
@@ -84,24 +90,35 @@ class CatalogRepoMethods {
             catelog_tokpoint_id = excluded.catelog_tokpoint_id,
             is_knowledge = excluded.is_knowledge,
             captured_at = excluded.captured_at
-        `).run(
-          Number(runId), PROVIDER, String(textbookId), externalId,
-          sqliteValue(node.parentExternalId), sqliteValue(node.level),
-          sqliteValue(node.type || node.nodeType), String(node.name),
-          sqliteValue(node.sourcePath), sqliteValue(node.path || node.name),
-          sqliteValue(node.sortOrder), observedAt, jsonStringify(node.raw || node),
-          sqliteValue(node.categoryId), sqliteValue(node.catelogTokpointId),
-          node.isKnowledge ? 1 : 0,
-        );
+        `,
+          )
+          .run(
+            Number(runId),
+            PROVIDER,
+            String(textbookId),
+            externalId,
+            sqliteValue(node.parentExternalId),
+            sqliteValue(node.level),
+            sqliteValue(node.type || node.nodeType),
+            String(node.name),
+            sqliteValue(node.sourcePath),
+            sqliteValue(node.path || node.name),
+            sqliteValue(node.sortOrder),
+            observedAt,
+            jsonStringify(node.raw || node),
+            sqliteValue(node.categoryId),
+            sqliteValue(node.catelogTokpointId),
+            node.isKnowledge ? 1 : 0,
+          );
       }
       this.db.exec('COMMIT;');
     } catch (error) {
-      try { this.db.exec('ROLLBACK;'); } catch {}
+      try {
+        this.db.exec('ROLLBACK;');
+      } catch {}
       throw error;
     }
   }
-
-
 }
 
 module.exports = { CatalogRepoMethods };

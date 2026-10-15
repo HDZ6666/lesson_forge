@@ -93,7 +93,8 @@
         <span>开始时间：{{ formatTaskTime(summaryStartedAt) }}</span>
         <span>结束时间：{{ summaryFinishedAt }}</span>
       </div>
-      <el-alert v-if="task.errorMessage" class="inner-alert" type="error" :closable="false" show-icon>{{ task.errorMessage }}</el-alert>
+      <el-alert v-if="task.stopCause" class="inner-alert" :type="['user_pause','user_end','user_cancel','service_restart'].includes(task.stopCause.cause) ? 'info' : 'warning'" :closable="false" show-icon :title="`停止原因：${task.stopCause.label}`"><span v-if="task.stopCause.operator">操作人 {{ task.stopCause.operator }}；</span>已保存的成果和断点保留<span v-if="task.stopCause.signal">（进程信号 {{ task.stopCause.signal }}）</span>。</el-alert>
+      <el-alert v-else-if="task.errorMessage" class="inner-alert" type="error" :closable="false" show-icon>{{ task.errorMessage }}</el-alert>
       <details class="log-panel sync-disclosure">
         <summary>运行日志 · 自动刷新最后 100 条</summary>
         <pre v-if="task.logs.length" tabindex="0" aria-label="运行日志">{{ task.logs.join('\n') }}</pre>
@@ -302,6 +303,7 @@ import {
   emptySnapshotHint,
   isActiveIncrementalImport,
   isActiveImportIntake,
+  stopReasonLabel,
 } from '../../utils/sync-task'
 
 const QuestionSnapshot = defineComponent({
@@ -442,7 +444,7 @@ const summaryProgressBasis = computed(() => {
   }
   if (live.estimateComplete === false && !live.scanComplete) parts.push('部分层级尚无估算依据，总页数会随采集调整')
   if (live.scanComplete) parts.push(live.dataComplete === false ? '扫描已完成，存在异常页或素材问题' : '扫描已完成')
-  if (live.pageLimitReached || task.value?.pageLimitReached) parts.push('已达到每目录 1000 页策略上限（不代表网站全量）')
+  if (live.pageLimitReached || task.value?.pageLimitReached) parts.push(`已达到每目录 ${task.value?.catalogPageLimit ?? 1000} 页策略上限（不代表网站全量）`)
   return parts.join(' · ')
 })
 const summaryTotalQuestionText = computed(() => {
@@ -579,7 +581,8 @@ function liveNodeCountText(node) {
     ? (node?.dataComplete === false || node?.completionQuality === 'completed_with_issues' ? ' · 数据不完整' : '')
     : ''
   const countPart = expected == null ? `${unique} / 统计中` : `${unique} / ${formatLiveCount(expected)}`
-  return `${countPart}${pagePart}${issuePart}${integrity}`
+  const stop = node?.stopReason && node?.scanComplete ? ` · ${stopReasonLabel(node.stopReason)}` : ''
+  return `${countPart}${pagePart}${issuePart}${integrity}${stop}`
 }
 
 function summaryProgressFormat() { return summaryProgressLabel.value }

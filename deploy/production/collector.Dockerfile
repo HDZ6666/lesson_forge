@@ -3,7 +3,10 @@ FROM node:22-bookworm-slim
 ARG SOURCE_REVISION=uncommitted
 LABEL org.opencontainers.image.revision=$SOURCE_REVISION
 
+# node:sqlite prints an ExperimentalWarning on every process start (API and
+# each crawl child); the collector depends on it deliberately.
 ENV NODE_ENV=production \
+    NODE_OPTIONS=--disable-warning=ExperimentalWarning \
     PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 \
     DISPLAY=:99
 

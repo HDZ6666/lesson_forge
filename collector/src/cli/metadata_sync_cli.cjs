@@ -175,7 +175,11 @@ async function main() {
     }
     if (options.statusOnly) {
       const store = new MetadataStore(options.dbPath);
-      try { printStatus(store, options); } finally { store.close(); }
+      try {
+        printStatus(store, options);
+      } finally {
+        store.close();
+      }
       return;
     }
     await runDiscovery(options);

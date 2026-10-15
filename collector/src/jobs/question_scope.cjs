@@ -5,29 +5,24 @@
  * scope is what the run snapshot is keyed by and what a resume must match.
  */
 
-const {
-  PROVIDER,
-} = require('../sources/zujuan/constants.cjs');
+const { PROVIDER } = require('../sources/zujuan/constants.cjs');
 const { assertMathSource } = require('../sources/registry.cjs');
 
 function buildScope(options, catalogCount = 0, selectedCount = 0, summaryInfo = {}) {
-  const effectiveCatalogLevels = options.catalogLevels.length > 0
-    ? options.catalogLevels
-    : [1, 2, 3];
+  const effectiveCatalogLevels = options.catalogLevels.length > 0 ? options.catalogLevels : [1, 2, 3];
   const explicitlySelectedCatalogs = options.catalogIds.length > 0 || options.catalogLevels.length > 0;
   // Keep the old array form readable for existing callers, but new runs use
   // the single textbook-root total probe instead of a chapter-total sum.
   const summaryCatalogs = Array.isArray(summaryInfo) ? summaryInfo : [];
-  const textbookExpectedTotalRaw = Array.isArray(summaryInfo)
-    ? null : summaryInfo?.textbookExpectedTotal;
-  const textbookExpectedTotalNumber = textbookExpectedTotalRaw == null || textbookExpectedTotalRaw === ''
-    ? NaN : Number(textbookExpectedTotalRaw);
-  const textbookExpectedTotal = Number.isSafeInteger(textbookExpectedTotalNumber)
-    && textbookExpectedTotalNumber >= 0
-    ? textbookExpectedTotalNumber
-    : null;
+  const textbookExpectedTotalRaw = Array.isArray(summaryInfo) ? null : summaryInfo?.textbookExpectedTotal;
+  const textbookExpectedTotalNumber =
+    textbookExpectedTotalRaw == null || textbookExpectedTotalRaw === '' ? NaN : Number(textbookExpectedTotalRaw);
+  const textbookExpectedTotal =
+    Number.isSafeInteger(textbookExpectedTotalNumber) && textbookExpectedTotalNumber >= 0
+      ? textbookExpectedTotalNumber
+      : null;
   const summaryStrategy = String(
-    Array.isArray(summaryInfo) ? 'textbook_root_probe' : (summaryInfo?.summaryStrategy || 'textbook_root_probe'),
+    Array.isArray(summaryInfo) ? 'textbook_root_probe' : summaryInfo?.summaryStrategy || 'textbook_root_probe',
   );
   const summaryCatalogIds = Array.isArray(summaryCatalogs)
     ? summaryCatalogs.map((catalog) => String(catalog?.externalId || '')).filter(Boolean)
@@ -58,25 +53,28 @@ function buildScope(options, catalogCount = 0, selectedCount = 0, summaryInfo = 
     },
     availableCatalogCount: catalogCount,
     selectedCatalogCount: selectedCount,
-    scanCatalogIds: !Array.isArray(summaryInfo) && Array.isArray(summaryInfo?.scanCatalogIds)
-      ? summaryInfo.scanCatalogIds.map(String) : [],
+    scanCatalogIds:
+      !Array.isArray(summaryInfo) && Array.isArray(summaryInfo?.scanCatalogIds)
+        ? summaryInfo.scanCatalogIds.map(String)
+        : [],
     // This is the provider's textbook-root total.  It is intentionally kept
     // separate from each catalog progress row, whose counts are page
     // occurrences and whose expected_total is only that node's total.
     textbookExpectedTotal,
-    textbookExpectedTotalObservedAt: !Array.isArray(summaryInfo)
-      && typeof summaryInfo?.textbookExpectedTotalObservedAt === 'string'
-      ? summaryInfo.textbookExpectedTotalObservedAt : null,
+    textbookExpectedTotalObservedAt:
+      !Array.isArray(summaryInfo) && typeof summaryInfo?.textbookExpectedTotalObservedAt === 'string'
+        ? summaryInfo.textbookExpectedTotalObservedAt
+        : null,
     summaryStrategy,
     summaryCatalogIds,
     summaryCatalogLevel: summaryLevels.length > 0 ? Math.min(...summaryLevels) : null,
-    catalogSelectionTruncated: !explicitlySelectedCatalogs
-      && Number(options.maxCatalogs || 0) > 0
-      && selectedCount < catalogCount,
+    catalogSelectionTruncated:
+      !explicitlySelectedCatalogs && Number(options.maxCatalogs || 0) > 0 && selectedCount < catalogCount,
     startPage: options.startPage,
     maxPages: options.maxPages,
     maxPagesProvided: options.maxPagesProvided,
     limitTo1000Pages: options.limitTo1000Pages === true,
+    catalogPageLimit: options.catalogPageLimit ?? null,
     limit: options.limit,
     downloadAssets: options.downloadAssets,
     contentSource: 'list_api',

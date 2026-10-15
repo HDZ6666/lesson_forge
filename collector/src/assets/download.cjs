@@ -21,15 +21,13 @@ const {
 } = require('../sources/zujuan/constants.cjs');
 const { normalizeHeaders, responseHeaders, responseStatus } = require('../sources/zujuan/request.cjs');
 const { normalizeAssetType } = require('../sources/zujuan/question_parser.cjs');
-const { assetKey: canonicalAssetKey } = require('../../lib/qbpkg/normalize.cjs');
+const { assetKey: canonicalAssetKey } = require('../qbpkg/normalize.cjs');
 const { retryDelay } = require('../policies/retry.cjs');
 const { openAssetResponse } = require('./request.cjs');
+const { closedContextError, isClosedContextError } = require('../sources/zujuan/response_classifier.cjs');
 
-const assertAllowedUrl = (value, hosts) => assertAllowedUrlShared(
-  value,
-  hosts,
-  (message, code, cause) => new QuestionSyncError(message, code, cause),
-);
+const assertAllowedUrl = (value, hosts) =>
+  assertAllowedUrlShared(value, hosts, (message, code, cause) => new QuestionSyncError(message, code, cause));
 
 async function disposeResponse(response) {
   if (!response || typeof response.dispose !== 'function') return;
@@ -41,7 +39,10 @@ async function disposeResponse(response) {
 }
 
 function extensionForAsset(url, mimeType) {
-  const mime = String(mimeType || '').split(';')[0].trim().toLowerCase();
+  const mime = String(mimeType || '')
+    .split(';')[0]
+    .trim()
+    .toLowerCase();
   const byMime = {
     'image/svg+xml': '.svg',
     'image/png': '.png',
@@ -58,15 +59,18 @@ function extensionForAsset(url, mimeType) {
   }
 }
 
-const KNOWN_ASSET_EXTENSIONS = new Set([
-  '.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.bmp', '.avif', '.jxl',
-]);
+const KNOWN_ASSET_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.bmp', '.avif', '.jxl']);
 
 function isSupportedAssetResponse(url, mimeType) {
-  const mime = String(mimeType || '').split(';')[0].trim().toLowerCase();
+  const mime = String(mimeType || '')
+    .split(';')[0]
+    .trim()
+    .toLowerCase();
   if (mime.startsWith('image/')) return true;
   let extension = '';
-  try { extension = path.extname(new URL(url).pathname).toLowerCase(); } catch {}
+  try {
+    extension = path.extname(new URL(url).pathname).toLowerCase();
+  } catch {}
   // A few CDN edges omit Content-Type or return octet-stream.  Only accept
   // those responses when the URL itself identifies a known image format;
   // this still rejects challenge HTML, JSON, and empty/unknown responses.
@@ -116,16 +120,16 @@ async function downloadAsset(context, options, asset) {
   const downloadOne = async (requestUrl) => {
     let lastHeaders = {};
     for (let retryIndex = 0; retryIndex <= MAX_RETRIES; retryIndex += 1) {
-      const started=performance.now();
-      const requestId=require('node:crypto').randomUUID();
-      const detail={requestId,attempt:retryIndex+1,url:diagnostics.safeUrl(requestUrl)};
-      diagnostics.write('asset_attempt_started',detail);
+      const started = performance.now();
+      const requestId = require('node:crypto').randomUUID();
+      const detail = { requestId, attempt: retryIndex + 1, url: diagnostics.safeUrl(requestUrl) };
+      diagnostics.write('asset_attempt_started', detail);
       let response = null;
       try {
         response = await openAssetResponse(context, requestUrl, options);
         const status = responseStatus(response);
         const headers = responseHeaders(response);
-        detail.status=status;
+        detail.status = status;
         options.sourceControl?.observe(status, headers, { verification: false });
         lastHeaders = headers;
         if (status < 200 || status >= 300) {
@@ -160,20 +164,39 @@ async function downloadAsset(context, options, asset) {
         if (body.length > MAX_ASSET_BYTES) {
           throw new QuestionSyncError(`素材超过 10MB：${requestUrl}`, 'asset_too_large');
         }
-        diagnostics.write('asset_attempt_finished',{...detail,elapsedMs:Math.round(performance.now()-started),bytes:body.length,outcome:'success'});
+        diagnostics.write('asset_attempt_finished', {
+          ...detail,
+          elapsedMs: Math.round(performance.now() - started),
+          bytes: body.length,
+          outcome: 'success',
+        });
         return { body, mimeType, requestUrl };
       } catch (error) {
-        diagnostics.write('asset_attempt_finished',{...detail,elapsedMs:Math.round(performance.now()-started),outcome:'error',code:error.code,message:error.message});
+        diagnostics.write('asset_attempt_finished', {
+          ...detail,
+          elapsedMs: Math.round(performance.now() - started),
+          outcome: 'error',
+          code: error.code,
+          message: error.message,
+        });
         await disposeResponse(response);
         response = null;
         if (error.blocked) throw error;
-        const retryable = !['host_not_allowed', 'asset_redirect', 'asset_too_large', 'asset_storage_error', 'asset_http_404'].includes(
-          String(error?.code || ''),
-        );
+        // A closed context cannot serve any later request: no retries.
+        if (isClosedContextError(error)) throw closedContextError(error);
+        const retryable = ![
+          'host_not_allowed',
+          'asset_redirect',
+          'asset_too_large',
+          'asset_storage_error',
+          'asset_http_404',
+        ].includes(String(error?.code || ''));
         if (!retryable || retryIndex >= MAX_RETRIES) throw error;
         const delay = retryDelay('normal', retryIndex, lastHeaders, options.randomFn || Math.random);
-        diagnostics.write('request_retry_scheduled',{...detail,delayMs:delay,reason:error.code});
-        console.warn(`[素材重试] ${requestUrl} 第 ${retryIndex + 1}/${MAX_RETRIES} 次，等待 ${(delay / 1000).toFixed(1)} 秒：${error.message}`);
+        diagnostics.write('request_retry_scheduled', { ...detail, delayMs: delay, reason: error.code });
+        console.warn(
+          `[素材重试] ${requestUrl} 第 ${retryIndex + 1}/${MAX_RETRIES} 次，等待 ${(delay / 1000).toFixed(1)} 秒：${error.message}`,
+        );
         await wait(delay);
       }
     }
@@ -213,7 +236,9 @@ async function downloadAsset(context, options, asset) {
           try {
             options.sourceControl?.observe(responseStatus(probe), responseHeaders(probe), { verification: false });
             probeBody = typeof probe?.body === 'function' ? await probe.body() : null;
-          } finally { await disposeResponse(probe); }
+          } finally {
+            await disposeResponse(probe);
+          }
           if (isEmptySvgPlaceholder(probeBody)) {
             return {
               ...asset,
@@ -225,7 +250,9 @@ async function downloadAsset(context, options, asset) {
               fallbackSourceUrl: fallbackUrl,
             };
           }
-        } catch (error) { if (error.blocked) throw error; }
+        } catch (error) {
+          if (error.blocked) throw error;
+        }
       }
       throw fallbackError;
     }
@@ -267,13 +294,10 @@ async function downloadAsset(context, options, asset) {
  * `{ downloadFailed: true, errorCode, errorMessage }` exactly like the serial
  * path used to; a storage error (disk) is fatal and propagates unchanged.
  */
-async function prefetchAssets(assets, {
-  concurrency = DEFAULT_ASSET_CONCURRENCY,
-  cache,
-  download,
-  onSuccess = null,
-  onFailure = null,
-} = {}) {
+async function prefetchAssets(
+  assets,
+  { concurrency = DEFAULT_ASSET_CONCURRENCY, cache, download, onSuccess = null, onFailure = null } = {},
+) {
   if (!(cache instanceof Map)) throw new TypeError('prefetchAssets 需要 Map 类型的 cache');
   if (typeof download !== 'function') throw new TypeError('prefetchAssets 需要 download 函数');
   const pending = new Map();
@@ -300,7 +324,7 @@ async function prefetchAssets(assets, {
         if (result?.contentSha256) downloaded += 1;
         if (onSuccess) onSuccess(result, asset);
       } catch (error) {
-        if (error.blocked || String(error?.code || '') === 'asset_storage_error') {
+        if (error.blocked || error.contextClosed || String(error?.code || '') === 'asset_storage_error') {
           fatal = fatal || error;
           break;
         }

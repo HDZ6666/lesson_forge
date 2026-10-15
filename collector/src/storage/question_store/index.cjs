@@ -18,6 +18,7 @@ const { CatalogRepoMethods } = require('./catalog_repo.cjs');
 const { PageRepoMethods } = require('./page_repo.cjs');
 const { ProgressProjectionMethods } = require('./progress_projection.cjs');
 const { ErrorLogMethods } = require('./error_log.cjs');
+const { BaselineMethods, ensureBaselineSchema } = require('./baseline_repo.cjs');
 const { assertMathSource } = require('../../sources/registry.cjs');
 
 class QuestionSyncStore {
@@ -27,6 +28,7 @@ class QuestionSyncStore {
     this.db = new DatabaseSync(path.resolve(dbPath));
     this.db.exec('PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;');
     ensureCollectorSchema(this.db);
+    ensureBaselineSchema(this.db);
     this.lastBeginMeta = null;
   }
 
@@ -56,36 +58,54 @@ class QuestionSyncStore {
   }
 
   _latestRun(scope, statuses) {
-    const rows = this.db.prepare(`
+    const rows = this.db
+      .prepare(
+        `
       SELECT * FROM sync_runs WHERE provider = ?
         AND CAST(json_extract(scope_json, '$.textbookId') AS TEXT) = ?
         AND NOT EXISTS (SELECT 1 FROM sync_result_cleanup WHERE run_id=sync_runs.id)
       ORDER BY id DESC LIMIT 50
-    `).all(PROVIDER, String(scope.textbookId ?? ''));
+    `,
+      )
+      .all(PROVIDER, String(scope.textbookId ?? ''));
     const identity = this._scopeIdentity(scope);
-    return rows.find((row) => {
-      if (!statuses.includes(String(row.status || ''))) return false;
-      try { return this._scopeIdentity(JSON.parse(row.scope_json || '{}')) === identity; } catch { return false; }
-    }) || null;
+    return (
+      rows.find((row) => {
+        if (!statuses.includes(String(row.status || ''))) return false;
+        try {
+          return this._scopeIdentity(JSON.parse(row.scope_json || '{}')) === identity;
+        } catch {
+          return false;
+        }
+      }) || null
+    );
   }
 
   _copyTableRows(table, sourceRunId, targetRunId) {
-    const columns = this.db.prepare(`PRAGMA table_info(${quoteIdentifier(table)})`).all().map((row) => String(row.name));
+    const columns = this.db
+      .prepare(`PRAGMA table_info(${quoteIdentifier(table)})`)
+      .all()
+      .map((row) => String(row.name));
     if (!columns.includes('run_id')) return 0;
     const copyColumns = columns.filter((column) => column !== 'run_id');
     const insertColumns = ['run_id', ...copyColumns].map(quoteIdentifier).join(', ');
     const selectColumns = ['?', ...copyColumns.map(quoteIdentifier)].join(', ');
-    const result = this.db.prepare(`
+    const result = this.db
+      .prepare(
+        `
       INSERT OR IGNORE INTO ${quoteIdentifier(table)} (${insertColumns})
       SELECT ${selectColumns} FROM ${quoteIdentifier(table)} WHERE run_id = ?
-    `).run(Number(targetRunId), Number(sourceRunId));
+    `,
+      )
+      .run(Number(targetRunId), Number(sourceRunId));
     return Number(result?.changes || 0);
   }
 
-
   status() {
     return {
-      counts: this.db.prepare(`
+      counts: this.db
+        .prepare(
+          `
         SELECT
           (SELECT COUNT(*) FROM questions) AS questions,
           (SELECT COUNT(*) FROM textbook_nodes) AS nodes,
@@ -93,25 +113,24 @@ class QuestionSyncStore {
           (SELECT COUNT(*) FROM question_knowledge) AS knowledge_links,
           (SELECT COUNT(*) FROM question_facets) AS facets,
           (SELECT COUNT(*) FROM question_assets) AS assets
-      `).get(),
+      `,
+        )
+        .get(),
       recentRuns: this.db.prepare('SELECT * FROM sync_runs ORDER BY id DESC LIMIT 20').all(),
     };
   }
 
   close() {
-    try { this.db.close(); } catch {}
+    try {
+      this.db.close();
+    } catch {}
   }
-
 }
 
 function mixin(Target, Source) {
   for (const name of Object.getOwnPropertyNames(Source.prototype)) {
     if (name === 'constructor') continue;
-    Object.defineProperty(
-      Target.prototype,
-      name,
-      Object.getOwnPropertyDescriptor(Source.prototype, name),
-    );
+    Object.defineProperty(Target.prototype, name, Object.getOwnPropertyDescriptor(Source.prototype, name));
   }
 }
 
@@ -120,5 +139,6 @@ mixin(QuestionSyncStore, CatalogRepoMethods);
 mixin(QuestionSyncStore, PageRepoMethods);
 mixin(QuestionSyncStore, ProgressProjectionMethods);
 mixin(QuestionSyncStore, ErrorLogMethods);
+mixin(QuestionSyncStore, BaselineMethods);
 
 module.exports = { QuestionSyncStore };

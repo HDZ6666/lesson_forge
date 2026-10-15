@@ -11,7 +11,7 @@
 const path = require('node:path');
 const { DatabaseSync } = require('node:sqlite');
 
-const { RUN_CHECKPOINT_TABLE, SNAPSHOT_TABLES } = require('../../lib/run_snapshots.cjs');
+const { RUN_CHECKPOINT_TABLE, SNAPSHOT_TABLES } = require('./run_snapshots.cjs');
 const { QuestionSyncError } = require('../shared/errors.cjs');
 const { nowIso, sha256 } = require('../shared/utils.cjs');
 const { PROVIDER } = require('../sources/zujuan/constants.cjs');
@@ -111,9 +111,9 @@ function parseScopeObject(value) {
 
 function canonicalScopeArray(value) {
   const values = Array.isArray(value) ? value : [];
-  return [...new Set(values
-    .filter((item) => item != null && String(item).trim() !== '')
-    .map((item) => String(item).trim()))].sort();
+  return [
+    ...new Set(values.filter((item) => item != null && String(item).trim() !== '').map((item) => String(item).trim())),
+  ].sort();
 }
 
 function canonicalScopeBoolean(value, fallback = false) {
@@ -144,20 +144,19 @@ function canonicalScopeFacet(value, fallback = null) {
  */
 function normalizeResumeScope(scope) {
   const raw = parseScopeObject(scope);
-  const filters = raw.filters && typeof raw.filters === 'object' && !Array.isArray(raw.filters)
-    ? raw.filters
-    : {};
+  const filters = raw.filters && typeof raw.filters === 'object' && !Array.isArray(raw.filters) ? raw.filters : {};
   const details = canonicalScopeBoolean(raw.details, true);
   const downloadAssets = canonicalScopeBoolean(raw.downloadAssets, false);
   const textbookArray = Array.isArray(raw.textbookIds)
     ? raw.textbookIds
-    : (Array.isArray(raw.textbookExternalIds) ? raw.textbookExternalIds : []);
-  const chapterArray = Array.isArray(raw.chapterIds)
-    ? raw.chapterIds
-    : (raw.chapterId == null ? [] : [raw.chapterId]);
+    : Array.isArray(raw.textbookExternalIds)
+      ? raw.textbookExternalIds
+      : [];
+  const chapterArray = Array.isArray(raw.chapterIds) ? raw.chapterIds : raw.chapterId == null ? [] : [raw.chapterId];
   return {
-    textbookId: String(raw.textbookId ?? raw.textbookExternalId
-      ?? (textbookArray.length === 1 ? textbookArray[0] : '')).trim(),
+    textbookId: String(
+      raw.textbookId ?? raw.textbookExternalId ?? (textbookArray.length === 1 ? textbookArray[0] : ''),
+    ).trim(),
     chapterIds: canonicalScopeArray(chapterArray),
     catalogLevels: canonicalScopeArray(raw.catalogLevels),
     catalogIds: canonicalScopeArray(raw.catalogIds),
@@ -208,16 +207,18 @@ function scopeTextbookIds(scope) {
   for (const key of ['textbookIds', 'textbookExternalIds']) {
     if (Array.isArray(raw[key])) values.push(...raw[key]);
   }
-  return [...new Set(values
-    .filter((value) => value != null && String(value).trim() !== '')
-    .map((value) => String(value).trim()))];
+  return [
+    ...new Set(
+      values.filter((value) => value != null && String(value).trim() !== '').map((value) => String(value).trim()),
+    ),
+  ];
 }
 
 function resumeErrorMarkerText(run, errors = []) {
-  return [
-    run?.message,
-    ...errors.flatMap((error) => [error?.error_code, error?.stage, error?.message]),
-  ].filter((value) => value != null && String(value).trim() !== '').join('\n').toLowerCase();
+  return [run?.message, ...errors.flatMap((error) => [error?.error_code, error?.stage, error?.message])]
+    .filter((value) => value != null && String(value).trim() !== '')
+    .join('\n')
+    .toLowerCase();
 }
 
 function isTransientResumeError(run, errors = []) {
@@ -246,28 +247,34 @@ function snapshotTableCounts(db, runId, textbookExternalId) {
     ['sync_run_question_assets', 'questionAssetCount'],
   ];
   for (const [table, field] of fieldNames) {
-    const exists = db.prepare(
-      "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1",
-    ).get(table);
+    const exists = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1").get(table);
     result[field] = exists
-      ? Number(db.prepare(`
+      ? Number(
+          db
+            .prepare(
+              `
         SELECT COUNT(*) AS n FROM ${sqlIdentifier(table)}
         WHERE run_id = ? AND provider = ? AND textbook_external_id = ?
-      `).get(Number(runId), PROVIDER, String(textbookExternalId)).n || 0)
+      `,
+            )
+            .get(Number(runId), PROVIDER, String(textbookExternalId)).n || 0,
+        )
       : 0;
   }
   return result;
 }
 
 function sourceRunErrors(db, runId) {
-  const exists = db.prepare(
-    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sync_errors' LIMIT 1",
-  ).get();
+  const exists = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sync_errors' LIMIT 1").get();
   if (!exists) return [];
-  return db.prepare(`
+  return db
+    .prepare(
+      `
     SELECT error_code, stage, message
     FROM sync_errors WHERE run_id = ? ORDER BY id ASC LIMIT 50
-  `).all(Number(runId));
+  `,
+    )
+    .all(Number(runId));
 }
 
 function resumeSourceError(message, code = 'resume_source_invalid') {
@@ -285,12 +292,16 @@ function validateResumeSourceRunInDb(db, sourceRunId, targetScope, { sealedRefil
   if (!Number.isSafeInteger(parsedRunId) || parsedRunId < 1) {
     throw resumeSourceError('resume-run-id 必须是正整数');
   }
-  const run = db.prepare(`
+  const run = db
+    .prepare(
+      `
     SELECT id, provider, started_at, finished_at, status, scope_json,
            pages_ok, questions_seen, error_count, message,
            snapshot_locked_at, snapshot_complete
     FROM sync_runs WHERE id = ?
-  `).get(parsedRunId);
+  `,
+    )
+    .get(parsedRunId);
   if (!run) throw resumeSourceError(`来源运行 ${parsedRunId} 不存在`);
   if (String(run.provider || '') !== PROVIDER) {
     throw resumeSourceError(`来源运行 ${parsedRunId} 来源提供方不受支持`);
@@ -311,14 +322,16 @@ function validateResumeSourceRunInDb(db, sourceRunId, targetScope, { sealedRefil
   }
   const rowScopeIds = new Set();
   for (const table of SNAPSHOT_TABLES) {
-    const exists = db.prepare(
-      "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1",
-    ).get(table);
+    const exists = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1").get(table);
     if (!exists) throw resumeSourceError(`来源运行 ${parsedRunId} 缺少 ${table} 快照表`);
-    for (const row of db.prepare(`
+    for (const row of db
+      .prepare(
+        `
       SELECT DISTINCT textbook_external_id
       FROM ${sqlIdentifier(table)} WHERE run_id = ? AND provider = ?
-    `).all(parsedRunId, PROVIDER)) {
+    `,
+      )
+      .all(parsedRunId, PROVIDER)) {
       if (row.textbook_external_id == null || String(row.textbook_external_id).trim() === '') {
         throw resumeSourceError(`来源运行 ${parsedRunId} 的 ${table} 含无教材归属的快照行`);
       }
@@ -334,13 +347,13 @@ function validateResumeSourceRunInDb(db, sourceRunId, targetScope, { sealedRefil
 
   const differences = resumeScopeDifferences(sourceScope, targetScope);
   if (differences.length > 0) {
-    throw resumeSourceError(
-      `来源运行 ${parsedRunId} 的采集范围不匹配：${differences.join('、')}`,
-    );
+    throw resumeSourceError(`来源运行 ${parsedRunId} 的采集范围不匹配：${differences.join('、')}`);
   }
 
   const errors = sourceRunErrors(db, parsedRunId);
-  const status = String(run.status || '').trim().toLowerCase();
+  const status = String(run.status || '')
+    .trim()
+    .toLowerCase();
   // Refills discard old scan evidence and check observations again. They
   // may retain valid pages from a failed run; legacy in-place recovery only
   // accepts transient failures. Source/host pause gates still apply.
@@ -356,14 +369,18 @@ function validateResumeSourceRunInDb(db, sourceRunId, targetScope, { sealedRefil
 
   const counts = snapshotTableCounts(db, parsedRunId, target.textbookId);
   const inheritedSource = Number(sourceScope.resumeFromRunId || 0) > 0;
-  if ((status === 'failed' && Number(run.pages_ok || 0) < 1 && !inheritedSource)
-    || counts.catalogCount < 1
-    || counts.questionCount < 1
-    || counts.questionCatalogCount < 1) {
+  if (
+    (status === 'failed' && Number(run.pages_ok || 0) < 1 && !inheritedSource) ||
+    counts.catalogCount < 1 ||
+    counts.questionCount < 1 ||
+    counts.questionCatalogCount < 1
+  ) {
     throw resumeSourceError(`来源运行 ${parsedRunId} 尚无可安全续采的完整页/部分快照`);
   }
   const orphanChecks = [
-    [`${SNAPSHOT_TABLES[2]} 题目目录关系`, `
+    [
+      `${SNAPSHOT_TABLES[2]} 题目目录关系`,
+      `
       SELECT 1 FROM sync_run_question_catalogs AS r
       WHERE r.run_id = ? AND r.provider = ? AND r.textbook_external_id = ?
         AND (NOT EXISTS (
@@ -377,8 +394,11 @@ function validateResumeSourceRunInDb(db, sourceRunId, targetScope, { sealedRefil
             AND c.textbook_external_id = r.textbook_external_id
             AND c.catalog_external_id = r.catalog_external_id
         )) LIMIT 1
-    `],
-    [`${SNAPSHOT_TABLES[3]} 题目标签`, `
+    `,
+    ],
+    [
+      `${SNAPSHOT_TABLES[3]} 题目标签`,
+      `
       SELECT 1 FROM sync_run_question_tags AS r
       WHERE r.run_id = ? AND r.provider = ? AND r.textbook_external_id = ?
         AND NOT EXISTS (
@@ -387,8 +407,11 @@ function validateResumeSourceRunInDb(db, sourceRunId, targetScope, { sealedRefil
             AND q.textbook_external_id = r.textbook_external_id
             AND q.question_external_id = r.question_external_id
         ) LIMIT 1
-    `],
-    [`${SNAPSHOT_TABLES[4]} 题目素材`, `
+    `,
+    ],
+    [
+      `${SNAPSHOT_TABLES[4]} 题目素材`,
+      `
       SELECT 1 FROM sync_run_question_assets AS r
       WHERE r.run_id = ? AND r.provider = ? AND r.textbook_external_id = ?
         AND NOT EXISTS (
@@ -397,7 +420,8 @@ function validateResumeSourceRunInDb(db, sourceRunId, targetScope, { sealedRefil
             AND q.textbook_external_id = r.textbook_external_id
             AND q.question_external_id = r.question_external_id
         ) LIMIT 1
-    `],
+    `,
+    ],
   ];
   for (const [label, query] of orphanChecks) {
     if (db.prepare(query).get(parsedRunId, PROVIDER, target.textbookId)) {
@@ -420,7 +444,9 @@ function validateResumeSourceRun(dbPath, sourceRunId, targetScope, options = {})
     db = new DatabaseSync(path.resolve(dbPath), { readOnly: true });
     return validateResumeSourceRunInDb(db, sourceRunId, targetScope, options);
   } finally {
-    try { db?.close(); } catch {}
+    try {
+      db?.close();
+    } catch {}
   }
 }
 
@@ -430,21 +456,26 @@ function copyResumeSnapshotRows(db, sourceRunId, targetRunId, textbookExternalId
   const textbookId = String(textbookExternalId);
   const copied = {};
   for (const table of SNAPSHOT_TABLES) {
-    const columns = db.prepare(`PRAGMA table_info(${sqlIdentifier(table)})`).all()
+    const columns = db
+      .prepare(`PRAGMA table_info(${sqlIdentifier(table)})`)
+      .all()
       .map((row) => String(row.name));
     const copyColumns = columns.filter((column) => column !== 'run_id');
-    if (!columns.includes('run_id') || !columns.includes('provider')
-      || !columns.includes('textbook_external_id')) {
+    if (!columns.includes('run_id') || !columns.includes('provider') || !columns.includes('textbook_external_id')) {
       throw resumeSourceError(`来源运行快照表 ${table} 字段不完整`);
     }
     const insertColumns = ['run_id', ...copyColumns].map(sqlIdentifier).join(', ');
     const selectColumns = ['?', ...copyColumns.map(sqlIdentifier)].join(', ');
-    const result = db.prepare(`
+    const result = db
+      .prepare(
+        `
       INSERT INTO ${sqlIdentifier(table)} (${insertColumns})
       SELECT ${selectColumns}
       FROM ${sqlIdentifier(table)}
       WHERE run_id = ? AND provider = ? AND textbook_external_id = ?
-    `).run(targetId, sourceId, PROVIDER, textbookId);
+    `,
+      )
+      .run(targetId, sourceId, PROVIDER, textbookId);
     copied[table] = Number(result?.changes || 0);
   }
   return copied;
@@ -460,9 +491,7 @@ function normalizeCheckpointPage(value, fallback = 0) {
 
 function checkpointFilterJson(scope) {
   const raw = parseScopeObject(scope);
-  const filters = raw.filters && typeof raw.filters === 'object' && !Array.isArray(raw.filters)
-    ? raw.filters
-    : {};
+  const filters = raw.filters && typeof raw.filters === 'object' && !Array.isArray(raw.filters) ? raw.filters : {};
   return JSON.stringify(filters);
 }
 
@@ -472,17 +501,15 @@ function checkpointScopeKey(catalogExternalId, filterJson) {
 
 function checkpointChapterId(scope, catalogExternalId) {
   const raw = parseScopeObject(scope);
-  const chapterIds = Array.isArray(raw.chapterIds)
-    ? raw.chapterIds
-    : (raw.chapterId == null ? [] : [raw.chapterId]);
+  const chapterIds = Array.isArray(raw.chapterIds) ? raw.chapterIds : raw.chapterId == null ? [] : [raw.chapterId];
   const chapterId = chapterIds.find((value) => value != null && String(value).trim() !== '');
   return String(chapterId == null ? catalogExternalId : chapterId).trim();
 }
 
 function insertRunCheckpointRows(db, targetRunId, rows) {
-  const tableExists = db.prepare(
-    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1",
-  ).get(RUN_CHECKPOINT_TABLE);
+  const tableExists = db
+    .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1")
+    .get(RUN_CHECKPOINT_TABLE);
   if (!tableExists) throw resumeSourceError(`缺少 ${RUN_CHECKPOINT_TABLE} 表`);
   const insert = db.prepare(`
     INSERT INTO ${sqlIdentifier(RUN_CHECKPOINT_TABLE)} (
@@ -505,10 +532,7 @@ function insertRunCheckpointRows(db, targetRunId, rows) {
     const chapterId = String(row?.chapterId || row?.chapter_id || '').trim();
     const filterJson = String(row?.filterJson || row?.filter_json || '{}');
     if (!scopeKey || !chapterId) continue;
-    const page = normalizeCheckpointPage(
-      row?.lastCompletedPage ?? row?.last_completed_page,
-      null,
-    );
+    const page = normalizeCheckpointPage(row?.lastCompletedPage ?? row?.last_completed_page, null);
     if (page == null) throw resumeSourceError(`checkpoint 页码超出安全范围：${page}`);
     insert.run(
       Number(targetRunId),
@@ -531,18 +555,22 @@ function insertRunCheckpointRows(db, targetRunId, rows) {
  * sync_checkpoints table is intentionally never consulted here.
  */
 function copyResumeRunCheckpoints(db, sourceRunId, targetRunId, sourceScope) {
-  const tableExists = db.prepare(
-    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1",
-  ).get(RUN_CHECKPOINT_TABLE);
+  const tableExists = db
+    .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1")
+    .get(RUN_CHECKPOINT_TABLE);
   if (!tableExists) throw resumeSourceError(`缺少 ${RUN_CHECKPOINT_TABLE} 表`);
 
-  const sourceRows = db.prepare(`
+  const sourceRows = db
+    .prepare(
+      `
     SELECT scope_key, provider, chapter_id, filter_json,
            last_completed_page, updated_at
     FROM ${sqlIdentifier(RUN_CHECKPOINT_TABLE)}
     WHERE run_id = ? AND provider = ?
     ORDER BY scope_key ASC
-  `).all(Number(sourceRunId), PROVIDER);
+  `,
+    )
+    .all(Number(sourceRunId), PROVIDER);
   if (sourceRows.length > 0) {
     const normalized = sourceRows.map((row) => {
       const scopeKey = String(row.scope_key || '').trim();
@@ -568,20 +596,24 @@ function copyResumeRunCheckpoints(db, sourceRunId, targetRunId, sourceScope) {
     };
   }
 
-  const progressExists = db.prepare(
-    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sync_progress' LIMIT 1",
-  ).get();
+  const progressExists = db
+    .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sync_progress' LIMIT 1")
+    .get();
   if (!progressExists) return { source: 'none', count: 0 };
 
   const filterJson = checkpointFilterJson(sourceScope);
   const chapterId = checkpointChapterId(sourceScope, '');
   const byScopeKey = new Map();
-  for (const row of db.prepare(`
+  for (const row of db
+    .prepare(
+      `
     SELECT catalog_external_id, current_page, updated_at
     FROM sync_progress
     WHERE run_id = ? AND catalog_external_id IS NOT NULL
     ORDER BY worker_id ASC
-  `).all(Number(sourceRunId))) {
+  `,
+    )
+    .all(Number(sourceRunId))) {
     const catalogId = String(row.catalog_external_id || '').trim();
     if (!catalogId) continue;
     const page = normalizeCheckpointPage(row.current_page, null);
@@ -606,7 +638,9 @@ function copyResumeRunCheckpoints(db, sourceRunId, targetRunId, sourceScope) {
 }
 
 function isResumablePartialRun(summary) {
-  const status = String(summary?.status || '').trim().toLowerCase();
+  const status = String(summary?.status || '')
+    .trim()
+    .toLowerCase();
   if (status !== 'interrupted') return false;
   const lockedAt = summary?.snapshotLockedAt ?? summary?.snapshot_locked_at;
   if (lockedAt == null || String(lockedAt).trim() === '') return false;
@@ -625,10 +659,10 @@ function isResumablePartialRun(summary) {
   if (coreCounts.some((value) => value <= 0)) return false;
   const errors = Array.isArray(summary?.errors)
     ? summary.errors.map((error) => ({
-      error_code: error.errorCode ?? error.error_code,
-      stage: error.stage,
-      message: error.message,
-    }))
+        error_code: error.errorCode ?? error.error_code,
+        stage: error.stage,
+        message: error.message,
+      }))
     : [];
   return !hasDeterministicResumeError({ message: summary.message }, errors);
 }
@@ -647,10 +681,14 @@ function validateQuestionListResumeSourceRun(dbPath, sourceRunId, targetScope) {
     db = new DatabaseSync(path.resolve(dbPath), { readOnly: true });
     const row = db.prepare('SELECT scope_json FROM sync_runs WHERE id = ?').get(Number(sourceRunId));
     if (row) {
-      try { sourceScope = JSON.parse(row.scope_json || '{}'); } catch {}
+      try {
+        sourceScope = JSON.parse(row.scope_json || '{}');
+      } catch {}
     }
   } finally {
-    try { db?.close(); } catch {}
+    try {
+      db?.close();
+    } catch {}
   }
   const sourceMaxPages = Number(sourceScope.maxPages || 0);
   const targetMaxPages = Number(targetScope.maxPages || 0);
@@ -659,15 +697,19 @@ function validateQuestionListResumeSourceRun(dbPath, sourceRunId, targetScope) {
   }
   const sourceLimit = Number(sourceScope.limit || 0);
   const targetLimit = Number(targetScope.limit || 0);
-  if ((sourceLimit === 0 && targetLimit > 0)
-    || (sourceLimit > 0 && targetLimit > 0 && targetLimit < sourceLimit)) {
+  if ((sourceLimit === 0 && targetLimit > 0) || (sourceLimit > 0 && targetLimit > 0 && targetLimit < sourceLimit)) {
     throw new QuestionSyncError('续采不能缩小 --limit。', 'resume_source_invalid');
   }
-  return validateResumeSourceRun(dbPath, sourceRunId, {
-    ...targetScope,
-    maxPages: sourceScope.maxPages ?? targetScope.maxPages,
-    limit: sourceScope.limit ?? targetScope.limit,
-  }, { sealedRefill: true });
+  return validateResumeSourceRun(
+    dbPath,
+    sourceRunId,
+    {
+      ...targetScope,
+      maxPages: sourceScope.maxPages ?? targetScope.maxPages,
+      limit: sourceScope.limit ?? targetScope.limit,
+    },
+    { sealedRefill: true },
+  );
 }
 
 module.exports = {

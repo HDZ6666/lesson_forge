@@ -29,9 +29,7 @@ function requestBoolean(value, name, fallback = false) {
 
 function scopeErrorText(summary, fallback = null) {
   if (!summary) return fallback;
-  const first = Array.isArray(summary.errors) && summary.errors.length > 0
-    ? summary.errors[0].message
-    : null;
+  const first = Array.isArray(summary.errors) && summary.errors.length > 0 ? summary.errors[0].message : null;
   return String(summary.message || first || fallback || '').slice(0, 1000) || null;
 }
 
@@ -47,8 +45,7 @@ function intInRange(value, name, min, max) {
 }
 
 function normalizeScopeExternalId(value, name) {
-  if (value == null || typeof value === 'boolean'
-    || (typeof value !== 'string' && typeof value !== 'number')) {
+  if (value == null || typeof value === 'boolean' || (typeof value !== 'string' && typeof value !== 'number')) {
     throw new Error(`${name} 格式不安全`);
   }
   const normalized = String(value).trim();
@@ -59,8 +56,7 @@ function normalizeScopeExternalId(value, name) {
 function normalizeScopeName(value, name) {
   if (typeof value !== 'string') throw new Error(`${name} 必须是字符串`);
   const normalized = value.trim();
-  if (!normalized || normalized.length > MAX_SCOPE_NAME_LENGTH
-    || /[\u0000-\u001f\u007f]/.test(normalized)) {
+  if (!normalized || normalized.length > MAX_SCOPE_NAME_LENGTH || /[\u0000-\u001f\u007f]/.test(normalized)) {
     throw new Error(`${name} 长度或格式不安全`);
   }
   return normalized;
@@ -107,9 +103,7 @@ function validateIndependentResumeScopes(dbPath, scopes, maxPages, limitTo1000Pa
     try {
       validateQuestionListResumeSourceRun(dbPath, scope.resumeFromCollectorRunId, expected);
     } catch (error) {
-      const wrapped = new Error(
-        `教材 ${scope.externalTextbookId} 的续采来源无效：${String(error.message || error)}`,
-      );
+      const wrapped = new Error(`教材 ${scope.externalTextbookId} 的续采来源无效：${String(error.message || error)}`);
       wrapped.code = error.code || 'resume_source_invalid';
       wrapped.statusCode = Number(error.statusCode || 400);
       throw wrapped;
@@ -137,9 +131,7 @@ function normalizeIndependentTextbookScopes(payload) {
     throw new Error('textbookExternalIds 与 textbookScopes 数量不一致');
   }
 
-  const selectedIds = payload.textbookExternalIds.map((value) => (
-    normalizeScopeExternalId(value, '教材来源 ID')
-  ));
+  const selectedIds = payload.textbookExternalIds.map((value) => normalizeScopeExternalId(value, '教材来源 ID'));
   const seenTextbooks = new Set();
   const scopes = payload.textbookScopes.map((raw, index) => {
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {

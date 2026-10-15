@@ -13,7 +13,7 @@ const {
   MAX_SNAPSHOT_PAGE_BYTES,
   readRunAsset,
   readRunSnapshotPage,
-} = require('../lib/api_store.cjs');
+} = require('../src/storage/readers/index.cjs');
 const { SyncStore } = require('../legacy/zujuan_sync.cjs');
 
 function temporary(prefix = 'collector-page-') {
@@ -40,42 +40,56 @@ function seedRun({
   const runId = store.beginRun({ textbookIds, details: false, downloadAssets: false });
   for (const textbookId of textbookIds) {
     const catalogId = `${textbookId}-c1`;
-    store.saveRunCatalogTree(runId, textbookId, [{
-      externalId: catalogId,
-      level: 1,
-      name: `${textbookId} 第一章`,
-      path: `/${catalogId}`,
-      sortOrder: 1,
-    }]);
-    for (let index = 1; index <= questionCount; index += 1) {
-      const questionId = `${textbookId}-q${String(index).padStart(3, '0')}`;
-      const text = questionText ? questionText(index, textbookId) : `${textbookId} 题目 ${index}`;
-      store.saveRunQuestion(runId, textbookId, {
-        externalId: questionId,
-        questionType: '单选题',
-        contentHtml: `<p>${text}</p>`,
-        plainText: text,
-        detailFetched: true,
-      }, catalogId);
-      store.saveRunQuestionCatalogs(runId, textbookId, questionId, [{
+    store.saveRunCatalogTree(runId, textbookId, [
+      {
         externalId: catalogId,
         level: 1,
         name: `${textbookId} 第一章`,
         path: `/${catalogId}`,
-      }]);
+        sortOrder: 1,
+      },
+    ]);
+    for (let index = 1; index <= questionCount; index += 1) {
+      const questionId = `${textbookId}-q${String(index).padStart(3, '0')}`;
+      const text = questionText ? questionText(index, textbookId) : `${textbookId} 题目 ${index}`;
+      store.saveRunQuestion(
+        runId,
+        textbookId,
+        {
+          externalId: questionId,
+          questionType: '单选题',
+          contentHtml: `<p>${text}</p>`,
+          plainText: text,
+          detailFetched: true,
+        },
+        catalogId,
+      );
+      store.saveRunQuestionCatalogs(runId, textbookId, questionId, [
+        {
+          externalId: catalogId,
+          level: 1,
+          name: `${textbookId} 第一章`,
+          path: `/${catalogId}`,
+        },
+      ]);
       if (asset && index === 1) {
         store.saveRunQuestionAssets(runId, textbookId, questionId, [asset]);
       }
     }
   }
-  store.finishRun(runId, status, {
-    pagesOk: 1,
-    questionsSeen: textbookIds.length * questionCount,
-    questionsInserted: textbookIds.length * questionCount,
-    detailsFetched: textbookIds.length * questionCount,
-    assetsDownloaded: asset ? 1 : 0,
-    errors,
-  }, status === 'success' ? null : '测试运行失败');
+  store.finishRun(
+    runId,
+    status,
+    {
+      pagesOk: 1,
+      questionsSeen: textbookIds.length * questionCount,
+      questionsInserted: textbookIds.length * questionCount,
+      detailsFetched: textbookIds.length * questionCount,
+      assetsDownloaded: asset ? 1 : 0,
+      errors,
+    },
+    status === 'success' ? null : '测试运行失败',
+  );
   store.close();
   return { ...paths, runId };
 }
@@ -98,7 +112,11 @@ function authHeaders(token = 'snapshot-page-token') {
 
 test('snapshot-page requires authentication and rejects strict input boundaries', async () => {
   const fixture = seedRun({ questionCount: 2 });
-  const server = createCollectorServer({ dbPath: fixture.dbPath, dataDir: fixture.dataDir, token: 'snapshot-page-token' });
+  const server = createCollectorServer({
+    dbPath: fixture.dbPath,
+    dataDir: fixture.dataDir,
+    token: 'snapshot-page-token',
+  });
   const baseUrl = await listen(server);
   try {
     const unauthorized = await fetch(
@@ -146,7 +164,10 @@ test('snapshot-page is deterministic, scoped, and advances by actual returned ro
     assert.equal(first.run.snapshotComplete, true);
     assert.equal(first.run.snapshotLockedAt != null, true);
     assert.equal(first.total, 3);
-    assert.deepEqual(first.items.map((row) => row.question_external_id), ['tb1-q001', 'tb1-q002']);
+    assert.deepEqual(
+      first.items.map((row) => row.question_external_id),
+      ['tb1-q001', 'tb1-q002'],
+    );
     assert.equal(first.nextCursor, 2);
     assert.deepEqual(first.items, repeated.items);
     const last = readRunSnapshotPage(fixture.dbPath, fixture.runId, {
@@ -155,16 +176,29 @@ test('snapshot-page is deterministic, scoped, and advances by actual returned ro
       cursor: first.nextCursor,
       pageSize: 2,
     });
-    assert.deepEqual(last.items.map((row) => row.question_external_id), ['tb1-q003']);
+    assert.deepEqual(
+      last.items.map((row) => row.question_external_id),
+      ['tb1-q003'],
+    );
     assert.equal(last.nextCursor, null);
     const otherScope = readRunSnapshotPage(fixture.dbPath, fixture.runId, {
-      collection: 'questions', textbookExternalId: 'tb2', cursor: 0, pageSize: 2,
+      collection: 'questions',
+      textbookExternalId: 'tb2',
+      cursor: 0,
+      pageSize: 2,
     });
-    assert.deepEqual(otherScope.items.map((row) => row.textbook_external_id), ['tb2', 'tb2']);
+    assert.deepEqual(
+      otherScope.items.map((row) => row.textbook_external_id),
+      ['tb2', 'tb2'],
+    );
     assert.throws(
-      () => readRunSnapshotPage(fixture.dbPath, fixture.runId, {
-        collection: 'questions', textbookExternalId: 'other', cursor: 0, pageSize: 2,
-      }),
+      () =>
+        readRunSnapshotPage(fixture.dbPath, fixture.runId, {
+          collection: 'questions',
+          textbookExternalId: 'other',
+          cursor: 0,
+          pageSize: 2,
+        }),
       (error) => error.statusCode === 404 && error.code === 'run_scope_not_found',
     );
   } finally {
@@ -176,9 +210,13 @@ test('snapshot-page rejects an unfinished run before returning any collection ro
   const fixture = seedRun({ status: 'failed', errors: 1 });
   try {
     assert.throws(
-      () => readRunSnapshotPage(fixture.dbPath, fixture.runId, {
-        collection: 'catalogs', textbookExternalId: 'tb1', cursor: 0, pageSize: 1,
-      }),
+      () =>
+        readRunSnapshotPage(fixture.dbPath, fixture.runId, {
+          collection: 'catalogs',
+          textbookExternalId: 'tb1',
+          cursor: 0,
+          pageSize: 1,
+        }),
       (error) => error.statusCode === 409 && ['snapshot_unavailable', 'snapshot_incomplete'].includes(error.code),
     );
   } finally {
@@ -187,27 +225,42 @@ test('snapshot-page rejects an unfinished run before returning any collection ro
 });
 
 for (const status of ['failed', 'cancelled']) {
-test(`sealed import pages expose ${status} results without weakening the default API`, async () => {
-  const fixture = seedRun({ status, errors: 1 });
-  const server = createCollectorServer({ dbPath: fixture.dbPath, dataDir: fixture.dataDir, token: 'snapshot-page-token' });
-  const baseUrl = await listen(server);
-  try {
-    const options = { headers: authHeaders() };
-    const suffix = '?collection=questions&textbookExternalId=tb1&pageSize=2';
-    assert.equal((await fetch(`${baseUrl}/v1/runs/${fixture.runId}/snapshot-page${suffix}`, options)).status, 409);
-    const response = await fetch(`${baseUrl}/v1/runs/${fixture.runId}/snapshot-page${suffix}&sealedForImport=true`, options);
-    assert.equal(response.status, 200);
-    const page = await response.json();
-    assert.equal(page.snapshotComplete, false);
-    assert.equal(page.run.status, status);
-    assert.equal(page.items.length, 2);
-    const summaryResponse = await fetch(`${baseUrl}/v1/runs/${fixture.runId}/snapshot-summary?textbookExternalId=tb1&sealedForImport=true`, options);
-    assert.equal(summaryResponse.status, 200);
-    assert.equal((await summaryResponse.json()).snapshotComplete, false);
-    assert.equal((await fetch(`${baseUrl}/v1/runs/${fixture.runId}/snapshot-page${suffix}&sealedForImport=1`, options)).status, 400);
-  } finally { await close(server); fs.rmSync(fixture.directory, { recursive: true, force: true }); }
-});
-
+  test(`sealed import pages expose ${status} results without weakening the default API`, async () => {
+    const fixture = seedRun({ status, errors: 1 });
+    const server = createCollectorServer({
+      dbPath: fixture.dbPath,
+      dataDir: fixture.dataDir,
+      token: 'snapshot-page-token',
+    });
+    const baseUrl = await listen(server);
+    try {
+      const options = { headers: authHeaders() };
+      const suffix = '?collection=questions&textbookExternalId=tb1&pageSize=2';
+      assert.equal((await fetch(`${baseUrl}/v1/runs/${fixture.runId}/snapshot-page${suffix}`, options)).status, 409);
+      const response = await fetch(
+        `${baseUrl}/v1/runs/${fixture.runId}/snapshot-page${suffix}&sealedForImport=true`,
+        options,
+      );
+      assert.equal(response.status, 200);
+      const page = await response.json();
+      assert.equal(page.snapshotComplete, false);
+      assert.equal(page.run.status, status);
+      assert.equal(page.items.length, 2);
+      const summaryResponse = await fetch(
+        `${baseUrl}/v1/runs/${fixture.runId}/snapshot-summary?textbookExternalId=tb1&sealedForImport=true`,
+        options,
+      );
+      assert.equal(summaryResponse.status, 200);
+      assert.equal((await summaryResponse.json()).snapshotComplete, false);
+      assert.equal(
+        (await fetch(`${baseUrl}/v1/runs/${fixture.runId}/snapshot-page${suffix}&sealedForImport=1`, options)).status,
+        400,
+      );
+    } finally {
+      await close(server);
+      fs.rmSync(fixture.directory, { recursive: true, force: true });
+    }
+  });
 }
 
 test('sealed import mode still rejects running or unlocked results', () => {
@@ -218,10 +271,18 @@ test('sealed import mode still rejects running or unlocked results', () => {
   db.prepare('UPDATE sync_runs SET status = ?, finished_at = NULL WHERE id = ?').run('running', fixture.runId);
   db.close();
   try {
-    assert.throws(() => readRunSnapshotPage(fixture.dbPath, fixture.runId, {
-      collection: 'questions', textbookExternalId: 'tb1', sealedForImport: true,
-    }), /未成功完成/);
-  } finally { fs.rmSync(fixture.directory, { recursive: true, force: true }); }
+    assert.throws(
+      () =>
+        readRunSnapshotPage(fixture.dbPath, fixture.runId, {
+          collection: 'questions',
+          textbookExternalId: 'tb1',
+          sealedForImport: true,
+        }),
+      /未成功完成/,
+    );
+  } finally {
+    fs.rmSync(fixture.directory, { recursive: true, force: true });
+  }
 });
 
 test('snapshot-page rechecks the sealed run header on its own connection', () => {
@@ -232,14 +293,17 @@ test('snapshot-page rechecks the sealed run header on its own connection', () =>
   // previously valid summary.  The production schema prevents this update;
   // dropping only the guard here verifies the API still fails closed.
   db.exec('DROP TRIGGER trg_sync_runs_no_reopen');
-  db.prepare('UPDATE sync_runs SET status = ?, finished_at = NULL WHERE id = ?')
-    .run('running', fixture.runId);
+  db.prepare('UPDATE sync_runs SET status = ?, finished_at = NULL WHERE id = ?').run('running', fixture.runId);
   db.close();
   try {
     assert.throws(
-      () => readRunSnapshotPage(fixture.dbPath, fixture.runId, {
-        collection: 'questions', textbookExternalId: 'tb1', cursor: 0, pageSize: 1,
-      }),
+      () =>
+        readRunSnapshotPage(fixture.dbPath, fixture.runId, {
+          collection: 'questions',
+          textbookExternalId: 'tb1',
+          cursor: 0,
+          pageSize: 1,
+        }),
       (error) => error.statusCode === 409 && error.code === 'snapshot_unavailable',
     );
   } finally {
@@ -274,9 +338,7 @@ test('snapshot-page shrinks a large requested page by actual JSON byte size', as
       assert.ok(body.items.length > 0);
       assert.equal(body.cursor, cursor);
       assert.equal(body.total, 32);
-      assert.equal(body.nextCursor, cursor + body.items.length < body.total
-        ? cursor + body.items.length
-        : null);
+      assert.equal(body.nextCursor, cursor + body.items.length < body.total ? cursor + body.items.length : null);
       seen.push(...body.items.map((row) => row.question_external_id));
       cursor = body.nextCursor;
       pageCount += 1;
@@ -285,8 +347,10 @@ test('snapshot-page shrinks a large requested page by actual JSON byte size', as
     assert.ok(pageCount > 1, 'byte budget should split the requested page');
     assert.equal(seen.length, 32);
     assert.equal(new Set(seen).size, 32);
-    assert.deepEqual(seen, Array.from({ length: 32 }, (_, index) =>
-      `tb1-q${String(index + 1).padStart(3, '0')}`));
+    assert.deepEqual(
+      seen,
+      Array.from({ length: 32 }, (_, index) => `tb1-q${String(index + 1).padStart(3, '0')}`),
+    );
   } finally {
     await close(server);
     fs.rmSync(fixture.directory, { recursive: true, force: true });
@@ -311,14 +375,29 @@ function seedAssetRun({
   const store = new SyncStore(fixture.dbPath, { dataDir: fixture.dataDir });
   const runId = store.beginRun({ textbookId: 'tb1', details: false, downloadAssets: false });
   store.saveRunCatalogTree(runId, 'tb1', [{ externalId: 'c1', level: 1, name: '第一章', path: '/c1' }]);
-  store.saveRunQuestion(runId, 'tb1', {
-    externalId: 'q1', contentHtml: '<p>题干</p>', plainText: '题干', detailFetched: true,
-  }, 'c1');
+  store.saveRunQuestion(
+    runId,
+    'tb1',
+    {
+      externalId: 'q1',
+      contentHtml: '<p>题干</p>',
+      plainText: '题干',
+      detailFetched: true,
+    },
+    'c1',
+  );
   store.saveRunQuestionCatalogs(runId, 'tb1', 'q1', [{ externalId: 'c1', level: 1, name: '第一章', path: '/c1' }]);
-  store.saveRunQuestionAssets(runId, 'tb1', 'q1', [{
-    assetKey: 'asset-1', assetType: 'image', url: 'https://assets.example/asset',
-    localPath: storagePath || `assets/${hash}.bin`, sha256: hash, mimeType: 'image/png', byteSize: bytes.length,
-  }]);
+  store.saveRunQuestionAssets(runId, 'tb1', 'q1', [
+    {
+      assetKey: 'asset-1',
+      assetType: 'image',
+      url: 'https://assets.example/asset',
+      localPath: storagePath || `assets/${hash}.bin`,
+      sha256: hash,
+      mimeType: 'image/png',
+      byteSize: bytes.length,
+    },
+  ]);
   store.finishRun(runId, 'success', { pagesOk: 1, questionsSeen: 1, questionsInserted: 1, errors: 0 });
   store.close();
   return { ...fixture, runId, hash };
@@ -329,12 +408,13 @@ test('asset endpoint streams verified bytes, rejects unknown hashes, and keeps h
   const server = createCollectorServer({ dbPath: fixture.dbPath, dataDir: fixture.dataDir, token: 'asset-token' });
   const baseUrl = await listen(server);
   try {
-    const unauthorized = await fetch(`${baseUrl}/v1/runs/${fixture.runId}/assets/${fixture.hash}?textbookExternalId=tb1`);
-    assert.equal(unauthorized.status, 401);
-    const response = await fetch(
+    const unauthorized = await fetch(
       `${baseUrl}/v1/runs/${fixture.runId}/assets/${fixture.hash}?textbookExternalId=tb1`,
-      { headers: authHeaders('asset-token') },
     );
+    assert.equal(unauthorized.status, 401);
+    const response = await fetch(`${baseUrl}/v1/runs/${fixture.runId}/assets/${fixture.hash}?textbookExternalId=tb1`, {
+      headers: authHeaders('asset-token'),
+    });
     assert.equal(response.status, 200);
     assert.equal(response.headers.get('content-type'), 'image/png');
     assert.equal(response.headers.get('content-length'), '8');
@@ -343,17 +423,15 @@ test('asset endpoint streams verified bytes, rejects unknown hashes, and keeps h
     assert.deepEqual(Buffer.from(await response.arrayBuffer()), Buffer.from('asset-ok'));
 
     const unknownHash = 'f'.repeat(64);
-    const unknown = await fetch(
-      `${baseUrl}/v1/runs/${fixture.runId}/assets/${unknownHash}?textbookExternalId=tb1`,
-      { headers: authHeaders('asset-token') },
-    );
+    const unknown = await fetch(`${baseUrl}/v1/runs/${fixture.runId}/assets/${unknownHash}?textbookExternalId=tb1`, {
+      headers: authHeaders('asset-token'),
+    });
     assert.equal(unknown.status, 404);
     assert.equal((await unknown.json()).error.code, 'asset_not_found');
 
-    const malformed = await fetch(
-      `${baseUrl}/v1/runs/${fixture.runId}/assets/not-a-sha?textbookExternalId=tb1`,
-      { headers: authHeaders('asset-token') },
-    );
+    const malformed = await fetch(`${baseUrl}/v1/runs/${fixture.runId}/assets/not-a-sha?textbookExternalId=tb1`, {
+      headers: authHeaders('asset-token'),
+    });
     assert.equal(malformed.status, 400);
     const malformedBody = await malformed.json();
     assert.equal(malformedBody.error.code, 'bad_request');
@@ -368,23 +446,28 @@ test('asset lookup uses the scoped hash index and accepts uppercase legacy hashe
   const fixture = seedAssetRun({ prefix: 'collector-asset-index-' });
   const { DatabaseSync } = require('node:sqlite');
   const db = new DatabaseSync(fixture.dbPath);
-  const plan = db.prepare(`
+  const plan = db
+    .prepare(
+      `
     EXPLAIN QUERY PLAN
     SELECT question_external_id FROM sync_run_question_assets
       INDEXED BY idx_sync_run_question_assets_scope_hash
     WHERE run_id = ? AND provider = ? AND textbook_external_id = ?
       AND content_sha256 IN (?, ?)
-  `).all(fixture.runId, 'zujuan', 'tb1', fixture.hash, fixture.hash.toUpperCase());
-  assert.ok(plan.some((row) => String(row.detail).includes(
-    'idx_sync_run_question_assets_scope_hash',
-  )));
+  `,
+    )
+    .all(fixture.runId, 'zujuan', 'tb1', fixture.hash, fixture.hash.toUpperCase());
+  assert.ok(plan.some((row) => String(row.detail).includes('idx_sync_run_question_assets_scope_hash')));
   db.exec('DROP TRIGGER trg_snapshot_question_assets_no_update');
-  db.prepare('UPDATE sync_run_question_assets SET content_sha256 = ? WHERE run_id = ?')
-    .run(fixture.hash.toUpperCase(), fixture.runId);
+  db.prepare('UPDATE sync_run_question_assets SET content_sha256 = ? WHERE run_id = ?').run(
+    fixture.hash.toUpperCase(),
+    fixture.runId,
+  );
   db.close();
   try {
     const asset = readRunAsset(fixture.dbPath, fixture.runId, fixture.hash, {
-      textbookExternalId: 'tb1', dataDir: fixture.dataDir,
+      textbookExternalId: 'tb1',
+      dataDir: fixture.dataDir,
     });
     assert.equal(asset.asset.contentSha256, fixture.hash);
   } finally {
@@ -401,9 +484,11 @@ test('asset lookup independently rejects a drifted sealed run header', () => {
   db.close();
   try {
     assert.throws(
-      () => readRunAsset(fixture.dbPath, fixture.runId, fixture.hash, {
-        textbookExternalId: 'tb1', dataDir: fixture.dataDir,
-      }),
+      () =>
+        readRunAsset(fixture.dbPath, fixture.runId, fixture.hash, {
+          textbookExternalId: 'tb1',
+          dataDir: fixture.dataDir,
+        }),
       (error) => error.statusCode === 409 && error.code === 'snapshot_unavailable',
     );
   } finally {
@@ -420,9 +505,11 @@ test('asset endpoint rejects traversal, escaping symlinks, and disk hash mismatc
   fs.writeFileSync(outside, 'secret');
   try {
     assert.throws(
-      () => readRunAsset(traversal.dbPath, traversal.runId, traversal.hash, {
-        textbookExternalId: 'tb1', dataDir: traversal.dataDir,
-      }),
+      () =>
+        readRunAsset(traversal.dbPath, traversal.runId, traversal.hash, {
+          textbookExternalId: 'tb1',
+          dataDir: traversal.dataDir,
+        }),
       (error) => error.statusCode === 404 && error.code === 'asset_not_found',
     );
   } finally {
@@ -441,13 +528,18 @@ test('asset endpoint rejects traversal, escaping symlinks, and disk hash mismatc
   const { DatabaseSync } = require('node:sqlite');
   const db = new DatabaseSync(symlink.dbPath);
   db.exec('DROP TRIGGER trg_snapshot_question_assets_no_update');
-  db.prepare('UPDATE sync_run_question_assets SET storage_path = ? WHERE run_id = ?').run('assets/link.bin', symlink.runId);
+  db.prepare('UPDATE sync_run_question_assets SET storage_path = ? WHERE run_id = ?').run(
+    'assets/link.bin',
+    symlink.runId,
+  );
   db.close();
   try {
     assert.throws(
-      () => readRunAsset(symlink.dbPath, symlink.runId, symlink.hash, {
-        textbookExternalId: 'tb1', dataDir: symlink.dataDir,
-      }),
+      () =>
+        readRunAsset(symlink.dbPath, symlink.runId, symlink.hash, {
+          textbookExternalId: 'tb1',
+          dataDir: symlink.dataDir,
+        }),
       (error) => error.statusCode === 404 && error.code === 'asset_not_found',
     );
   } finally {
@@ -463,9 +555,11 @@ test('asset endpoint rejects traversal, escaping symlinks, and disk hash mismatc
   });
   try {
     assert.throws(
-      () => readRunAsset(mismatch.dbPath, mismatch.runId, mismatch.hash, {
-        textbookExternalId: 'tb1', dataDir: mismatch.dataDir,
-      }),
+      () =>
+        readRunAsset(mismatch.dbPath, mismatch.runId, mismatch.hash, {
+          textbookExternalId: 'tb1',
+          dataDir: mismatch.dataDir,
+        }),
       (error) => error.statusCode === 409 && error.code === 'asset_integrity_error',
     );
   } finally {

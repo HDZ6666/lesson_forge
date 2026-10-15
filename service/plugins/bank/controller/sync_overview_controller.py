@@ -9,6 +9,7 @@ from common.aspect.interface_auth import UserInterfaceAuthDependency
 from common.aspect.pre_auth import PreAuthDependency
 from common.router import APIRouterPro
 from plugins.bank.entity.do.bank_do import QbSubject, QbSyncJob, QbSyncPlan, QbTextbook, QbTextbookVersion
+from plugins.bank.service.sync_issues import needs_person_condition
 from utils.response_util import ResponseUtil
 
 sync_overview_controller = APIRouterPro(
@@ -46,7 +47,7 @@ async def overview(
     if subject_id is not None:
         issue_query = issue_query.where(QbSyncIssue.subject_id == subject_id)
     issue_counts = dict((await db.execute(issue_query)).all())
-    manual_query = select(func.count()).select_from(QbSyncIssue).where(QbSyncIssue.status == 'open', (QbSyncIssue.evidence_json['handling'].as_string().is_(None)) | (QbSyncIssue.evidence_json['handling'].as_string() != 'retry'))
+    manual_query = select(func.count()).select_from(QbSyncIssue).where(QbSyncIssue.status == 'open', needs_person_condition())
     if subject_id is not None:
         manual_query = manual_query.where(QbSyncIssue.subject_id == subject_id)
     manual_issues = await db.scalar(manual_query)

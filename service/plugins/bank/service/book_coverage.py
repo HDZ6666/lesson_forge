@@ -16,6 +16,7 @@ from plugins.bank.entity.do.bank_do import (
 )
 from plugins.bank.service.import_dates import utc_datetime
 from plugins.bank.service.run_coverage import FORMAT
+from plugins.bank.service.sync_issues import needs_person_condition
 
 
 async def book_coverage(db: Any, textbook_ids: list[int], *, formal_counts: dict[int, int] | None = None, active_counts: dict[int, int] | None = None, display=False):
@@ -63,7 +64,7 @@ async def book_coverage(db: Any, textbook_ids: list[int], *, formal_counts: dict
         (
             await db.execute(
                 select(QbSyncIssue.textbook_id, func.count())
-                .where(QbSyncIssue.textbook_id.in_(textbook_ids), QbSyncIssue.status == 'open', (QbSyncIssue.evidence_json['handling'].as_string().is_(None)) | (QbSyncIssue.evidence_json['handling'].as_string() != 'retry'))
+                .where(QbSyncIssue.textbook_id.in_(textbook_ids), QbSyncIssue.status == 'open', needs_person_condition())
                 .group_by(QbSyncIssue.textbook_id)
             )
         ).all()

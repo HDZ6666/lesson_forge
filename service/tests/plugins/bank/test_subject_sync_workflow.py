@@ -79,7 +79,7 @@ async def test_discovery_must_register_before_full_queue_and_names_are_snapshots
 
 
 @pytest.mark.asyncio
-async def test_failed_book_does_not_fail_other_queued_books_and_next_round_is_fresh(bank_db, monkeypatch):
+async def test_failed_book_is_isolated_while_other_books_and_next_session_continue(bank_db, monkeypatch):
     monkeypatch.setenv('BANK_AUTOMATIC_SYNC_ENABLED', '1')
     plan_id, _ = await registered_plan(bank_db)
     claim = await dispatch.claim_next(bank_db)
@@ -104,8 +104,12 @@ async def test_failed_book_does_not_fail_other_queued_books_and_next_round_is_fr
     monkeypatch.setattr(plans,'_discovery',_ready)
     await tick(bank_db, plan_id)
     next_jobs = list((await bank_db.scalars(select(QbSyncJob).where(QbSyncJob.options_json['autoCycleNo'].as_integer() == 2))).all())
-    assert len(next_jobs) == 2
-    assert all(j.options_json['autoCycleName'].endswith('第 2 轮') for j in next_jobs)
+    assert len(next_jobs) == 1  # The deterministic parse failure stays isolated.
+    books = await plans.list_books(bank_db, plan_id)
+    assert next(b for b in books if b['textbookId'] == 1)['exceptionKind'] == 'scope_failure'
+    # A wake-up after sleep is the 2nd sync session; its rounds restart at 1.
+    assert all('第 2 次同步' in j.options_json['autoCycleName'] and j.options_json['autoCycleName'].endswith('第 1 轮')
+               for j in next_jobs)
     assert all(j.retry_of_run_id is None for j in next_jobs)
     scopes = list((await bank_db.scalars(select(QbSyncJobScope).where(QbSyncJobScope.run_id.in_([j.run_id for j in next_jobs])))).all())
     assert all(s.resume_from_collector_run_id is None for s in scopes)
@@ -130,19 +134,20 @@ async def test_discovery_source_pause_keeps_waiting_and_can_cancel(bank_db):
 
 
 @pytest.mark.asyncio
-async def test_explicit_pause_racing_dispatch_is_waiting_not_failed(bank_db, monkeypatch):
+@pytest.mark.parametrize('reason', ['来源等待恢复', '采集器正在回收或整理数据库，请稍后再启动'])
+async def test_explicit_pause_racing_dispatch_is_waiting_not_failed(bank_db, monkeypatch, reason):
     task = await SyncTaskService.create_textbook(bank_db, {'acknowledgeSourcePolicy': True}, 'teacher')
     claim = await dispatch.claim_next(bank_db)
     factory = async_sessionmaker(bank_db.bind, expire_on_commit=False)
     monkeypatch.setattr(runs.DataSourceRegistry, 'session', factory)
     class Paused:
         def start_job(self, *args, **kwargs):
-            raise ServiceException(message='来源等待恢复') from HTTPError('http://collector/v1/jobs', 423, 'paused', {}, None)
+            raise ServiceException(message=reason) from HTTPError('http://collector/v1/jobs', 423, 'paused', {}, None)
     monkeypatch.setattr(runs, 'CollectorClient', Paused)
     await bank_db.rollback()
     await runs._execute(task['taskId'], runs._WorkerHandle(token=claim['token'], task_module='textbook', run_type='metadata', workflow_version=2))
     row = await bank_db.get(QbSyncJob, task['taskId'], populate_existing=True)
-    assert row.status == 'queued' and row.active_slot is None and row.dispatch_error == '来源等待恢复'
+    assert row.status == 'queued' and row.active_slot is None and row.dispatch_error == reason
     assert row.error_message is None
 
 

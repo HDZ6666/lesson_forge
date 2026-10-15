@@ -71,12 +71,7 @@ const TEXTBOOK_FATAL_CODES = new Set([
   'stop_requested',
 ]);
 
-const FORMAL_ASSET_TYPES = Object.freeze([
-  'question_image',
-  'formula_image',
-  'svg',
-  'other',
-]);
+const FORMAL_ASSET_TYPES = Object.freeze(['question_image', 'formula_image', 'svg', 'other']);
 
 // Markers used by the metadata collector to recognise a hard protection page.
 const BLOCK_TEXT_MARKERS = [

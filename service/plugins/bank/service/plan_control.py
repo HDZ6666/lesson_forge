@@ -34,6 +34,13 @@ async def _lock_plan(db, plan_id, revision):
 async def action(db, plan_id, payload, operator):
     from plugins.bank.service.sync_plans import plan_dump
     from plugins.bank.service.sync_run_service import SyncRunService
+    if payload.action=='start':
+        # A repeated start (double click, retry, stale page) returns the
+        # active session instead of creating an overlapping one (S01, A02).
+        current=await db.get(QbSyncPlan,plan_id,with_for_update=True,populate_existing=True)
+        if current is not None and current.control_state=='active' and current.cycle_state in ('running','discovering'):
+            await db.commit()
+            return plan_dump(current)
     plan=await _lock_plan(db,plan_id,payload.expected_revision)
     now=await _clock(db)
     active=[]
@@ -51,7 +58,7 @@ async def action(db, plan_id, payload, operator):
             options=dict(row.options_json or {})
             if options.get('planWorkEnded'):
                 continue
-            options.update(planWorkPaused=not end,planWorkEnded=end)
+            options.update(planWorkPaused=not end,planWorkEnded=end,planActionBy=operator)
             options.pop('allowWhilePlanPaused',None)
             options['autoResumePending']=False
             if row.task_module=='question' and row.status in ('starting','running','cancelling'):
@@ -92,11 +99,21 @@ async def action(db, plan_id, payload, operator):
     elif payload.action=='start':
         if plan.control_state in ('pausing','ending') or plan.cycle_state in ('running','discovering'):
             raise ServiceException(message='已有一轮正在执行，请先处理当前轮次')
+        from plugins.bank.service.sync_plans import begin_session, settle_supplements
+        if await settle_supplements(db, plan_id, now):
+            raise ServiceException(message='单本补采尚未完成，请等待采集、核验和入库收尾后再启动整学科同步')
+        begin_session(plan,now)
+        # An explicit full scan applies to this session's first round only;
+        # "resume" never turns into a full scan implicitly.
+        plan.session_mode='full' if payload.full else None
         plan.enabled=1;plan.control_state='active';plan.cycle_state='discovering'
         plan.discovery_next_at=None;plan.discovery_error=None;plan.next_cycle_at=None
     else:
         raise ServiceException(message='不支持的计划操作')
     plan.revision+=1;plan.next_check_at=None;plan.update_time=now
+    from plugins.bank.service import diagnostics
+    diagnostics.event('plan_action', stage='plan', planId=plan_id, action=payload.action, operator=operator,
+                      sessionNo=plan.session_no, roundNo=plan.session_round, full=bool(getattr(payload, 'full', False)))
     await db.commit()
     # Network cancellation happens only after durable gates are visible.
     for task_id in active:
@@ -123,19 +140,22 @@ async def reconcile_controls(session_factory):
                         QbQuestionImport.status.in_(('preparing','running')) & (QbQuestionImport.lease_until<=now)))
                     .values(status='paused',stage='paused',worker_token=None,lease_until=None,active_source_slot=None))
             if ending:
+                # Ending stops collection only: saved results are finished,
+                # not thrown away (spec 4.1). Results paused earlier resume.
                 await db.execute(update(QbQuestionImport).where(QbQuestionImport.task_id.in_(task_ids),
-                    or_(QbQuestionImport.status.in_(('queued','paused')),
-                        QbQuestionImport.status.in_(('preparing','running')) & (QbQuestionImport.lease_until<=now)))
-                    .values(status='cancelled',stage='cancelled',worker_token=None,lease_until=None,active_source_slot=None))
-                await db.execute(update(QbQuestionImportIntake).where(QbQuestionImportIntake.task_id.in_(task_ids),
-                    or_(QbQuestionImportIntake.status.in_(('pending','retry')),
-                        (QbQuestionImportIntake.status=='probing') & (QbQuestionImportIntake.lease_until<=now)))
-                    .values(status='discarded',worker_token=None,lease_until=None))
+                    QbQuestionImport.status=='paused').values(status='queued',stage='queued'))
             collecting=await db.scalar(select(QbSyncJob.run_id).where(owned_condition(plan_id),QbSyncJob.active_slot.is_not(None)).limit(1))
             importing=await db.scalar(select(QbQuestionImport.import_id).where(QbQuestionImport.task_id.in_(task_ids),
                 QbQuestionImport.status.in_(('preparing','running')),QbQuestionImport.lease_until>now).limit(1))
             probing=await db.scalar(select(QbQuestionImportIntake.intake_id).where(QbQuestionImportIntake.task_id.in_(task_ids),
                 QbQuestionImportIntake.status=='probing',QbQuestionImportIntake.lease_until>now).limit(1))
+            if ending and not (collecting or importing or probing):
+                # The sync ends only after its saved results are verified and imported.
+                importing=await db.scalar(select(QbQuestionImport.import_id).where(QbQuestionImport.task_id.in_(task_ids),
+                    QbQuestionImport.status.in_(('queued','preparing','running'))).limit(1))
+                probing=await db.scalar(select(QbQuestionImportIntake.intake_id).where(
+                    QbQuestionImportIntake.task_id.in_(task_ids),
+                    QbQuestionImportIntake.status.in_(('pending','retry','probing'))).limit(1))
             if collecting or importing or probing:
                 await db.commit();continue
             plan.control_state='active' if ending else 'paused'
@@ -143,8 +163,15 @@ async def reconcile_controls(session_factory):
                 plan.enabled=1
                 plan.cycle_state='stopped';plan.cycle_finished_at=now
                 plan.next_cycle_at=now+timedelta(days=plan.refresh_days) if plan.auto_update else None
+                plan.session_end_reason='user_end'
                 cycle=await db.scalar(select(QbSyncCycle).where(QbSyncCycle.plan_id==plan_id,QbSyncCycle.cycle_no==plan.cycle_no))
-                if cycle:cycle.status='stopped';cycle.finished_at=now
+                if cycle:
+                    cycle.status='stopped';cycle.finished_at=now;cycle.end_reason='user_end'
+                    from plugins.bank.service.sync_plans import open_issue_snapshot
+                    round_ids=list((await db.scalars(select(QbSyncJob.run_id).where(
+                        QbSyncJob.options_json['autoPlanId'].as_integer()==plan_id,
+                        QbSyncJob.options_json['autoCycleNo'].as_integer()==plan.cycle_no))).all())
+                    cycle.summary_json={**(cycle.summary_json or {}),**await open_issue_snapshot(db,round_ids)}
                 if plan.discovery_task_id:
                     plan.discovery_processed_task_id=max(plan.discovery_processed_task_id or 0,plan.discovery_task_id)
                     plan.discovery_task_id=None
@@ -177,8 +204,8 @@ async def resume_stopped_collections(session_factory):
             if scope and not scope.snapshot_complete:
                 if scope.collector_run_id and scope.snapshot_locked_at:
                     extra={k:v for k,v in options.items() if k in (
-                        'autoPlanId','autoPlanName','autoCycleNo','autoCycleName','manualPlanId','manualSingle',
-                        'manualDispatchRequested','allowWhilePlanPaused','listConcurrency','concurrencySource','inheritedConcurrency')}
+                        'autoPlanId','autoPlanName','autoCycleNo','autoCycleName','manualPlanId','manualSingle','supplementId',
+                        'manualDispatchRequested','allowWhilePlanPaused','listConcurrency','concurrencySource','inheritedConcurrency','syncMode')}
                     extra['resumeFirst']=True
                     if options.get('concurrencySource')!='task':
                         from plugins.bank.service import task_concurrency
@@ -208,6 +235,8 @@ async def set_order(db, plan_id, payload):
     ids=payload.textbook_ids
     if len(set(ids))!=len(ids) or set(ids)!=valid:
         raise ServiceException(message='教材清单已变化，请刷新后重新排序')
+    # Compare against the order the user saw before this change (R12).
+    previous=[b['textbookId'] for b in books]
     plan.textbook_order=ids;plan.revision+=1
     ranks={id:i for i,id in enumerate(ids)}
     rows=(await db.execute(select(QbSyncJob,QbSyncJobScope.local_textbook_id)
@@ -215,6 +244,9 @@ async def set_order(db, plan_id, payload):
         .where(owned_condition(plan_id),QbSyncJob.status=='queued',QbSyncJob.active_slot.is_(None)).with_for_update())).all()
     for job,book_id in rows:job.dispatch_rank=ranks.get(book_id,len(ids))
     await db.commit()
+    from plugins.bank.service import diagnostics
+    diagnostics.event('queue_reordered', stage='queue', planId=plan_id, revision=plan.revision,
+                      movedCount=sum(1 for a,b in zip(previous,ids) if a!=b), queuedTaskCount=len(rows))
     return {'revision':plan.revision,'textbookIds':ids}
 
 
@@ -237,7 +269,8 @@ async def sync_book_once(db, plan_id, textbook_id, payload, operator):
             from plugins.bank.service.task_concurrency import set_waiting
             await set_waiting(db,existing,payload.list_concurrency)
             existing.options_json={**(existing.options_json or {}),'manualDispatchRequested':True,
-                                   'planWorkPaused':False,'allowWhilePlanPaused':bool(payload.allow_paused)}
+                                   'planWorkPaused':False,'allowWhilePlanPaused':bool(payload.allow_paused),
+                                   **({'syncMode':'full'} if payload.full else {})}
             existing.dispatch_priority=(await db.scalar(select(func.max(QbSyncJob.dispatch_priority))) or 0)+1
             if existing.dispatch_error=='学科计划已暂停':
                 existing.dispatch_not_before=None;existing.dispatch_error=None
@@ -255,24 +288,152 @@ async def sync_book_once(db, plan_id, textbook_id, payload, operator):
         QbSyncJob.options_json['autoCycleNo'].as_integer() == plan.cycle_no,
     ).order_by(QbSyncJob.run_id.desc()).limit(1))
     previous_id = previous.run_id if previous else None
+    supplement_run = plan.cycle_state in ('completed', 'stopped', 'idle')
     options = {'manualPlanId': plan_id, 'manualSingle': True, 'manualDispatchRequested': True,
                'allowWhilePlanPaused': bool(payload.allow_paused), 'autoPlanId': plan_id,
-               'autoPlanName': plan.plan_name, 'autoCycleNo': plan.cycle_no, 'autoCycleName': plan.cycle_name}
+               'autoPlanName': plan.plan_name, 'autoCycleNo': plan.cycle_no, 'autoCycleName': plan.cycle_name,
+               'syncMode': 'full' if payload.full else 'incremental', 'supplementRun': supplement_run}
+    if supplement_run:
+        # Between sessions this is a one-book supplement with its own record:
+        # it never joins the finished round's history, never wakes the whole
+        # subject and never moves the scheduled wake-up (spec 4.1, A09).
+        from plugins.bank.entity.do.bank_do import QbSyncSupplement
+        now=await _clock(db)
+        supplement=QbSyncSupplement(plan_id=plan_id,textbook_id=textbook_id,status='running',
+                                    sync_mode=options['syncMode'],created_by=str(operator)[:64],started_at=now)
+        db.add(supplement)
+        await db.flush()
+        options.update(autoCycleNo=None, supplementId=supplement.supplement_id,
+                       autoCycleName=f'单本补采 #{supplement.supplement_id} · {book.textbook_name}')
     await db.commit()
-    if previous_id:
-        result = await SyncTaskService.retry_question(db, previous_id, operator, settings=payload, execution_options=options)
-    else:
-        result = await SyncTaskService.create_question(db, {'versionId': book.version_id, 'textbookId': textbook_id,
-            'listConcurrency': payload.list_concurrency, 'allowPaused': payload.allow_paused}, operator,
-            automatic_options=options)
-    task_id=result.get('taskId') or result['runId']
-    row=await db.get(QbSyncJob,task_id,with_for_update=True)
-    row.dispatch_priority=(await db.scalar(select(func.max(QbSyncJob.dispatch_priority))) or 0)+1
-    state=await db.scalar(select(QbSyncBookState).where(QbSyncBookState.plan_id==plan_id,QbSyncBookState.textbook_id==textbook_id))
-    if state is None:
-        state=QbSyncBookState(plan_id=plan_id,textbook_id=textbook_id,enabled=1,last_cycle_no=0,revision=1)
-        db.add(state)
-    state.last_manual_task_id=task_id
-    state.last_task_id=task_id
-    await db.commit()
+    try:
+        if previous_id:
+            result = await SyncTaskService.retry_question(db, previous_id, operator, settings=payload, execution_options=options)
+        else:
+            result = await SyncTaskService.create_question(db, {'versionId': book.version_id, 'textbookId': textbook_id,
+                'listConcurrency': payload.list_concurrency, 'allowPaused': payload.allow_paused}, operator,
+                automatic_options=options)
+        task_id=result.get('taskId') or result['runId']
+        row=await db.get(QbSyncJob,task_id,with_for_update=True)
+        row.dispatch_priority=(await db.scalar(select(func.max(QbSyncJob.dispatch_priority))) or 0)+1
+        state=await db.scalar(select(QbSyncBookState).where(QbSyncBookState.plan_id==plan_id,QbSyncBookState.textbook_id==textbook_id))
+        if state is None:
+            state=QbSyncBookState(plan_id=plan_id,textbook_id=textbook_id,enabled=1,last_cycle_no=0,revision=1)
+            db.add(state)
+        state.last_manual_task_id=task_id
+        state.last_task_id=task_id
+        if options.get('supplementId'):
+            from plugins.bank.entity.do.bank_do import QbSyncSupplement
+            supplement=await db.get(QbSyncSupplement,options['supplementId'])
+            supplement.task_id=task_id
+            from plugins.bank.service import diagnostics
+            diagnostics.event('supplement_started', stage='plan', planId=plan_id, supplementId=supplement.supplement_id,
+                              textbookId=textbook_id, taskId=task_id, syncMode=supplement.sync_mode, operator=operator)
+        await db.commit()
+    except Exception as exc:
+        # A failed response can follow a committed execution. Relink it; only
+        # a create with no execution should close the supplement as failed.
+        await db.rollback()
+        if options.get('supplementId'):
+            recovered = await fail_supplement(db, options['supplementId'], getattr(exc, 'message', None) or str(exc))
+            if recovered:
+                return {'taskId': recovered, 'existing': True}
+        raise
     return {'taskId':task_id,'existing':False}
+
+
+async def relink_supplement(db, supplement, execution):
+    supplement.task_id = execution.run_id
+    state = await db.scalar(select(QbSyncBookState).where(
+        QbSyncBookState.plan_id == supplement.plan_id,
+        QbSyncBookState.textbook_id == supplement.textbook_id))
+    if state is None:
+        state = QbSyncBookState(plan_id=supplement.plan_id, textbook_id=supplement.textbook_id,
+                               enabled=1, last_cycle_no=0, revision=1)
+        db.add(state)
+    state.last_task_id = max(state.last_task_id or 0, execution.run_id)
+    state.last_manual_task_id = max(state.last_manual_task_id or 0, execution.run_id)
+
+
+async def fail_supplement(db, supplement_id, reason):
+    from plugins.bank.entity.do.bank_do import QbSyncSupplement
+    from plugins.bank.service import diagnostics
+    row=await db.get(QbSyncSupplement,supplement_id,with_for_update=True,populate_existing=True)
+    if row is None or row.status!='running':
+        return
+    execution=await db.scalar(select(QbSyncJob).where(QbSyncJob.task_module=='question',
+        QbSyncJob.options_json['supplementId'].as_integer()==supplement_id)
+        .order_by(QbSyncJob.run_id.desc()).limit(1))
+    if execution:
+        await relink_supplement(db, row, execution)
+        await db.commit()
+        diagnostics.event('supplement_execution_relinked', stage='plan', planId=row.plan_id,
+                          supplementId=supplement_id, taskId=execution.run_id)
+        return execution.run_id
+    row.status='failed'
+    row.finished_at=await _clock(db)
+    row.summary_json={**(row.summary_json or {}),'error':str(reason or '创建补采执行失败')[:500]}
+    await db.commit()
+    diagnostics.event('supplement_failed', stage='plan', planId=row.plan_id, supplementId=supplement_id,
+                      reason=row.summary_json['error'])
+
+
+def _plan_jobs_query(plan_id):
+    return (select(QbSyncJob, QbSyncJobScope.local_textbook_id)
+            .join(QbSyncJobScope, QbSyncJobScope.run_id == QbSyncJob.run_id)
+            .where(owned_condition(plan_id), QbSyncJob.task_module == 'question'))
+
+
+async def pin_book(db, plan_id, textbook_id, revision):
+    """Run this book next after the current one, without changing plan order.
+
+    One-off: only the queued execution's priority changes, so later rounds
+    keep the saved textbook order (spec 4.2, A03/A04). The running book is
+    never interrupted and no second execution is queued.
+    """
+    plan=await _lock_plan(db,plan_id,revision)
+    rows=(await db.execute(_plan_jobs_query(plan_id).where(
+        QbSyncJobScope.local_textbook_id==textbook_id,QbSyncJob.status=='queued',QbSyncJob.active_slot.is_(None))
+        .with_for_update())).all()
+    if not rows:
+        raise ServiceException(message='该教材当前没有待执行任务，可使用“再同步一次”')
+    top=(await db.scalar(select(func.max(QbSyncJob.dispatch_priority))) or 0)+1
+    for job,_ in rows:
+        job.dispatch_priority=top
+        job.options_json={**(job.options_json or {}),'pinnedOnce':True}
+    plan.revision+=1
+    await db.commit()
+    from plugins.bank.service import diagnostics
+    diagnostics.event('queue_pinned', stage='queue', planId=plan_id, textbookId=textbook_id,
+                      taskIds=[job.run_id for job,_ in rows], revision=plan.revision)
+    return {'revision':plan.revision,'taskIds':[job.run_id for job,_ in rows]}
+
+
+async def plan_queue(db, plan_id):
+    """Actual dispatch order: current, next, then the waiting queue."""
+    from plugins.bank.entity.do.bank_do import QbTextbook
+    from plugins.bank.service.sync_dispatch import queue_fields, settling_book_task
+    plan=await db.get(QbSyncPlan,plan_id)
+    if plan is None:
+        raise ServiceException(message='计划不存在')
+    settling_id = await settling_book_task(db)
+    rows=(await db.execute(_plan_jobs_query(plan_id).where(
+        or_(QbSyncJob.active_slot.is_not(None),QbSyncJob.status=='queued',QbSyncJob.run_id==settling_id))
+        .order_by(QbSyncJob.active_slot.is_(None),QbSyncJob.dispatch_priority.desc(),QbSyncJob.dispatch_rank,QbSyncJob.run_id))).all()
+    names=dict((await db.execute(select(QbTextbook.textbook_id,QbTextbook.textbook_name)
+        .where(QbTextbook.textbook_id.in_([book for _,book in rows])))).all()) if rows else {}
+    items=[]
+    for job,book in rows:
+        options=job.options_json or {}
+        items.append({'taskId':job.run_id,'textbookId':book,'textbookName':names.get(book),
+                      'status':job.status,'running':job.active_slot is not None or job.run_id==settling_id,
+                      'settling':job.run_id==settling_id,
+                      'cycleNo':options.get('autoCycleNo'),'pinned':bool(options.get('pinnedOnce')),
+                      'syncMode':options.get('syncMode') or 'incremental',
+                      'waitReason':(('等待来源验证后续采' if options.get('planSourceResumePending') else
+                                     '等待已保存成果完成核验和入库') if job.run_id==settling_id else
+                                    queue_fields(job).get('queueReason') or job.dispatch_error)})
+    current=[i for i in items if i['running']]
+    waiting=[i for i in items if not i['running']]
+    return {'current':current[0] if current else None,'next':waiting[0] if waiting else None,
+            'queue':waiting,'sessionNo':plan.session_no,'roundNo':plan.session_round}

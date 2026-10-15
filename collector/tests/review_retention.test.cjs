@@ -1,0 +1,30 @@
+'use strict';
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const { DatabaseSync } = require('node:sqlite');
+const { pruneRetention } = require('../src/storage/retention.cjs');
+for (const kind of ['raw', 'diagnostics'])
+  test(`review preserve ${kind} without import or issue clearance`, () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'review-retention-'));
+    const db = new DatabaseSync(':memory:');
+    db.exec(`CREATE TABLE sync_runs(id INTEGER PRIMARY KEY,status TEXT,snapshot_locked_at TEXT);
+    CREATE TABLE sync_result_cleanup(run_id INTEGER PRIMARY KEY);
+    INSERT INTO sync_runs VALUES(1,'success','sealed'),(2,'failed','sealed');`);
+    const file =
+      kind === 'raw'
+        ? path.join(dir, 'raw', '2026-10-01', 'run-1', 'page.json.gz')
+        : path.join(dir, 'diagnostics', 'job-2.jsonl.gz');
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, 'evidence');
+    fs.utimesSync(file, new Date('2026-10-01'), new Date('2026-10-01'));
+    try {
+      pruneRetention(dir, db, { now: Date.parse('2026-10-14T00:00:00Z') });
+      assert.ok(fs.existsSync(file), `${kind} evidence deleted without downstream clearance`);
+    } finally {
+      db.close();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });

@@ -6,3 +6,6 @@ node_modules/
 **/._*
 tests/
 .DS_Store
+legacy/
+.prettierrc.json
+.prettierignore

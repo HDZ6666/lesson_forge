@@ -104,7 +104,9 @@ function fakePage(url = 'about:blank') {
   return {
     url: () => url,
     isClosed: () => closed,
-    close: async () => { closed = true; },
+    close: async () => {
+      closed = true;
+    },
   };
 }
 
@@ -170,11 +172,10 @@ test('Collector 最小化必须经 CDP 回读确认', async () => {
     newCDPSession: async () => session,
   };
   assert.equal(await minimizeCollectorWindow(context), true);
-  assert.deepEqual(calls.map(([method]) => method), [
-    'Browser.getWindowForTarget',
-    'Browser.setWindowBounds',
-    'Browser.getWindowBounds',
-  ]);
+  assert.deepEqual(
+    calls.map(([method]) => method),
+    ['Browser.getWindowForTarget', 'Browser.setWindowBounds', 'Browser.getWindowBounds'],
+  );
 });
 
 test('Collector 新建 worker 或详情页后会再次最小化', async () => {
@@ -232,16 +233,19 @@ test('Collector 最小化失败时返回 false 且不误报成功', async () => 
   console.log = (...args) => logged.push(args.join(' '));
   console.warn = (...args) => warned.push(args.join(' '));
   try {
-    assert.equal(
-      await minimizeCollectorWindowWithLog(context, { headless: false }),
-      false,
-    );
+    assert.equal(await minimizeCollectorWindowWithLog(context, { headless: false }), false);
   } finally {
     console.log = originalLog;
     console.warn = originalWarn;
   }
-  assert.equal(logged.some((line) => line.includes('已最小化')), false);
-  assert.equal(warned.some((line) => line.includes('未生效')), true);
+  assert.equal(
+    logged.some((line) => line.includes('已最小化')),
+    false,
+  );
+  assert.equal(
+    warned.some((line) => line.includes('未生效')),
+    true,
+  );
 });
 
 function sampleVersion(overrides = {}) {
@@ -284,11 +288,14 @@ test('默认参数和非法参数', () => {
 
   const custom = parseArgs([
     '--acknowledge-source-policy',
-    '--seed-url', 'https://zujuan.xkw.com/czsx/zj261296/',
+    '--seed-url',
+    'https://zujuan.xkw.com/czsx/zj261296/',
     '--headful',
     '--no-save-raw',
-    '--timeout', '15000',
-    '--json-output', 'report.json',
+    '--timeout',
+    '15000',
+    '--json-output',
+    'report.json',
   ]);
   assert.equal(custom.acknowledgeSourcePolicy, true);
   assert.equal(custom.seedUrl, 'https://zujuan.xkw.com/czsx/zj261296/');
@@ -426,13 +433,16 @@ test('接口返回的 href 会保存为教材来源 URL', () => {
 
 test('HTML 数字实体解码成中文教材名', () => {
   assert.equal(decodeHtmlEntities('&#x4E03;&#x5E74;&#x7EA7;&#x4E0B;&#x518C;'), '七年级下册');
-  const textbooks = parseTextbooksFromApiHtml(`
+  const textbooks = parseTextbooksFromApiHtml(
+    `
     <a class="item font-item" href="/czsx/zj58065/" chapter-id="58065">&#x4E03;&#x5E74;&#x7EA7;&#x4E0B;&#x518C;</a>
-  `, {
-    versionExternalId: '58019',
-    baseUrl: 'https://zujuan.xkw.com',
-    bankPath: 'czsx',
-  });
+  `,
+    {
+      versionExternalId: '58019',
+      baseUrl: 'https://zujuan.xkw.com',
+      bankPath: 'czsx',
+    },
+  );
   assert.equal(textbooks[0].textbookName, '七年级下册');
   assert.deepEqual(parseGradeVolume(textbooks[0].textbookName), { grade: '七年级', volume: '下册' });
 });
@@ -490,33 +500,41 @@ test('同名教材在不同版本下的正确归属', () => {
   const { dbPath } = tempDb();
   const store = new MetadataStore(dbPath);
   try {
-    store.saveVersionGroup(sampleVersion(), [
-      sampleTextbook({
-        externalTextbookId: '195861',
-        textbookName: '七年级上册',
-        grade: '七年级',
-        volume: '上册',
-        bootstrapChapterExternalId: '195870',
-        sortOrder: 0,
+    store.saveVersionGroup(
+      sampleVersion(),
+      [
+        sampleTextbook({
+          externalTextbookId: '195861',
+          textbookName: '七年级上册',
+          grade: '七年级',
+          volume: '上册',
+          bootstrapChapterExternalId: '195870',
+          sortOrder: 0,
+        }),
+      ],
+      '2026-01-01T00:00:00.000Z',
+    );
+    store.saveVersionGroup(
+      sampleVersion({
+        externalVersionId: '55474',
+        versionName: '北师大版（2012）',
+        isNew: 'N',
+        sortOrder: 1,
       }),
-    ], '2026-01-01T00:00:00.000Z');
-    store.saveVersionGroup(sampleVersion({
-      externalVersionId: '55474',
-      versionName: '北师大版（2012）',
-      isNew: 'N',
-      sortOrder: 1,
-    }), [
-      sampleTextbook({
-        externalTextbookId: '55480',
-        versionExternalId: '55474',
-        textbookName: '七年级上册',
-        grade: '七年级',
-        volume: '上册',
-        sourceUrl: 'https://zujuan.xkw.com/czsx/zj55480/',
-        bootstrapChapterExternalId: '55490',
-        sortOrder: 0,
-      }),
-    ], '2026-01-01T00:00:00.000Z');
+      [
+        sampleTextbook({
+          externalTextbookId: '55480',
+          versionExternalId: '55474',
+          textbookName: '七年级上册',
+          grade: '七年级',
+          volume: '上册',
+          sourceUrl: 'https://zujuan.xkw.com/czsx/zj55480/',
+          bootstrapChapterExternalId: '55490',
+          sortOrder: 0,
+        }),
+      ],
+      '2026-01-01T00:00:00.000Z',
+    );
 
     const rows = store.listTextbooks().filter((row) => row.textbook_name === '七年级上册');
     assert.equal(rows.length, 2);
@@ -533,12 +551,12 @@ test('版本和教材按外部 ID 去重', () => {
   assert.equal(versions.length, 3);
   const textbooksA = parseTextbooksFromHtml(TEXTBOOK_HTML_A, { versionExternalId: '195847', allowEmpty: true });
   const textbooksB = parseTextbooksFromHtml(TEXTBOOK_HTML_B, { versionExternalId: '55474', allowEmpty: true });
-  const duplicateTextbooks = [
-    ...textbooksA,
-    { ...textbooksA[0], versionExternalId: '195847' },
-  ];
+  const duplicateTextbooks = [...textbooksA, { ...textbooksA[0], versionExternalId: '195847' }];
   const validation = validateDiscovery(versions, duplicateTextbooks);
-  assert.equal(validation.duplicateIds.some((item) => item.type === 'textbook'), true);
+  assert.equal(
+    validation.duplicateIds.some((item) => item.type === 'textbook'),
+    true,
+  );
   const unique = validateDiscovery(versions, [...textbooksA, ...textbooksB]);
   assert.deepEqual(unique.duplicateIds, []);
 });
@@ -555,15 +573,15 @@ test('缺少稳定 external ID 时阻断', () => {
     () => assertDiscoveryIds(versions, []),
     (error) => error instanceof StopCrawlError && error.code === 'missing_external_id',
   );
-  const textbooks = parseTextbooksFromHtml(`
+  const textbooks = parseTextbooksFromHtml(
+    `
     <div id="chapter_textbooks">
       <a class="item font-item" href="javascript:void 0">七年级上册</a>
     </div>
-  `, { versionExternalId: '195847', allowEmpty: true });
-  assert.throws(
-    () => assertDiscoveryIds([sampleVersion()], textbooks),
-    /缺少稳定来源 ID/,
+  `,
+    { versionExternalId: '195847', allowEmpty: true },
   );
+  assert.throws(() => assertDiscoveryIds([sampleVersion()], textbooks), /缺少稳定来源 ID/);
 });
 
 test('source_textbooks 外键完整性', () => {
@@ -572,26 +590,30 @@ test('source_textbooks 外键完整性', () => {
   try {
     store.saveVersionGroup(sampleVersion(), [sampleTextbook()], '2026-01-01T00:00:00.000Z');
     assert.throws(() => {
-      store.db.prepare(`
+      store.db
+        .prepare(
+          `
         INSERT INTO source_textbooks (
           provider, external_textbook_id, version_external_id, textbook_name,
           grade, volume, source_url, sort_order, status,
           bootstrap_chapter_external_id, first_seen_at, last_seen_at, raw_json
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, '0', ?, ?, ?, ?)
-      `).run(
-        'zujuan',
-        'orphan-1',
-        'missing-version',
-        '七年级上册',
-        '七年级',
-        '上册',
-        'https://zujuan.xkw.com/czsx/zj1/',
-        0,
-        '1',
-        '2026-01-01T00:00:00.000Z',
-        '2026-01-01T00:00:00.000Z',
-        '{}',
-      );
+      `,
+        )
+        .run(
+          'zujuan',
+          'orphan-1',
+          'missing-version',
+          '七年级上册',
+          '七年级',
+          '上册',
+          'https://zujuan.xkw.com/czsx/zj1/',
+          0,
+          '1',
+          '2026-01-01T00:00:00.000Z',
+          '2026-01-01T00:00:00.000Z',
+          '{}',
+        );
     }, /FOREIGN KEY|constraint/i);
     assert.equal(store.listTextbooks().length, 1);
   } finally {
@@ -649,10 +671,12 @@ test('扫描失败不删除、不停用历史数据', () => {
     assert.throws(() => {
       store.saveVersionGroup(
         sampleVersion({ externalVersionId: 'new-ok' }),
-        [sampleTextbook({
-          externalTextbookId: 'bad-book',
-          versionExternalId: 'not-written-yet-other',
-        })],
+        [
+          sampleTextbook({
+            externalTextbookId: 'bad-book',
+            versionExternalId: 'not-written-yet-other',
+          }),
+        ],
         '2026-02-01T00:00:00.000Z',
       );
     });
@@ -673,32 +697,40 @@ test('JSON 汇总数量与 SQLite 实际数量一致', () => {
   const { dbPath } = tempDb();
   const store = new MetadataStore(dbPath);
   try {
-    store.saveVersionGroup(sampleVersion(), [
-      sampleTextbook(),
-      sampleTextbook({
-        externalTextbookId: '195861',
-        textbookName: '七年级上册',
-        grade: '七年级',
-        volume: '上册',
-        sourceUrl: 'https://zujuan.xkw.com/czsx/zj195861/',
-        bootstrapChapterExternalId: '195870',
+    store.saveVersionGroup(
+      sampleVersion(),
+      [
+        sampleTextbook(),
+        sampleTextbook({
+          externalTextbookId: '195861',
+          textbookName: '七年级上册',
+          grade: '七年级',
+          volume: '上册',
+          sourceUrl: 'https://zujuan.xkw.com/czsx/zj195861/',
+          bootstrapChapterExternalId: '195870',
+          sortOrder: 1,
+        }),
+      ],
+      '2026-01-01T00:00:00.000Z',
+    );
+    store.saveVersionGroup(
+      sampleVersion({
+        externalVersionId: '55474',
+        versionName: '北师大版（2012）',
+        isNew: 'N',
         sortOrder: 1,
       }),
-    ], '2026-01-01T00:00:00.000Z');
-    store.saveVersionGroup(sampleVersion({
-      externalVersionId: '55474',
-      versionName: '北师大版（2012）',
-      isNew: 'N',
-      sortOrder: 1,
-    }), [
-      sampleTextbook({
-        externalTextbookId: '55480',
-        versionExternalId: '55474',
-        textbookName: '七年级上册',
-        sourceUrl: 'https://zujuan.xkw.com/czsx/zj55480/',
-        bootstrapChapterExternalId: '55490',
-      }),
-    ], '2026-01-01T00:00:00.000Z');
+      [
+        sampleTextbook({
+          externalTextbookId: '55480',
+          versionExternalId: '55474',
+          textbookName: '七年级上册',
+          sourceUrl: 'https://zujuan.xkw.com/czsx/zj55480/',
+          bootstrapChapterExternalId: '55490',
+        }),
+      ],
+      '2026-01-01T00:00:00.000Z',
+    );
 
     const textbooks = [
       sampleTextbook(),
@@ -710,17 +742,20 @@ test('JSON 汇总数量与 SQLite 实际数量一致', () => {
         bootstrapChapterExternalId: '55490',
       }),
     ];
-    const validation = validateDiscovery([
-      sampleVersion(),
-      sampleVersion({ externalVersionId: '55474', versionName: '北师大版（2012）' }),
-    ], textbooks);
+    const validation = validateDiscovery(
+      [sampleVersion(), sampleVersion({ externalVersionId: '55474', versionName: '北师大版（2012）' })],
+      textbooks,
+    );
     const report = buildReport(store, {
       validation,
       counts: { inserted: 5, updated: 0, unchanged: 0 },
     });
     assert.equal(report.versionCount, store.listVersions().length);
     assert.equal(report.textbookCount, store.listTextbooks().length);
-    assert.equal(report.versions.reduce((sum, item) => sum + item.textbookCount, 0), report.textbookCount);
+    assert.equal(
+      report.versions.reduce((sum, item) => sum + item.textbookCount, 0),
+      report.textbookCount,
+    );
     assert.equal(report.validation.missingBootstrapChapters.length, 1);
     const byName = Object.fromEntries(report.versions.map((item) => [item.versionName, item]));
     assert.equal(byName['北师大版'].textbookCount, 2);
@@ -741,14 +776,18 @@ test('textbook-id 自动解析 bootstrap chapter，且不会回退到 261314', (
   const { dbPath } = tempDb();
   const store = new MetadataStore(dbPath);
   try {
-    store.saveVersionGroup(sampleVersion(), [
-      sampleTextbook({
-        externalTextbookId: '195861',
-        textbookName: '七年级上册',
-        bootstrapChapterExternalId: '195870',
-        sourceUrl: 'https://zujuan.xkw.com/czsx/zj195861/',
-      }),
-    ], '2026-01-01T00:00:00.000Z');
+    store.saveVersionGroup(
+      sampleVersion(),
+      [
+        sampleTextbook({
+          externalTextbookId: '195861',
+          textbookName: '七年级上册',
+          bootstrapChapterExternalId: '195870',
+          sourceUrl: 'https://zujuan.xkw.com/czsx/zj195861/',
+        }),
+      ],
+      '2026-01-01T00:00:00.000Z',
+    );
   } finally {
     store.close();
   }
@@ -763,10 +802,7 @@ test('textbook-id 自动解析 bootstrap chapter，且不会回退到 261314', (
   assert.equal(resolved.chapterIds.length, 1);
   assert.equal(resolved.chapterIds[0], '195870');
   assert.notEqual(resolved.chapterIds[0], '261314');
-  assert.equal(
-    buildListUrl(resolved, resolved.chapterIds[0], 1),
-    'https://zujuan.xkw.com/czsx/zj195870/o2/',
-  );
+  assert.equal(buildListUrl(resolved, resolved.chapterIds[0], 1), 'https://zujuan.xkw.com/czsx/zj195870/o2/');
   assert.doesNotMatch(buildListUrl(resolved, resolved.chapterIds[0], 1), /zj261314/);
   assert.equal(lookupBootstrapChapter(dbPath, '195861'), '195870');
 });
@@ -788,14 +824,18 @@ test('教材没有入口章节时用教材页 ID 作为同步入口，不回退 
   const { dbPath } = tempDb();
   const store = new MetadataStore(dbPath);
   try {
-    store.saveVersionGroup(sampleVersion(), [
-      sampleTextbook({
-        externalTextbookId: '195861',
-        textbookName: '七年级上册',
-        bootstrapChapterExternalId: null,
-        sourceUrl: 'https://zujuan.xkw.com/czsx/zj195861/',
-      }),
-    ], '2026-01-01T00:00:00.000Z');
+    store.saveVersionGroup(
+      sampleVersion(),
+      [
+        sampleTextbook({
+          externalTextbookId: '195861',
+          textbookName: '七年级上册',
+          bootstrapChapterExternalId: null,
+          sourceUrl: 'https://zujuan.xkw.com/czsx/zj195861/',
+        }),
+      ],
+      '2026-01-01T00:00:00.000Z',
+    );
   } finally {
     store.close();
   }
@@ -803,30 +843,35 @@ test('教材没有入口章节时用教材页 ID 作为同步入口，不回退 
   const resolved = resolveSyncScope(options, { dbPath });
   assert.deepEqual(resolved.chapterIds, ['195861']);
   assert.notEqual(resolved.chapterIds[0], '261314');
-  assert.equal(
-    buildListUrl(resolved, resolved.chapterIds[0], 1),
-    'https://zujuan.xkw.com/czsx/zj195861/o2/',
-  );
+  assert.equal(buildListUrl(resolved, resolved.chapterIds[0], 1), 'https://zujuan.xkw.com/czsx/zj195861/o2/');
 });
 
 test('再次发现教材时保留已有入口章节，不用空值覆盖', () => {
   const { dbPath } = tempDb();
   const store = new MetadataStore(dbPath);
   try {
-    store.saveVersionGroup(sampleVersion(), [
-      sampleTextbook({
-        externalTextbookId: '195861',
-        textbookName: '七年级上册',
-        bootstrapChapterExternalId: '195870',
-      }),
-    ], '2026-01-01T00:00:00.000Z');
-    store.saveVersionGroup(sampleVersion(), [
-      sampleTextbook({
-        externalTextbookId: '195861',
-        textbookName: '七年级上册',
-        bootstrapChapterExternalId: null,
-      }),
-    ], '2026-01-02T00:00:00.000Z');
+    store.saveVersionGroup(
+      sampleVersion(),
+      [
+        sampleTextbook({
+          externalTextbookId: '195861',
+          textbookName: '七年级上册',
+          bootstrapChapterExternalId: '195870',
+        }),
+      ],
+      '2026-01-01T00:00:00.000Z',
+    );
+    store.saveVersionGroup(
+      sampleVersion(),
+      [
+        sampleTextbook({
+          externalTextbookId: '195861',
+          textbookName: '七年级上册',
+          bootstrapChapterExternalId: null,
+        }),
+      ],
+      '2026-01-02T00:00:00.000Z',
+    );
     assert.equal(store.getTextbook('195861').bootstrap_chapter_external_id, '195870');
   } finally {
     store.close();
@@ -841,10 +886,7 @@ test('非默认 textbook-id 缺少元数据时使用教材来源 ID，不回退�
   const resolved = resolveSyncScope(options, { dbPath });
   assert.deepEqual(resolved.chapterIds, ['195861']);
   assert.notEqual(resolved.chapterIds[0], DEFAULT_CHAPTER_ID);
-  assert.equal(
-    buildListUrl(resolved, resolved.chapterIds[0], 1),
-    'https://zujuan.xkw.com/czsx/zj195861/o2/',
-  );
+  assert.equal(buildListUrl(resolved, resolved.chapterIds[0], 1), 'https://zujuan.xkw.com/czsx/zj195861/o2/');
 });
 
 test('版本名称精确匹配，北师大版不合并北师大版（2012）', () => {
@@ -854,32 +896,41 @@ test('版本名称精确匹配，北师大版不合并北师大版（2012）', (
   ];
   const picked = pickExactByName(versions, '北师大版', { nameKey: 'versionName', label: '版本' });
   assert.equal(picked.externalVersionId, '195847');
-  assert.throws(
-    () => pickExactByName(versions, '北大师版', { nameKey: 'versionName', label: '版本' }),
-    /未找到版本/,
-  );
+  assert.throws(() => pickExactByName(versions, '北大师版', { nameKey: 'versionName', label: '版本' }), /未找到版本/);
 });
 
 test('lookupTextbookByNames 用版本名和教材名解析入口章节', () => {
   const { dbPath } = tempDb();
   const store = new MetadataStore(dbPath);
   try {
-    store.saveVersionGroup(sampleVersion(), [sampleTextbook({
-      externalTextbookId: '260617',
-      textbookName: '九年级上册',
-      bootstrapChapterExternalId: '261285',
-    })], '2026-01-01T00:00:00.000Z');
-    store.saveVersionGroup(sampleVersion({
-      externalVersionId: '55474',
-      versionName: '北师大版（2012）',
-      isNew: 'N',
-    }), [sampleTextbook({
-      externalTextbookId: '55480',
-      versionExternalId: '55474',
-      textbookName: '九年级上册',
-      bootstrapChapterExternalId: '55490',
-      sourceUrl: 'https://zujuan.xkw.com/czsx/zj55480/',
-    })], '2026-01-01T00:00:00.000Z');
+    store.saveVersionGroup(
+      sampleVersion(),
+      [
+        sampleTextbook({
+          externalTextbookId: '260617',
+          textbookName: '九年级上册',
+          bootstrapChapterExternalId: '261285',
+        }),
+      ],
+      '2026-01-01T00:00:00.000Z',
+    );
+    store.saveVersionGroup(
+      sampleVersion({
+        externalVersionId: '55474',
+        versionName: '北师大版（2012）',
+        isNew: 'N',
+      }),
+      [
+        sampleTextbook({
+          externalTextbookId: '55480',
+          versionExternalId: '55474',
+          textbookName: '九年级上册',
+          bootstrapChapterExternalId: '55490',
+          sourceUrl: 'https://zujuan.xkw.com/czsx/zj55480/',
+        }),
+      ],
+      '2026-01-01T00:00:00.000Z',
+    );
   } finally {
     store.close();
   }

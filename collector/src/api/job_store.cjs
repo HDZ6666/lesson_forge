@@ -25,17 +25,53 @@ const MAX_PAYLOAD_CHARS = 512 * 1024;
 const LIVE_OWNER_TOKENS = new Set();
 
 const PERSISTED_FIELDS = [
-  'requestDigest', 'listConcurrency',
-  'workflowVersion', 'sourceNamespace',
-  'id', 'runType', 'status', 'phase', 'metadataRunId', 'collectorRunId',
-  'textbookExternalIds', 'scopeItems', 'maxPages', 'limitTo1000Pages', 'totalVersions',
-  'completedVersions', 'totalTextbooks', 'completedTextbooks', 'catalogCount',
-  'questionCount', 'questionCatalogCount', 'questionTagCount',
-  'questionAssetCount', 'snapshotLockedAt', 'snapshotComplete',
-  'currentTextbookId', 'currentTextbookName', 'progressPercent',
-  'errorMessage', 'errorCode', 'createdAt', 'startedAt', 'finishedAt',
-  'cancelRequested', 'partialInterrupted', 'partialMessage', 'abortCode',
-  'lastErrorEvent', 'waitingReason', 'waitingSince', 'childRssMb', 'childRssPeakMb',
+  'requestDigest',
+  'listConcurrency',
+  'workflowVersion',
+  'sourceNamespace',
+  'id',
+  'runType',
+  'status',
+  'phase',
+  'metadataRunId',
+  'collectorRunId',
+  'textbookExternalIds',
+  'scopeItems',
+  'maxPages',
+  'limitTo1000Pages',
+  'catalogPageLimit',
+  'syncMode',
+  'totalVersions',
+  'completedVersions',
+  'totalTextbooks',
+  'completedTextbooks',
+  'catalogCount',
+  'questionCount',
+  'questionCatalogCount',
+  'questionTagCount',
+  'questionAssetCount',
+  'snapshotLockedAt',
+  'snapshotComplete',
+  'currentTextbookId',
+  'currentTextbookName',
+  'progressPercent',
+  'errorMessage',
+  'errorCode',
+  'createdAt',
+  'startedAt',
+  'finishedAt',
+  'cancelRequested',
+  'partialInterrupted',
+  'partialMessage',
+  'abortCode',
+  'lastErrorEvent',
+  'waitingReason',
+  'waitingSince',
+  'childRssMb',
+  'childRssPeakMb',
+  'childBrowserRssMb',
+  'childBrowserRssPeakMb',
+  'browserRecycleCount',
 ];
 
 function ensureJobSchema(db) {
@@ -122,16 +158,16 @@ function deserializeJob(row) {
     id: String(row.id),
     runType: String(row.run_type || payload.runType || 'content'),
     status: String(row.status || payload.status || 'failed'),
-    phase: row.phase == null ? payload.phase ?? null : String(row.phase),
-    metadataRunId: row.metadata_run_id == null ? payload.metadataRunId ?? null : Number(row.metadata_run_id),
-    collectorRunId: row.collector_run_id == null ? payload.collectorRunId ?? null : Number(row.collector_run_id),
-    progressPercent: row.progress_percent == null ? payload.progressPercent ?? 0 : Number(row.progress_percent),
-    errorCode: row.error_code == null ? payload.errorCode ?? null : String(row.error_code),
-    errorMessage: row.error_message == null ? payload.errorMessage ?? null : String(row.error_message),
+    phase: row.phase == null ? (payload.phase ?? null) : String(row.phase),
+    metadataRunId: row.metadata_run_id == null ? (payload.metadataRunId ?? null) : Number(row.metadata_run_id),
+    collectorRunId: row.collector_run_id == null ? (payload.collectorRunId ?? null) : Number(row.collector_run_id),
+    progressPercent: row.progress_percent == null ? (payload.progressPercent ?? 0) : Number(row.progress_percent),
+    errorCode: row.error_code == null ? (payload.errorCode ?? null) : String(row.error_code),
+    errorMessage: row.error_message == null ? (payload.errorMessage ?? null) : String(row.error_message),
     currentTextbookId: row.current_textbook_id == null ? null : String(row.current_textbook_id),
     createdAt: String(row.created_at || payload.createdAt || ''),
-    startedAt: row.started_at == null ? payload.startedAt ?? null : String(row.started_at),
-    finishedAt: row.finished_at == null ? payload.finishedAt ?? null : String(row.finished_at),
+    startedAt: row.started_at == null ? (payload.startedAt ?? null) : String(row.started_at),
+    finishedAt: row.finished_at == null ? (payload.finishedAt ?? null) : String(row.finished_at),
     heartbeatAt: row.heartbeat_at == null ? null : String(row.heartbeat_at),
     cancelRequested: Number(row.cancel_requested || 0) === 1,
     scopeItems: Array.isArray(payload.scopeItems) ? payload.scopeItems : [],
@@ -149,6 +185,8 @@ class JobStore {
   constructor(dbPath) {
     this.dbPath = path.resolve(dbPath);
     this.db = new DatabaseSync(this.dbPath);
+    this._lastSaved = new Map();
+    this._updateStatements = new Map();
     this.db.exec('PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;');
     ensureJobSchema(this.db);
     this.closed = false;
@@ -190,20 +228,28 @@ class JobStore {
     if (this.closed) return;
     const values = this._rowValues(job, owner);
     values.active_slot = 1;
+    this._lastSaved.delete(values.id);
     const columns = Object.keys(values);
     try {
       this.db.exec('BEGIN IMMEDIATE');
-      this.db.prepare(`
+      this.db
+        .prepare(
+          `
         INSERT INTO ${JOB_TABLE} (${columns.join(', ')})
         VALUES (${columns.map(() => '?').join(', ')})
-      `).run(...columns.map((column) => values[column]));
+      `,
+        )
+        .run(...columns.map((column) => values[column]));
       if (job.requestDigest) {
-        this.db.prepare('INSERT INTO collector_job_requests (id, request_digest, created_at) VALUES (?, ?, ?)')
+        this.db
+          .prepare('INSERT INTO collector_job_requests (id, request_digest, created_at) VALUES (?, ?, ?)')
           .run(job.id, job.requestDigest, values.created_at);
       }
       this.db.exec('COMMIT');
     } catch (error) {
-      try { this.db.exec('ROLLBACK'); } catch {}
+      try {
+        this.db.exec('ROLLBACK');
+      } catch {}
       if (isUniqueViolation(error)) {
         const conflict = new Error('采集器已有任务正在运行');
         conflict.statusCode = 409;
@@ -215,25 +261,46 @@ class JobStore {
     this.trim();
   }
 
+  /**
+   * Write the job row.  Returns false when nothing but the heartbeat would
+   * change: progress events often re-send identical counters, and the
+   * watchdog refreshes `heartbeat_at` on its own, so an identical row is not
+   * rewritten (the payload is up to 512 KB).
+   */
   save(job, owner) {
-    if (this.closed) return;
+    if (this.closed) return false;
     const values = this._rowValues(job, owner);
     const columns = Object.keys(values).filter((column) => column !== 'id');
-    this.db.prepare(`
-      UPDATE ${JOB_TABLE}
-      SET ${columns.map((column) => `${column} = ?`).join(', ')}
-      WHERE id = ?
-    `).run(...columns.map((column) => values[column]), values.id);
+    const fingerprint = JSON.stringify(
+      columns.filter((column) => column !== 'heartbeat_at').map((column) => values[column]),
+    );
+    if (this._lastSaved.get(values.id) === fingerprint) return false;
+    const sqlKey = columns.join(',');
+    let statement = this._updateStatements.get(sqlKey);
+    if (!statement) {
+      statement = this.db.prepare(`
+        UPDATE ${JOB_TABLE}
+        SET ${columns.map((column) => `${column} = ?`).join(', ')}
+        WHERE id = ?
+      `);
+      this._updateStatements.set(sqlKey, statement);
+    }
+    statement.run(...columns.map((column) => values[column]), values.id);
+    this._lastSaved.set(values.id, fingerprint);
+    if (this._lastSaved.size > 256) this._lastSaved.delete(this._lastSaved.keys().next().value);
+    return true;
   }
 
   heartbeat(jobId) {
     if (this.closed) return;
-    this.db.prepare(`UPDATE ${JOB_TABLE} SET heartbeat_at = ? WHERE id = ?`)
+    this.db
+      .prepare(`UPDATE ${JOB_TABLE} SET heartbeat_at = ? WHERE id = ?`)
       .run(new Date().toISOString(), String(jobId));
   }
 
   release(jobId) {
     if (this.closed) return;
+    this._lastSaved.delete(String(jobId));
     this.db.prepare(`UPDATE ${JOB_TABLE} SET active_slot = NULL WHERE id = ?`).run(String(jobId));
   }
 
@@ -245,36 +312,51 @@ class JobStore {
 
   requestDigest(jobId) {
     if (this.closed) return null;
-    return this.db.prepare('SELECT request_digest FROM collector_job_requests WHERE id = ?')
-      .get(String(jobId))?.request_digest || null;
+    return (
+      this.db.prepare('SELECT request_digest FROM collector_job_requests WHERE id = ?').get(String(jobId))
+        ?.request_digest || null
+    );
   }
 
   reserveCancelledRequest(jobId) {
-    this.db.prepare('INSERT OR IGNORE INTO collector_job_requests (id, request_digest, created_at) VALUES (?, ?, ?)')
+    this.db
+      .prepare('INSERT OR IGNORE INTO collector_job_requests (id, request_digest, created_at) VALUES (?, ?, ?)')
       .run(String(jobId), 'cancelled', new Date().toISOString());
     return this.load(jobId);
   }
 
   loadRecent(limit = MAX_LOADED_JOBS) {
     if (this.closed) return [];
-    const rows = this.db.prepare(`
+    const rows = this.db
+      .prepare(
+        `
       SELECT * FROM ${JOB_TABLE} ORDER BY created_at DESC, rowid DESC LIMIT ?
-    `).all(Math.max(1, Math.min(MAX_RETAINED_JOBS, Number(limit) || MAX_LOADED_JOBS)));
+    `,
+      )
+      .all(Math.max(1, Math.min(MAX_RETAINED_JOBS, Number(limit) || MAX_LOADED_JOBS)));
     return rows.map(deserializeJob).filter(Boolean);
   }
 
   findActive() {
     if (this.closed) return [];
-    return this.db.prepare(`
+    return this.db
+      .prepare(
+        `
       SELECT * FROM ${JOB_TABLE}
       WHERE active_slot = 1 OR status IN ('queued', 'running', 'cancelling')
       ORDER BY created_at ASC
-    `).all().map(deserializeJob).filter(Boolean);
+    `,
+      )
+      .all()
+      .map(deserializeJob)
+      .filter(Boolean);
   }
 
   trim(keep = MAX_RETAINED_JOBS) {
     if (this.closed) return;
-    this.db.prepare(`
+    this.db
+      .prepare(
+        `
       DELETE FROM ${JOB_TABLE}
       WHERE active_slot IS NULL AND id IN (
         SELECT id FROM ${JOB_TABLE}
@@ -282,13 +364,17 @@ class JobStore {
         ORDER BY created_at DESC, rowid DESC
         LIMIT -1 OFFSET ?
       )
-    `).run(Math.max(1, Number(keep) || MAX_RETAINED_JOBS));
+    `,
+      )
+      .run(Math.max(1, Number(keep) || MAX_RETAINED_JOBS));
   }
 
   close() {
     if (this.closed) return;
     this.closed = true;
-    try { this.db.close(); } catch {}
+    try {
+      this.db.close();
+    } catch {}
   }
 }
 

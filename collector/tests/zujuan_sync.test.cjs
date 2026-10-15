@@ -72,17 +72,21 @@ test('题目列表接口参数与题号可用于分页双重校验', () => {
     categoryId: '261285',
     catelogTokpointId: '0',
   });
-  assert.equal(questionListRequestParams({
-    url: () => 'https://zujuan.xkw.com/other',
-    request: response.request,
-  }), null);
+  assert.equal(
+    questionListRequestParams({
+      url: () => 'https://zujuan.xkw.com/other',
+      request: response.request,
+    }),
+    null,
+  );
 
   const parsed = parseQuestionListPayload({
     code: 0,
     data: {
       total: 9750,
-      html: '<div class="tk-quest-item" questionid="26951034"></div>'
-        + '<div class="tk-quest-item" questionid="26996136"></div>',
+      html:
+        '<div class="tk-quest-item" questionid="26951034"></div>' +
+        '<div class="tk-quest-item" questionid="26996136"></div>',
     },
   });
   assert.deepEqual(parsed, {
@@ -99,10 +103,7 @@ test('题目列表接口参数与题号可用于分页双重校验', () => {
 
 test('题目详情页被关闭后按需重建', async () => {
   let created = 0;
-  const pages = [
-    { isClosed: () => true },
-    { isClosed: () => false },
-  ];
+  const pages = [{ isClosed: () => true }, { isClosed: () => false }];
   const getDetailPage = createLazyCollectorPage(async () => pages[created++]);
   assert.equal(await getDetailPage(), pages[0]);
   assert.equal(await getDetailPage(), pages[1]);
@@ -112,9 +113,7 @@ test('题目详情页被关闭后按需重建', async () => {
 test('答案采集保持安全默认，并只接受显式公开可见开关', () => {
   assert.equal(parseArgs([]).includeVisibleSolutions, false);
   assert.equal(parseArgs(['--include-visible-solutions']).includeVisibleSolutions, true);
-  assert.deepEqual([...ANSWER_STATUSES], [
-    'not_collected', 'not_visible', 'login_required', 'public_captured',
-  ]);
+  assert.deepEqual([...ANSWER_STATUSES], ['not_collected', 'not_visible', 'login_required', 'public_captured']);
   assert.match(extractDetailPage.toString(), /\.answer-box \.answer/);
   assert.match(extractDetailPage.toString(), /\.answer-box \.analysis/);
   assert.match(extractDetailPage.toString(), /\.answer-box \.parse/);
@@ -126,68 +125,102 @@ test('答案、解析和兼容 solution 字段按公开状态写入运行快照�
   const store = new SyncStore(dbPath);
   try {
     const runId = store.beginRun({ textbookId: 'tb-answer' });
-    store.saveRunQuestion(runId, 'tb-answer', {
-      externalId: 'q-answer',
-      contentHtml: '<p>题干</p>',
-      plainText: '题干',
-      answerHtml: '<p>A</p>',
-      analysisHtml: '<p>因为 A</p>',
-      solutionHtml: '<p>A 因为 A</p>',
-      answerStatus: 'public_captured',
-    }, 'cat-answer');
-    let row = store.db.prepare(`
+    store.saveRunQuestion(
+      runId,
+      'tb-answer',
+      {
+        externalId: 'q-answer',
+        contentHtml: '<p>题干</p>',
+        plainText: '题干',
+        answerHtml: '<p>A</p>',
+        analysisHtml: '<p>因为 A</p>',
+        solutionHtml: '<p>A 因为 A</p>',
+        answerStatus: 'public_captured',
+      },
+      'cat-answer',
+    );
+    let row = store.db
+      .prepare(
+        `
       SELECT answer_html, analysis_html, answer_status, solution_html
       FROM sync_run_question_items WHERE run_id = ?
-    `).get(runId);
-    assert.deepEqual({ ...row }, {
-      answer_html: '<p>A</p>',
-      analysis_html: '<p>因为 A</p>',
-      answer_status: 'public_captured',
-      solution_html: '<p>A 因为 A</p>',
-    });
+    `,
+      )
+      .get(runId);
+    assert.deepEqual(
+      { ...row },
+      {
+        answer_html: '<p>A</p>',
+        analysis_html: '<p>因为 A</p>',
+        answer_status: 'public_captured',
+        solution_html: '<p>A 因为 A</p>',
+      },
+    );
 
     // A later login-required observation must clear all answer content in the
     // still-open run instead of retaining stale/public-looking HTML.
-    store.saveRunQuestion(runId, 'tb-answer', {
-      externalId: 'q-answer',
-      contentHtml: '<p>题干</p>',
-      plainText: '题干',
-      answerHtml: '<p>不应保存</p>',
-      analysisHtml: '<p>不应保存</p>',
-      solutionHtml: '<p>不应保存</p>',
-      answerStatus: 'login_required',
-      loginRequired: true,
-    }, 'cat-answer');
-    row = store.db.prepare(`
+    store.saveRunQuestion(
+      runId,
+      'tb-answer',
+      {
+        externalId: 'q-answer',
+        contentHtml: '<p>题干</p>',
+        plainText: '题干',
+        answerHtml: '<p>不应保存</p>',
+        analysisHtml: '<p>不应保存</p>',
+        solutionHtml: '<p>不应保存</p>',
+        answerStatus: 'login_required',
+        loginRequired: true,
+      },
+      'cat-answer',
+    );
+    row = store.db
+      .prepare(
+        `
       SELECT answer_html, analysis_html, answer_status, solution_html
       FROM sync_run_question_items WHERE run_id = ?
-    `).get(runId);
-    assert.deepEqual({ ...row }, {
-      answer_html: null,
-      analysis_html: null,
-      answer_status: 'login_required',
-      solution_html: null,
-    });
+    `,
+      )
+      .get(runId);
+    assert.deepEqual(
+      { ...row },
+      {
+        answer_html: null,
+        analysis_html: null,
+        answer_status: 'login_required',
+        solution_html: null,
+      },
+    );
 
-    store.saveQuestion({
-      externalId: 'q-global',
-      contentHtml: '<p>题干</p>',
-      plainText: '题干',
-      answerHtml: '<p>A</p>',
-      analysisHtml: '<p>因为 A</p>',
-      solutionHtml: '<p>A 因为 A</p>',
-      answerStatus: 'public_captured',
-    }, 'cat-answer');
-    row = store.db.prepare(`
+    store.saveQuestion(
+      {
+        externalId: 'q-global',
+        contentHtml: '<p>题干</p>',
+        plainText: '题干',
+        answerHtml: '<p>A</p>',
+        analysisHtml: '<p>因为 A</p>',
+        solutionHtml: '<p>A 因为 A</p>',
+        answerStatus: 'public_captured',
+      },
+      'cat-answer',
+    );
+    row = store.db
+      .prepare(
+        `
       SELECT answer_html, analysis_html, answer_status, solution_html
       FROM questions WHERE external_id = 'q-global'
-    `).get();
-    assert.deepEqual({ ...row }, {
-      answer_html: '<p>A</p>',
-      analysis_html: '<p>因为 A</p>',
-      answer_status: 'public_captured',
-      solution_html: '<p>A 因为 A</p>',
-    });
+    `,
+      )
+      .get();
+    assert.deepEqual(
+      { ...row },
+      {
+        answer_html: '<p>A</p>',
+        analysis_html: '<p>因为 A</p>',
+        answer_status: 'public_captured',
+        solution_html: '<p>A 因为 A</p>',
+      },
+    );
   } finally {
     store.close();
     fs.rmSync(directory, { recursive: true, force: true });
@@ -196,25 +229,25 @@ test('答案、解析和兼容 solution 字段按公开状态写入运行快照�
 
 test('构造默认第五章最新排序 URL', () => {
   const options = parseArgs([]);
-  assert.equal(
-    buildListUrl(options, '261314', 1),
-    'https://zujuan.xkw.com/czsx/zj261314/o2/',
-  );
-  assert.equal(
-    buildListUrl(options, '261314', 2),
-    'https://zujuan.xkw.com/czsx/zj261314/o2p2/',
-  );
+  assert.equal(buildListUrl(options, '261314', 1), 'https://zujuan.xkw.com/czsx/zj261314/o2/');
+  assert.equal(buildListUrl(options, '261314', 2), 'https://zujuan.xkw.com/czsx/zj261314/o2p2/');
 });
 
 test('筛选 URL 遵循站点参数顺序', () => {
   const options = parseArgs([
-    '--question-type', '单选题',
-    '--difficulty', '容易',
-    '--year', '2026',
-    '--scene', '作业',
-    '--category', '典型题',
+    '--question-type',
+    '单选题',
+    '--difficulty',
+    '容易',
+    '--year',
+    '2026',
+    '--scene',
+    '作业',
+    '--category',
+    '典型题',
     '--fresh',
-    '--sort', '最新',
+    '--sort',
+    '最新',
   ]);
   assert.equal(
     buildListUrl(options, '261314', 3),
@@ -225,12 +258,16 @@ test('筛选 URL 遵循站点参数顺序', () => {
 test('知识点 URL 保留所属教材小节并支持分页', () => {
   const options = parseArgs([]);
   assert.equal(
-    buildCatalogPageUrl(options, {
-      externalId: '5597',
-      parentExternalId: '261287',
-      level: 3,
-      sourcePath: '/czsx/zj261287/ctk5597',
-    }, 2),
+    buildCatalogPageUrl(
+      options,
+      {
+        externalId: '5597',
+        parentExternalId: '261287',
+        level: 3,
+        sourcePath: '/czsx/zj261287/ctk5597',
+      },
+      2,
+    ),
     'https://zujuan.xkw.com/czsx/zj261287/ctk5597o2p2',
   );
 });
@@ -247,9 +284,7 @@ test('目录选择支持指定知识点并解析所属章', () => {
 });
 
 test('批量目录可限制在第五章', () => {
-  const options = parseArgs([
-    '--all-catalogs', '--catalog-level', '3', '--within-chapter', '261314',
-  ]);
+  const options = parseArgs(['--all-catalogs', '--catalog-level', '3', '--within-chapter', '261314']);
   const selected = selectCatalogs(options, [
     { externalId: '261314', level: 1, parentExternalId: null, name: '第五章' },
     { externalId: '261315', level: 2, parentExternalId: '261314', name: '小节' },
@@ -257,7 +292,10 @@ test('批量目录可限制在第五章', () => {
     { externalId: '261285', level: 1, parentExternalId: null, name: '第一章' },
     { externalId: '5000', level: 3, parentExternalId: '261285', name: '别的点' },
   ]);
-  assert.deepEqual(selected.map((item) => item.externalId), ['5208']);
+  assert.deepEqual(
+    selected.map((item) => item.externalId),
+    ['5208'],
+  );
 });
 
 test('筛选条件只作为 query_membership 证据输入', () => {
@@ -416,14 +454,8 @@ test('每日批处理脚本按 shell 参数安全传递筛选条件', () => {
 });
 
 test('素材分类区分公式 SVG 和题图', () => {
-  assert.equal(
-    classifyAsset('https://staticzujuan.xkw.com/quesimg/Upload/formula/a.svg'),
-    'formula',
-  );
-  assert.equal(
-    classifyAsset('https://img.xkw.com/editorImg/a.png'),
-    'image',
-  );
+  assert.equal(classifyAsset('https://staticzujuan.xkw.com/quesimg/Upload/formula/a.svg'), 'formula');
+  assert.equal(classifyAsset('https://img.xkw.com/editorImg/a.png'), 'image');
 });
 
 test('详情数据合并时保留列表页新题标签并去重知识点', () => {
@@ -483,24 +515,30 @@ test('只传 textbook-id 时不会回退到 261314，而是使用元数据入口
   const dbPath = path.join(dir, 'collector.sqlite3');
   const store = new MetadataStore(dbPath);
   try {
-    store.saveVersionGroup({
-      externalVersionId: '195847',
-      versionName: '北师大版',
-      isNew: 'Y',
-      sortOrder: 0,
-      sourceUrl: 'https://zujuan.xkw.com/czsx/zj261314/o2/',
-      raw: {},
-    }, [{
-      externalTextbookId: '195861',
-      versionExternalId: '195847',
-      textbookName: '七年级上册',
-      grade: '七年级',
-      volume: '上册',
-      sourceUrl: 'https://zujuan.xkw.com/czsx/zj195861/',
-      sortOrder: 0,
-      bootstrapChapterExternalId: '195870',
-      raw: {},
-    }], '2026-01-01T00:00:00.000Z');
+    store.saveVersionGroup(
+      {
+        externalVersionId: '195847',
+        versionName: '北师大版',
+        isNew: 'Y',
+        sortOrder: 0,
+        sourceUrl: 'https://zujuan.xkw.com/czsx/zj261314/o2/',
+        raw: {},
+      },
+      [
+        {
+          externalTextbookId: '195861',
+          versionExternalId: '195847',
+          textbookName: '七年级上册',
+          grade: '七年级',
+          volume: '上册',
+          sourceUrl: 'https://zujuan.xkw.com/czsx/zj195861/',
+          sortOrder: 0,
+          bootstrapChapterExternalId: '195870',
+          raw: {},
+        },
+      ],
+      '2026-01-01T00:00:00.000Z',
+    );
   } finally {
     store.close();
   }
@@ -511,10 +549,7 @@ test('只传 textbook-id 时不会回退到 261314，而是使用元数据入口
   assert.ok(!options.chapterIds.includes(DEFAULT_CHAPTER_ID));
   const resolved = resolveSyncScope(options, { dbPath });
   assert.deepEqual(resolved.chapterIds, ['195870']);
-  assert.equal(
-    buildListUrl(resolved, resolved.chapterIds[0], 1),
-    'https://zujuan.xkw.com/czsx/zj195870/o2/',
-  );
+  assert.equal(buildListUrl(resolved, resolved.chapterIds[0], 1), 'https://zujuan.xkw.com/czsx/zj195870/o2/');
   assert.doesNotMatch(buildListUrl(resolved, resolved.chapterIds[0], 1), /261314/);
 });
 
@@ -527,10 +562,7 @@ test('题库独立任务在采集库没有 source_textbooks 表时使用教材�
     const options = parseArgs(['--textbook-id', '260617', '--db', dbPath]);
     const resolved = resolveSyncScope(options, { dbPath });
     assert.deepEqual(resolved.chapterIds, ['260617']);
-    assert.equal(
-      buildListUrl(resolved, resolved.chapterIds[0], 1),
-      'https://zujuan.xkw.com/czsx/zj260617/o2/',
-    );
+    assert.equal(buildListUrl(resolved, resolved.chapterIds[0], 1), 'https://zujuan.xkw.com/czsx/zj260617/o2/');
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -555,24 +587,30 @@ test('题库独立任务在入口章节为空时使用教材来源 ID', () => {
   const dbPath = path.join(dir, 'collector.sqlite3');
   const store = new MetadataStore(dbPath);
   try {
-    store.saveVersionGroup({
-      externalVersionId: '195847',
-      versionName: '北师大版',
-      isNew: 'Y',
-      sortOrder: 0,
-      sourceUrl: 'https://zujuan.xkw.com/czsx/zj261314/o2/',
-      raw: {},
-    }, [{
-      externalTextbookId: '260617',
-      versionExternalId: '195847',
-      textbookName: '九年级上册',
-      grade: '九年级',
-      volume: '上册',
-      sourceUrl: 'https://zujuan.xkw.com/czsx/zj260617/',
-      sortOrder: 0,
-      bootstrapChapterExternalId: null,
-      raw: {},
-    }], '2026-01-01T00:00:00.000Z');
+    store.saveVersionGroup(
+      {
+        externalVersionId: '195847',
+        versionName: '北师大版',
+        isNew: 'Y',
+        sortOrder: 0,
+        sourceUrl: 'https://zujuan.xkw.com/czsx/zj261314/o2/',
+        raw: {},
+      },
+      [
+        {
+          externalTextbookId: '260617',
+          versionExternalId: '195847',
+          textbookName: '九年级上册',
+          grade: '九年级',
+          volume: '上册',
+          sourceUrl: 'https://zujuan.xkw.com/czsx/zj260617/',
+          sortOrder: 0,
+          bootstrapChapterExternalId: null,
+          raw: {},
+        },
+      ],
+      '2026-01-01T00:00:00.000Z',
+    );
   } finally {
     store.close();
   }
@@ -588,10 +626,7 @@ test('题库独立任务在入口章节为空时使用教材来源 ID', () => {
 test('未传教材和章节时仍使用原默认入口 261314', () => {
   const options = parseArgs([]);
   assert.deepEqual(options.chapterIds, ['261314']);
-  assert.equal(
-    buildListUrl(options, options.chapterIds[0], 1),
-    'https://zujuan.xkw.com/czsx/zj261314/o2/',
-  );
+  assert.equal(buildListUrl(options, options.chapterIds[0], 1), 'https://zujuan.xkw.com/czsx/zj261314/o2/');
 });
 
 test('按版本名和教材名进入全书模式，不回退 261314', () => {
@@ -627,55 +662,62 @@ test('只传 textbook-id 时脚本自己补全书列表默认值', () => {
 test('列表缺题干或有图无素材时才兜底详情', () => {
   assert.equal(listNeedsDetailFallback({ contentHtml: '<p>题干</p>', plainText: '题干', assets: [] }), false);
   assert.equal(listNeedsDetailFallback({ contentHtml: '', plainText: '', assets: [] }), true);
-  assert.equal(listNeedsDetailFallback({
-    contentHtml: '<p><img src="https://staticzujuan.xkw.com/a.png"></p>',
-    plainText: '见图',
-    assets: [],
-  }), true);
-  assert.equal(listNeedsDetailFallback({
-    contentHtml: '<p><img src="https://staticzujuan.xkw.com/a.png"></p>',
-    plainText: '见图',
-    assets: [{ url: 'https://staticzujuan.xkw.com/a.png', type: 'image' }],
-  }), false);
-  assert.equal(shouldFetchQuestionDetail(
-    { contentHtml: '<p>题干</p>', plainText: '题干', assets: [] },
-    null,
-    { details: false, detailFallback: true, refreshDetails: false },
-    false,
-  ), false);
-  assert.equal(shouldFetchQuestionDetail(
-    { contentHtml: '', plainText: '', assets: [] },
-    null,
-    { details: false, detailFallback: true, refreshDetails: false },
-    false,
-  ), true);
-  assert.equal(shouldFetchQuestionDetail(
-    { contentHtml: '<p>题干</p>', plainText: '题干', assets: [] },
-    { detail_fetched: 1 },
-    { details: false, detailFallback: true, refreshDetails: true },
+  assert.equal(
+    listNeedsDetailFallback({
+      contentHtml: '<p><img src="https://staticzujuan.xkw.com/a.png"></p>',
+      plainText: '见图',
+      assets: [],
+    }),
     true,
-  ), true);
+  );
+  assert.equal(
+    listNeedsDetailFallback({
+      contentHtml: '<p><img src="https://staticzujuan.xkw.com/a.png"></p>',
+      plainText: '见图',
+      assets: [{ url: 'https://staticzujuan.xkw.com/a.png', type: 'image' }],
+    }),
+    false,
+  );
+  assert.equal(
+    shouldFetchQuestionDetail(
+      { contentHtml: '<p>题干</p>', plainText: '题干', assets: [] },
+      null,
+      { details: false, detailFallback: true, refreshDetails: false },
+      false,
+    ),
+    false,
+  );
+  assert.equal(
+    shouldFetchQuestionDetail(
+      { contentHtml: '', plainText: '', assets: [] },
+      null,
+      { details: false, detailFallback: true, refreshDetails: false },
+      false,
+    ),
+    true,
+  );
+  assert.equal(
+    shouldFetchQuestionDetail(
+      { contentHtml: '<p>题干</p>', plainText: '题干', assets: [] },
+      { detail_fetched: 1 },
+      { details: false, detailFallback: true, refreshDetails: true },
+      true,
+    ),
+    true,
+  );
 });
 
 test('全书模式默认下载题图公式，可用 --no-download-assets 关闭', () => {
   assert.equal(parseArgs([]).downloadAssets, false);
   const on = parseArgs(['--version-name', '北师大版', '--textbook-name', '九年级上册']);
   assert.equal(on.downloadAssets, true);
-  const off = parseArgs([
-    '--version-name', '北师大版',
-    '--textbook-name', '九年级上册',
-    '--no-download-assets',
-  ]);
+  const off = parseArgs(['--version-name', '北师大版', '--textbook-name', '九年级上册', '--no-download-assets']);
   assert.equal(off.downloadAssets, false);
 });
 
 test('默认单章模式只有 1 个工作标签，全书可用 --workers 覆盖', () => {
   assert.equal(parseArgs([]).workers, 1);
-  const options = parseArgs([
-    '--version-name', '北师大版',
-    '--textbook-name', '九年级上册',
-    '--workers', '3',
-  ]);
+  const options = parseArgs(['--version-name', '北师大版', '--textbook-name', '九年级上册', '--workers', '3']);
   assert.equal(options.workers, 3);
   assert.throws(
     () => parseArgs(['--version-name', '北师大版', '--textbook-name', '九年级上册', '--workers', '9']),
@@ -692,13 +734,25 @@ test('目录按章分配到工作标签，同一章的节和知识点不拆开',
     { externalId: '261300', chapterExternalId: '261300', level: 1, name: '第三章' },
   ];
   const [single] = partitionCatalogsByChapter(catalogs, 1);
-  assert.deepEqual(single.map((item) => item.externalId), ['261285', 's1', '261293', 's2', '261300']);
+  assert.deepEqual(
+    single.map((item) => item.externalId),
+    ['261285', 's1', '261293', 's2', '261300'],
+  );
 
   const buckets = partitionCatalogsByChapter(catalogs, 4);
   assert.equal(buckets.length, 3);
-  assert.deepEqual(buckets[0].map((item) => item.externalId), ['261285', 's1']);
-  assert.deepEqual(buckets[1].map((item) => item.externalId), ['261293', 's2']);
-  assert.deepEqual(buckets[2].map((item) => item.externalId), ['261300']);
+  assert.deepEqual(
+    buckets[0].map((item) => item.externalId),
+    ['261285', 's1'],
+  );
+  assert.deepEqual(
+    buckets[1].map((item) => item.externalId),
+    ['261293', 's2'],
+  );
+  assert.deepEqual(
+    buckets[2].map((item) => item.externalId),
+    ['261300'],
+  );
 });
 
 test('并行失败时保留原始错误，不把连带 STOP 当成根因', () => {
@@ -716,11 +770,7 @@ test('只传 version-name 或 textbook-name 会失败', () => {
 });
 
 test('全书名称模式需要详情时用 --refresh-details', () => {
-  const options = parseArgs([
-    '--version-name', '北师大版',
-    '--textbook-name', '九年级上册',
-    '--refresh-details',
-  ]);
+  const options = parseArgs(['--version-name', '北师大版', '--textbook-name', '九年级上册', '--refresh-details']);
   assert.equal(options.details, true);
   assert.equal(options.refreshDetails, true);
 });
@@ -745,10 +795,7 @@ test('续采参数启用 checkpoint 且不能与 --no-resume 冲突', () => {
   const options = parseArgs(['--resume-run-id', '19']);
   assert.equal(options.resumeRunId, 19);
   assert.equal(options.resume, true);
-  assert.throws(
-    () => parseArgs(['--no-resume', '--resume-run-id', '19']),
-    /不能与 --no-resume 同时使用/,
-  );
+  assert.throws(() => parseArgs(['--no-resume', '--resume-run-id', '19']), /不能与 --no-resume 同时使用/);
   assert.throws(() => parseArgs(['--resume-run-id', '0']), /必须是正整数/);
   assert.throws(() => parseArgs(['--resume-run-id', '1.5']), /必须是正整数/);
 });
@@ -786,34 +833,53 @@ function resumeScopeFixture() {
 
 function seedResumableRun(store, scope, status = 'interrupted', message = 'ECONNRESET') {
   const runId = store.beginRun(scope);
-  store.saveRunCatalogTree(runId, scope.textbookId, [{
-    externalId: 'c1',
-    level: 1,
-    type: 'chapter',
-    name: '第一章',
-    path: '/第一章',
-  }]);
-  store.saveRunQuestion(runId, scope.textbookId, {
-    externalId: 'q1',
-    contentHtml: '<p>题干</p>',
-    plainText: '题干',
-    providerLabels: [{ dimension: 'provider_tag', value: '同步题' }],
-    assets: [{
-      url: 'https://staticzujuan.xkw.com/q1.png',
-      type: 'image',
-      localPath: 'assets/q1.png',
-      sha256: 'a'.repeat(64),
-    }],
-  }, 'c1');
-  store.saveRunQuestionCatalogs(runId, scope.textbookId, 'q1', [{
-    externalId: 'c1', level: 1, name: '第一章', path: '/第一章',
-  }]);
-  store.finishRun(runId, status, {
-    pagesOk: status === 'interrupted' ? 1 : 2,
-    questionsSeen: 1,
-    questionsInserted: 1,
-    errors: status === 'success' ? 0 : 1,
-  }, message);
+  store.saveRunCatalogTree(runId, scope.textbookId, [
+    {
+      externalId: 'c1',
+      level: 1,
+      type: 'chapter',
+      name: '第一章',
+      path: '/第一章',
+    },
+  ]);
+  store.saveRunQuestion(
+    runId,
+    scope.textbookId,
+    {
+      externalId: 'q1',
+      contentHtml: '<p>题干</p>',
+      plainText: '题干',
+      providerLabels: [{ dimension: 'provider_tag', value: '同步题' }],
+      assets: [
+        {
+          url: 'https://staticzujuan.xkw.com/q1.png',
+          type: 'image',
+          localPath: 'assets/q1.png',
+          sha256: 'a'.repeat(64),
+        },
+      ],
+    },
+    'c1',
+  );
+  store.saveRunQuestionCatalogs(runId, scope.textbookId, 'q1', [
+    {
+      externalId: 'c1',
+      level: 1,
+      name: '第一章',
+      path: '/第一章',
+    },
+  ]);
+  store.finishRun(
+    runId,
+    status,
+    {
+      pagesOk: status === 'interrupted' ? 1 : 2,
+      questionsSeen: 1,
+      questionsInserted: 1,
+      errors: status === 'success' ? 0 : 1,
+    },
+    message,
+  );
   return runId;
 }
 
@@ -824,9 +890,13 @@ test('续采创建新 run 原子复制五类快照并支持链式续采，旧 ru
   try {
     const scope = resumeScopeFixture();
     const sourceRunId = seedResumableRun(store, scope);
-    const before = store.db.prepare(`
+    const before = store.db
+      .prepare(
+        `
       SELECT plain_text, content_html FROM sync_run_question_items WHERE run_id = ?
-    `).get(sourceRunId);
+    `,
+      )
+      .get(sourceRunId);
     const resumedRunId = store.beginRun({ ...scope, resumeFromRunId: sourceRunId });
     assert.equal(store.getRun(resumedRunId).status, 'running');
     assert.equal(JSON.parse(store.getRun(resumedRunId).scope_json).resumeFromRunId, sourceRunId);
@@ -837,13 +907,19 @@ test('续采创建新 run 原子复制五类快照并支持链式续采，旧 ru
       questionTagCount: 1,
       questionAssetCount: 1,
     });
-    assert.deepEqual(store.db.prepare(`
+    assert.deepEqual(
+      store.db
+        .prepare(
+          `
       SELECT plain_text, content_html FROM sync_run_question_items WHERE run_id = ?
-    `).get(sourceRunId), before);
+    `,
+        )
+        .get(sourceRunId),
+      before,
+    );
     assert.throws(
-      () => store.db.prepare(
-        "UPDATE sync_run_question_items SET plain_text = '篡改' WHERE run_id = ?",
-      ).run(sourceRunId),
+      () =>
+        store.db.prepare("UPDATE sync_run_question_items SET plain_text = '篡改' WHERE run_id = ?").run(sourceRunId),
       /immutable/,
     );
 
@@ -867,18 +943,26 @@ test('续采只继承来源 run 的断点，绝不采用更大的全局断点', 
     const filterJson = checkpointFilterJson(scope);
     const scopeKey = checkpointScopeKey('c1', filterJson);
     const observedAt = new Date().toISOString();
-    store.db.prepare(`
+    store.db
+      .prepare(
+        `
       INSERT INTO sync_progress (
         run_id, worker_id, catalog_external_id, catalog_name, catalog_path,
         current_page, expected_pages, expected_total, updated_at
       ) VALUES (?, 1, 'c1', '第一章', '/第一章', 191, 975, 9743, ?)
-    `).run(sourceRunId, observedAt);
-    store.db.prepare(`
+    `,
+      )
+      .run(sourceRunId, observedAt);
+    store.db
+      .prepare(
+        `
       INSERT INTO sync_checkpoints (
         scope_key, provider, chapter_id, filter_json, last_completed_page, updated_at
       ) VALUES (?, 'zujuan', 'c1', ?, 900, ?)
       ON CONFLICT(scope_key) DO UPDATE SET last_completed_page = 900, updated_at = excluded.updated_at
-    `).run(scopeKey, filterJson, observedAt);
+    `,
+      )
+      .run(scopeKey, filterJson, observedAt);
 
     const resumedRunId = store.beginRun({ ...scope, resumeFromRunId: sourceRunId });
     assert.equal(store.getCheckpoint(scopeKey), 900);
@@ -914,10 +998,7 @@ test('续采严格拒绝确定性失败和作用域不匹配', () => {
   try {
     const scope = resumeScopeFixture();
     const failedRunId = seedResumableRun(store, scope, 'failed', 'robots.txt disallowed');
-    assert.throws(
-      () => store.beginRun({ ...scope, resumeFromRunId: failedRunId }),
-      /不是可续采的瞬时错误/,
-    );
+    assert.throws(() => store.beginRun({ ...scope, resumeFromRunId: failedRunId }), /不是可续采的瞬时错误/);
     const transientRunId = seedResumableRun(store, scope, 'failed', 'page.waitForFunction: Timeout 30000ms exceeded.');
     assert.throws(
       () => store.beginRun({ ...scope, chapterIds: ['other'], resumeFromRunId: transientRunId }),

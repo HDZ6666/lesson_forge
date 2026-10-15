@@ -51,18 +51,11 @@ const {
 
 function readRunCatalogs(dbPath, runId, options = {}) {
   const excludedIds = options.excludedIds || [];
-  if (!Array.isArray(excludedIds) || excludedIds.length > 100000 || excludedIds.some((id) => !safeExternalId(id))) throw httpError('排除题目 ID 无效');
-  const textbookExternalId = optionalExternalId(
-    options.textbookExternalId,
-    'textbookExternalId',
-  );
+  if (!Array.isArray(excludedIds) || excludedIds.length > 100000 || excludedIds.some((id) => !safeExternalId(id)))
+    throw httpError('排除题目 ID 无效');
+  const textbookExternalId = optionalExternalId(options.textbookExternalId, 'textbookExternalId');
   const page = positiveInt(options.page, 'page', 1, MAX_RUN_PAGE_NUMBER);
-  const pageSize = positiveInt(
-    options.pageSize,
-    'pageSize',
-    DEFAULT_CATALOG_PAGE_SIZE,
-    MAX_CATALOG_PAGE_SIZE,
-  );
+  const pageSize = positiveInt(options.pageSize, 'pageSize', DEFAULT_CATALOG_PAGE_SIZE, MAX_CATALOG_PAGE_SIZE);
   const db = openReadOnly(dbPath);
   if (!db) throw httpError('collector SQLite 不存在', 503, 'snapshot_unavailable');
   try {
@@ -70,10 +63,14 @@ function readRunCatalogs(dbPath, runId, options = {}) {
     assertSnapshotTables(db);
     assertRunTextbook(db, run, textbookExternalId);
     const itemColumns = tableColumns(db, 'sync_run_catalog_items');
-    const progressColumns = tableNames(db).has('sync_run_catalog_progress') ? tableColumns(db, 'sync_run_catalog_progress') : new Set();
-    const scanCompleteSql = progressColumns.has('scan_complete') ? `(SELECT MAX(progress.scan_complete) FROM sync_run_catalog_progress AS progress
+    const progressColumns = tableNames(db).has('sync_run_catalog_progress')
+      ? tableColumns(db, 'sync_run_catalog_progress')
+      : new Set();
+    const scanCompleteSql = progressColumns.has('scan_complete')
+      ? `(SELECT MAX(progress.scan_complete) FROM sync_run_catalog_progress AS progress
       WHERE progress.run_id = item.run_id AND progress.provider = item.provider
-      AND progress.textbook_external_id = item.textbook_external_id AND progress.catalog_external_id = item.catalog_external_id)` : 'NULL';
+      AND progress.textbook_external_id = item.textbook_external_id AND progress.catalog_external_id = item.catalog_external_id)`
+      : 'NULL';
     const predicates = ['item.run_id = ?', 'item.provider = ?'];
     const parameters = [run.id, PROVIDER];
     if (textbookExternalId) {
@@ -82,9 +79,14 @@ function readRunCatalogs(dbPath, runId, options = {}) {
     }
     const where = predicates.join(' AND ');
     const pageColumns = tableNames(db).has('sync_run_catalog_pages')
-      ? tableColumns(db, 'sync_run_catalog_pages') : new Set();
+      ? tableColumns(db, 'sync_run_catalog_pages')
+      : new Set();
     const hasPageOccurrenceSnapshot = [
-      'run_id', 'provider', 'textbook_external_id', 'catalog_external_id', 'question_count',
+      'run_id',
+      'provider',
+      'textbook_external_id',
+      'catalog_external_id',
+      'question_count',
     ].every((column) => pageColumns.has(column));
     const questionCountSql = hasPageOccurrenceSnapshot
       ? `(
@@ -103,11 +105,19 @@ function readRunCatalogs(dbPath, runId, options = {}) {
              AND link.textbook_external_id = item.textbook_external_id
              AND link.catalog_external_id = item.catalog_external_id
          )`;
-    const total = Number(db.prepare(`
+    const total = Number(
+      db
+        .prepare(
+          `
       SELECT COUNT(*) AS total FROM sync_run_catalog_items AS item WHERE ${where}
-    `).get(...parameters).total || 0);
+    `,
+        )
+        .get(...parameters).total || 0,
+    );
     const offset = pageBounds(page, pageSize);
-    const rows = db.prepare(`
+    const rows = db
+      .prepare(
+        `
       SELECT item.textbook_external_id, item.catalog_external_id,
              ${optionalSelect(itemColumns, 'item', 'parent_external_id')},
              ${optionalSelect(itemColumns, 'item', 'node_level')},
@@ -133,23 +143,26 @@ function readRunCatalogs(dbPath, runId, options = {}) {
                ${itemColumns.has('node_level') ? 'COALESCE(item.node_level, 2147483647)' : 'CAST(2147483647 AS INTEGER)'} ASC,
                item.catalog_external_id ASC
       LIMIT ? OFFSET ?
-    `).all(JSON.stringify(excludedIds), ...parameters, pageSize, offset).map((row) => ({
-      sourceProvider: PROVIDER,
-      externalTextbookId: String(row.textbook_external_id),
-      externalCatalogId: String(row.catalog_external_id),
-      parentExternalId: row.parent_external_id == null ? null : String(row.parent_external_id),
-      nodeLevel: row.node_level == null ? null : Number(row.node_level),
-      nodeType: row.node_type || null,
-      name: boundedString(row.name, 4000) || '',
-      sourcePath: boundedString(row.source_path, 4000),
-      catalogPath: boundedString(row.catalog_path || row.name, 8000),
-      sortOrder: row.sort_order == null ? null : Number(row.sort_order),
-      questionCount: Number(row.question_count || 0),
-      uniqueQuestionCount: Number(row.unique_question_count || 0),
-      scanComplete: Number(row.scan_complete || 0) === 1,
-      excludedQuestionCount: Number(row.excluded_question_count || 0),
-      capturedAt: row.captured_at,
-    }));
+    `,
+      )
+      .all(JSON.stringify(excludedIds), ...parameters, pageSize, offset)
+      .map((row) => ({
+        sourceProvider: PROVIDER,
+        externalTextbookId: String(row.textbook_external_id),
+        externalCatalogId: String(row.catalog_external_id),
+        parentExternalId: row.parent_external_id == null ? null : String(row.parent_external_id),
+        nodeLevel: row.node_level == null ? null : Number(row.node_level),
+        nodeType: row.node_type || null,
+        name: boundedString(row.name, 4000) || '',
+        sourcePath: boundedString(row.source_path, 4000),
+        catalogPath: boundedString(row.catalog_path || row.name, 8000),
+        sortOrder: row.sort_order == null ? null : Number(row.sort_order),
+        questionCount: Number(row.question_count || 0),
+        uniqueQuestionCount: Number(row.unique_question_count || 0),
+        scanComplete: Number(row.scan_complete || 0) === 1,
+        excludedQuestionCount: Number(row.excluded_question_count || 0),
+        capturedAt: row.captured_at,
+      }));
     return {
       available: true,
       message: 'collector 运行目录快照可用',

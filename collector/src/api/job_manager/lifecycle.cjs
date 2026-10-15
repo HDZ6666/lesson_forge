@@ -13,13 +13,18 @@ class LifecycleMethods {
     job.status = status;
     job.phase = status === 'completed' ? 'completed' : status;
     job.errorMessage = message;
-    job.errorCode = status === 'completed'
-      ? null
-      : (errorCode || job.errorCode || this.jobErrorCode(job, status === 'cancelled' ? 'cancelled' : status));
+    job.errorCode =
+      status === 'completed'
+        ? null
+        : errorCode || job.errorCode || this.jobErrorCode(job, status === 'cancelled' ? 'cancelled' : status);
     job.progressPercent = status === 'completed' ? 100 : job.progressPercent;
     job.currentTextbookId = null;
     job.currentTextbookName = null;
     job.finishedAt = new Date().toISOString();
+    if (this.metrics) {
+      this.metrics.jobsFinished[status] = (this.metrics.jobsFinished[status] || 0) + 1;
+      if (job.errorCode) this.metrics.jobErrors[job.errorCode] = (this.metrics.jobErrors[job.errorCode] || 0) + 1;
+    }
     for (const scope of job.scopeItems || []) {
       if (status === 'cancelled') {
         if (!['completed', 'failed', 'blocked', 'interrupted'].includes(scope.status)) scope.status = 'cancelled';
@@ -53,9 +58,10 @@ class LifecycleMethods {
       .map((scope) => scope.collectorRunId)
       .filter((value) => Number.isSafeInteger(Number(value)) && Number(value) > 0);
     job.collectorRunId = completedRuns.length === 1 ? Number(completedRuns[0]) : null;
-    job.snapshotComplete = status === 'completed'
-      && (job.scopeItems || []).length > 0
-      && (job.scopeItems || []).every((scope) => scope.snapshotComplete === true);
+    job.snapshotComplete =
+      status === 'completed' &&
+      (job.scopeItems || []).length > 0 &&
+      (job.scopeItems || []).every((scope) => scope.snapshotComplete === true);
     if (job.scopeItems.length === 1) {
       job.snapshotLockedAt = job.scopeItems[0].snapshotLockedAt || null;
     }
@@ -67,8 +73,11 @@ class LifecycleMethods {
     this.stopWatchdog(job);
     if (this.activeJobId === job.id) this.activeJobId = null;
     this.persist(job, { force: true });
+    this.scheduleIdleCheckpoint();
     if (this.store) {
-      try { this.store.release(job.id); } catch {}
+      try {
+        this.store.release(job.id);
+      } catch {}
     }
   }
 
@@ -133,10 +142,13 @@ class LifecycleMethods {
   dispose() {
     if (this.disposed) return;
     this.disposed = true;
+    clearTimeout(this.idleCheckpointTimer);
     unregisterOwner(this.ownerToken);
     for (const job of this.jobs.values()) this.stopWatchdog(job);
     if (this.store) {
-      try { this.store.close(); } catch {}
+      try {
+        this.store.close();
+      } catch {}
     }
   }
 
@@ -152,6 +164,17 @@ class LifecycleMethods {
     this.terminateChild(job);
   }
 
+  /**
+   * Truncates the WAL shortly after a job ends. The delay lets the child
+   * close its connection first. Skipped when a new job has started by then.
+   */
+  scheduleIdleCheckpoint(delayMs = 2000) {
+    if (!this.maintenance || !this.dbPath) return;
+    clearTimeout(this.idleCheckpointTimer);
+    this.idleCheckpointTimer = setTimeout(() => void this.maintenance.checkpoint(this.dbPath, this.dataDir), delayMs);
+    this.idleCheckpointTimer.unref?.();
+  }
+
   shutdown() {
     if (this._shutdownPromise) return this._shutdownPromise;
     this.stopping = true;
@@ -162,7 +185,7 @@ class LifecycleMethods {
       }
       // This includes runChild's exit, snapshot reconciliation and mutex
       // release. The SQLite store stays open throughout those callbacks.
-      await Promise.all([...this.jobs.values()].map(job => job.execution).filter(Boolean));
+      await Promise.all([...this.jobs.values()].map((job) => job.execution).filter(Boolean));
       this.dispose();
     })();
     return this._shutdownPromise;

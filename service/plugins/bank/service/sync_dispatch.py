@@ -185,18 +185,20 @@ async def release_finished_books(db) -> int:
         options = row.options_json or {}
         if options.get('autoResumePending'):
             continue
+        if (options.get('autoPlanId') and row.status in ('blocked', 'interrupted')
+                and row.error_message):
+            from plugins.bank.service.issue_diagnostics import classify_issue
+            if classify_issue('scope_failure', row.error_message)['owner'] == 'source_manual':
+                row.options_json = {**options, 'planSourceResumePending': True}
         if row.status in ('failed', 'blocked') and row.error_message:
             # Scope-level conflicts remain for human inspection. Budget,
             # rate and host pauses are shared operating conditions instead.
             reason = row.error_message
             if not any(word in reason.lower() for word in ('预算', '水位', '429', '验证', '冷却', 'resource_pressure', 'source_budget')):
-                from plugins.bank.service.sync_issues import observe
+                from plugins.bank.service.sync_issues import isolate_scope_failure
                 scope = await db.scalar(select(QbSyncJobScope).where(QbSyncJobScope.run_id == row.run_id))
                 if scope:
-                    await observe(db, subject_id=row.subject_id, provider=scope.source_provider,
-                        book_id=scope.local_textbook_id, task_id=row.run_id, kind='scope',
-                        key=scope.external_textbook_id, error_type='scope_failure', reason=reason,
-                        evidence={'collectorRunId': scope.collector_run_id, 'status': row.status}, now=await _clock(db))
+                    await isolate_scope_failure(db, row, scope, reason, await _clock(db))
         if row.status == 'completed':
             from plugins.bank.service.sync_issues import resolve_scope_issues
             for scope in await SyncTaskDao.scopes(db, row.run_id):
@@ -241,6 +243,73 @@ async def _validate_waiting_scope(db, row, *, lock=True):
     return scopes
 
 
+async def settling_book_task(db):
+    """The normal queue finishes one book's saved result before the next.
+
+    Isolated local faults may leave durable results behind; shared/pending
+    work must still finish, independently of the optional backlog limit.
+    """
+    imported = exists().where(
+        QbQuestionImport.scope_id == QbSyncJobScope.scope_id,
+        QbQuestionImport.collector_run_id == QbSyncJobScope.collector_run_id,
+    )
+    intake = exists().where(
+        QbQuestionImportIntake.scope_id == QbSyncJobScope.scope_id,
+        QbQuestionImportIntake.collector_run_id == QbSyncJobScope.collector_run_id,
+    )
+    pending = or_(
+        QbSyncJob.options_json['planSourceResumePending'].as_boolean().is_(True) & exists().where(
+            QbSyncBookState.last_task_id == QbSyncJob.run_id,
+            QbSyncBookState.plan_id == QbSyncJob.options_json['autoPlanId'].as_integer()),
+        exists().where(QbQuestionImport.task_id == QbSyncJob.run_id,
+            QbQuestionImport.status.in_(('queued', 'preparing', 'running', 'paused'))),
+        ~imported & exists().where(
+            QbQuestionImportIntake.scope_id == QbSyncJobScope.scope_id,
+            QbQuestionImportIntake.collector_run_id == QbSyncJobScope.collector_run_id,
+            QbQuestionImportIntake.status.in_(('pending', 'probing', 'retry'))),
+        QbSyncJobScope.collector_run_id.is_not(None) & ~imported & ~intake,
+    )
+    isolated = exists().where(
+        QbSyncBookState.plan_id == QbSyncJob.options_json['autoPlanId'].as_integer(),
+        QbSyncBookState.textbook_id == QbSyncJobScope.local_textbook_id,
+        QbSyncBookState.exception_kind.is_not(None),
+    )
+    from plugins.bank.service.plan_work import results_allowed_condition
+    return await db.scalar(select(QbSyncJob.run_id).join(QbSyncJobScope,
+        QbSyncJobScope.run_id == QbSyncJob.run_id).where(
+        QbSyncJob.task_module == 'question', QbSyncJob.status.in_(TERMINAL),
+        QbSyncJob.options_json['workflowVersion'].as_integer() >= 2,
+        results_allowed_condition(), ~isolated, pending,
+    ).order_by(QbSyncJob.run_id).limit(1))
+
+
+def collection_resource_wait(row, reason, now):
+    """Hold a book for host resources: back off 60 s, 120 s, ... up to 10 min
+    (configurable) and log the wait once rather than on every attempt."""
+    from plugins.bank.service import diagnostics
+    options = row.options_json or {}
+    streak = int(options.get('resourceWaitStreak') or 0)
+    if streak == 0:
+        diagnostics.event('collection_resource_wait_entered', stage='dispatch', taskId=row.run_id, reason=reason)
+    base = configured_limit('BANK_COLLECTION_RESOURCE_WAIT_MIN_SECONDS') or 60
+    ceiling = configured_limit('BANK_COLLECTION_RESOURCE_WAIT_MAX_SECONDS') or 600
+    delay = min(ceiling, base * 2 ** min(streak, 10))
+    row.options_json = {**options, 'resourceWaitStreak': streak + 1, 'resourceWaitReason': str(reason or '')[:300]}
+    row.dispatch_error = str(reason or '主机资源不足，等待恢复')[:500]
+    row.dispatch_not_before = now + timedelta(seconds=delay)
+
+
+def collection_resource_recovered(row):
+    options = row.options_json or {}
+    streak = int(options.get('resourceWaitStreak') or 0)
+    if not streak:
+        return
+    from plugins.bank.service import diagnostics
+    diagnostics.event('collection_resource_wait_recovered', stage='dispatch', taskId=row.run_id,
+                      checks=streak, reason=options.get('resourceWaitReason'))
+    row.options_json = {k: v for k, v in options.items() if k not in ('resourceWaitStreak', 'resourceWaitReason')}
+
+
 async def claim_next(db, *, task_id=None) -> dict | None:
     """Only a successful slot INSERT/UPDATE grants execution across processes."""
     now = datetime.now()
@@ -260,6 +329,23 @@ async def claim_next(db, *, task_id=None) -> dict | None:
     from plugins.bank.service.sync_plans import automatic_task_reason, control_status
     control = await control_status(db)
     reason = (control['reason'] or '同步已紧急暂停') if control['paused'] else await automatic_task_reason(db, row)
+    if not reason and row.task_module == 'question':
+        settling = await settling_book_task(db)
+        if settling is not None:
+            reason = f'等待教材任务 #{settling} 的已保存成果完成核验和入库'
+    if not reason and row.task_module == 'question':
+        # Check host resources before starting a heavy collection, so a
+        # shortage waits instead of piling up new results (spec 7.2).
+        from plugins.bank.service.resource_guard import resource_status
+        try:
+            host = resource_status()
+        except ServiceException as exc:
+            host = {'paused': True, 'reason': exc.message}
+        if host.get('paused'):
+            collection_resource_wait(row, host.get('reason'), due_now)
+            await db.commit()
+            return None
+        collection_resource_recovered(row)
     if reason:
         row.dispatch_error = reason
         row.dispatch_not_before = due_now + timedelta(seconds=30)
@@ -291,6 +377,16 @@ async def claim_next(db, *, task_id=None) -> dict | None:
             row.dispatch_not_before = due_now + timedelta(seconds=30)
             await db.commit()
             return None
+    # Existing queues also inherit the migrated default at their first claim.
+    # Never alter a previously dispatched request or its replay identity.
+    options = row.options_json or {}
+    plan_id = options.get('autoPlanId') or options.get('manualPlanId')
+    if row.task_module == 'question' and plan_id and row.started_at is None and not row.collector_job_id:
+        plan = await db.get(QbSyncPlan, plan_id, populate_existing=True)
+        if plan is not None:
+            row.options_json = {**options, 'catalogPageLimit': plan.catalog_page_limit, 'limitTo1000Pages': False}
+    if (row.options_json or {}).get('resourceWaitStreak'):
+        row.options_json = {k: v for k, v in (row.options_json or {}).items() if k != 'resourceWaitStreak'}
     token = secrets.token_hex(32)
     row.active_slot = '1'
     row.worker_token = token
@@ -302,6 +398,11 @@ async def claim_next(db, *, task_id=None) -> dict | None:
     except IntegrityError:
         await db.rollback()
         return None
+    from plugins.bank.service import diagnostics
+    claimed = row.options_json or {}
+    diagnostics.event('queue_claimed', stage='queue', taskId=row.run_id, taskModule=row.task_module,
+                      planId=claimed.get('autoPlanId') or claimed.get('manualPlanId'),
+                      cycleNo=claimed.get('autoCycleNo'), priority=row.dispatch_priority, rank=row.dispatch_rank)
     return {'taskId': row.run_id, 'token': token, 'jobId': row.dispatch_job_id,
             'taskModule': row.task_module, 'runType': row.run_type}
 
@@ -371,8 +472,13 @@ async def dispatch_once(*, session_factory=None, client=None) -> int:
         async with session_factory() as db:
             row = await db.get(QbSyncJob, due, with_for_update=True, populate_existing=True)
             if row and row.status == 'queued' and row.active_slot is None:
-                row.dispatch_error = str(backlog_reason or local_reason)[:500]
-                row.dispatch_not_before = await _clock(db) + timedelta(seconds=30)
+                if local_reason:
+                    # The real entry point uses the same wait as claim_next:
+                    # one entered event, growing backoff, a recovered event (R10).
+                    collection_resource_wait(row, local_reason, await _clock(db))
+                else:
+                    row.dispatch_error = str(backlog_reason)[:500]
+                    row.dispatch_not_before = await _clock(db) + timedelta(seconds=30)
                 await db.commit()
         return 0
     # Reclaim one eligible old result between books, while the collector is idle.

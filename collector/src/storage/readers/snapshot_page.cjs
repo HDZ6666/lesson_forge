@@ -59,11 +59,11 @@ function snapshotValue(value, maxLength = MAX_RUN_TEXT_LENGTH) {
 function snapshotRowObject(row, table) {
   const output = {};
   for (const [key, value] of Object.entries(row || {})) {
-    const limit = [
-      'content_html', 'plain_text', 'answer_html', 'analysis_html', 'solution_html',
-    ].includes(key)
+    const limit = ['content_html', 'plain_text', 'answer_html', 'analysis_html', 'solution_html'].includes(key)
       ? MAX_RUN_TEXT_LENGTH
-      : (key === 'raw_json' ? MAX_RUN_RAW_JSON_LENGTH : 10000);
+      : key === 'raw_json'
+        ? MAX_RUN_RAW_JSON_LENGTH
+        : 10000;
     output[key] = snapshotValue(value, limit);
   }
   if (table === 'sync_run_catalog_items') {
@@ -145,17 +145,13 @@ function snapshotPageSuffixBytes(suffix, nextCursor) {
   const markerIndex = suffix.indexOf(marker);
   if (markerIndex < 0) return null;
   const replacement = `"nextCursor":${JSON.stringify(nextCursor)}`;
-  return Buffer.byteLength(
-    `${suffix.slice(0, markerIndex)}${replacement}${suffix.slice(markerIndex + marker.length)}`,
-  );
+  return Buffer.byteLength(`${suffix.slice(0, markerIndex)}${replacement}${suffix.slice(markerIndex + marker.length)}`);
 }
 
 function snapshotOrderBy(db, collection, definition) {
   const columns = tableColumns(db, definition.table);
-  const column = (name, fallback = "''") => columns.has(name) ? name : fallback;
-  const nullableNumber = (name) => columns.has(name)
-    ? `COALESCE(${name}, 2147483647)`
-    : '2147483647';
+  const column = (name, fallback = "''") => (columns.has(name) ? name : fallback);
+  const nullableNumber = (name) => (columns.has(name) ? `COALESCE(${name}, 2147483647)` : '2147483647');
   if (collection === 'catalogs') {
     return `
       textbook_external_id ASC,
@@ -211,25 +207,15 @@ function snapshotOrderBy(db, collection, definition) {
 function readRunSnapshotPage(dbPath, runId, options = {}) {
   const collection = options && typeof options === 'object' ? options.collection : null;
   if (typeof collection !== 'string' || !Object.hasOwn(SNAPSHOT_COLLECTIONS, collection)) {
-    throw httpError(
-      'collection 必须是 catalogs、questions、questionCatalogs、tags 或 assets',
-    );
+    throw httpError('collection 必须是 catalogs、questions、questionCatalogs、tags 或 assets');
   }
-  const requestedTextbookId = optionalExternalId(
-    options?.textbookExternalId,
-    'textbookExternalId',
-  );
+  const requestedTextbookId = optionalExternalId(options?.textbookExternalId, 'textbookExternalId');
   const cursor = nonNegativeInt(options?.cursor, 'cursor', 0, MAX_RUN_OFFSET);
   let pageSize;
   if (options?.pageSize == null || options.pageSize === '') {
     pageSize = 500;
   } else {
-    pageSize = positiveInt(
-      options.pageSize,
-      'pageSize',
-      500,
-      MAX_SNAPSHOT_PAGE_SIZE,
-    );
+    pageSize = positiveInt(options.pageSize, 'pageSize', 500, MAX_SNAPSHOT_PAGE_SIZE);
     if (typeof options.pageSize === 'boolean') {
       throw httpError(`pageSize 必须是 1 到 ${MAX_SNAPSHOT_PAGE_SIZE} 之间的整数`);
     }
@@ -246,11 +232,15 @@ function readRunSnapshotPage(dbPath, runId, options = {}) {
 
     const scopedCounts = {};
     for (const item of Object.values(SNAPSHOT_COLLECTIONS)) {
-      const row = db.prepare(`
+      const row = db
+        .prepare(
+          `
         SELECT COUNT(*) AS value
         FROM "${item.table}"
         WHERE run_id = ? AND provider = ? AND textbook_external_id = ?
-      `).get(run.id, PROVIDER, textbookExternalId);
+      `,
+        )
+        .get(run.id, PROVIDER, textbookExternalId);
       scopedCounts[item.count] = Number(row?.value || 0);
     }
     for (const [name, value] of Object.entries(scopedCounts)) {
@@ -322,19 +312,10 @@ function readRunSnapshotPage(dbPath, runId, options = {}) {
     let rowsRead = 0;
     let budgetReached = false;
     while (rowsRead < remaining) {
-      const fetchCount = Math.min(
-        MAX_SNAPSHOT_FETCH_BATCH_SIZE,
-        remaining - rowsRead,
-      );
+      const fetchCount = Math.min(MAX_SNAPSHOT_FETCH_BATCH_SIZE, remaining - rowsRead);
       // Keep each fetchedRows array scoped to one iteration.  Once this
       // block ends, only the bounded result items remain reachable.
-      const fetchedRows = statement.all(
-        run.id,
-        PROVIDER,
-        textbookExternalId,
-        fetchCount,
-        cursor + rowsRead,
-      );
+      const fetchedRows = statement.all(run.id, PROVIDER, textbookExternalId, fetchCount, cursor + rowsRead);
       if (fetchedRows.length !== fetchCount) {
         throw httpError('运行快照分页行数与计数不一致', 409, 'snapshot_incomplete');
       }
@@ -348,27 +329,22 @@ function readRunSnapshotPage(dbPath, runId, options = {}) {
         }
         const encodedItemBytes = Buffer.byteLength(encodedItem);
         const itemCount = items.length + 1;
-        const nextCursor = cursor + itemCount < expectedTotal
-          ? cursor + itemCount
-          : null;
+        const nextCursor = cursor + itemCount < expectedTotal ? cursor + itemCount : null;
         const suffixBytes = snapshotPageSuffixBytes(suffix, nextCursor);
-        const candidateBytes = prefixBytes
-          + 1 // opening `[`
-          + itemBytes
-          + (items.length ? items.length : 0) // commas between items
-          + encodedItemBytes
-          + 1 // closing `]`
-          + suffixBytes;
+        const candidateBytes =
+          prefixBytes +
+          1 + // opening `[`
+          itemBytes +
+          (items.length ? items.length : 0) + // commas between items
+          encodedItemBytes +
+          1 + // closing `]`
+          suffixBytes;
         if (candidateBytes > MAX_SNAPSHOT_PAGE_BYTES) {
           if (!items.length) {
             // Snapshot row text is bounded by snapshotRowObject.  A defensive
             // hard check still prevents sendJson from ever turning an
             // unexpectedly huge single row into a second 413 response.
-            throw httpError(
-              '运行快照单行超过安全响应上限',
-              413,
-              'snapshot_row_too_large',
-            );
+            throw httpError('运行快照单行超过安全响应上限', 413, 'snapshot_row_too_large');
           }
           budgetReached = true;
           break;
@@ -379,9 +355,7 @@ function readRunSnapshotPage(dbPath, runId, options = {}) {
       if (budgetReached) break;
     }
 
-    const nextCursor = cursor + items.length < expectedTotal
-      ? cursor + items.length
-      : null;
+    const nextCursor = cursor + items.length < expectedTotal ? cursor + items.length : null;
     const output = {
       available: true,
       immutable: snapshotLockPresent(run.snapshotLockedAt),

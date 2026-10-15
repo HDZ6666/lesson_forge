@@ -72,10 +72,14 @@ function contentRunAfter(dbPath, watermark, textbookExternalId = null) {
   if (!db) return null;
   try {
     if (!tableNames(db).has('sync_runs')) return null;
-    for (const row of db.prepare(`
+    for (const row of db
+      .prepare(
+        `
       SELECT id, scope_json FROM sync_runs
       WHERE provider = ? AND id > ? ORDER BY id DESC LIMIT 20
-    `).all(PROVIDER, Number(watermark) || 0)) {
+    `,
+      )
+      .all(PROVIDER, Number(watermark) || 0)) {
       const scope = parseJsonObject(row.scope_json);
       if (expected && !scopeTextbookIds(scope).includes(expected)) continue;
       return readRunSnapshotSummary(dbPath, Number(row.id), expected, { allowIncomplete: true });
@@ -102,12 +106,16 @@ function metadataRunAfter(dbPath, watermark) {
   if (!db) return null;
   try {
     if (!tableNames(db).has('source_metadata_runs')) return null;
-    const row = db.prepare(`
+    const row = db
+      .prepare(
+        `
       SELECT id, provider, started_at, finished_at, status, version_count, textbook_count
       FROM source_metadata_runs
       WHERE provider = ? AND id > ?
       ORDER BY id DESC LIMIT 1
-    `).get(PROVIDER, Number(watermark) || 0);
+    `,
+      )
+      .get(PROVIDER, Number(watermark) || 0);
     return row ? { ...row, id: Number(row.id) } : null;
   } finally {
     db.close();

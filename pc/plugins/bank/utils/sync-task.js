@@ -514,6 +514,7 @@ const normalizeLiveTreeNode = (item, index = 0, depth = 0) => {
     dataComplete: booleanValue(firstTaskField(item, ['dataComplete', 'data_complete'], true), true),
     completionQuality: firstTaskField(item, ['completionQuality', 'completion_quality'], null),
     pageLimitReached: booleanValue(firstTaskField(item, ['pageLimitReached', 'page_limit_reached'], false), false),
+    stopReason: firstTaskField(item, ['stopReason', 'stop_reason', 'stallReason'], null),
     status: String(firstTaskField(item, ['status', 'state'], 'pending') || 'pending'),
     queried: booleanValue(firstTaskField(item, ['queried', 'hasProgress', 'has_progress'], expectedTotal !== null), expectedTotal !== null),
     hasProgress: booleanValue(firstTaskField(item, ['hasProgress', 'has_progress', 'queried'], expectedTotal !== null), expectedTotal !== null),
@@ -720,6 +721,7 @@ export function normalizeSyncTask(response, kind = '') {
     retryOfTaskId: firstTaskField(value, ['retryOfTaskId', 'retry_of_task_id', 'retryOfRunId', 'retry_of_run_id'], ''),
     collectorJobId: firstTaskField(value, ['collectorJobId', 'collector_job_id'], ''),
     limitTo1000Pages: booleanValue(firstTaskField(value, ['limitTo1000Pages', 'limit_to_1000_pages'], false), false),
+    catalogPageLimit: numberOrNull(firstTaskField(value, ['catalogPageLimit', 'catalog_page_limit'], null)),
     pageLimitReached: booleanValue(firstTaskField(value, ['pageLimitReached', 'page_limit_reached'], false), false),
     resumeAvailable: booleanValue(firstTaskField(value, ['resumeAvailable', 'resume_available'], undefined), undefined),
     resumeFromCollectorRunId: firstTaskField(value, ['resumeFromCollectorRunId', 'resume_from_collector_run_id'], ''),
@@ -868,4 +870,20 @@ export function formatImportTime(value) {
   if (Number.isNaN(parsed.getTime())) return '—'
   const pad = number => String(number).padStart(2, '0')
   return `${parsed.getFullYear()}-${pad(parsed.getMonth() + 1)}-${pad(parsed.getDate())} ${pad(parsed.getHours())}:${pad(parsed.getMinutes())}:${pad(parsed.getSeconds())}`
+}
+
+
+/** Why paging of one catalog stopped this run; never a permanent "all collected". */
+export const STOP_REASON_LABELS = Object.freeze({
+  incremental_joined: '已接上历史保存范围，增量结束',
+  configured_page_limit: '已到本次窗口上限',
+  page_limit_1000: '已到前 1000 页窗口',
+  duplicate_pages: '连续返回相同页面，已停止翻页',
+  no_new_questions: '连续无新题，已停止',
+  resume_coverage_unverified: '续采边界待核对',
+  browser_context_closed: '浏览器已关闭，等待恢复',
+})
+
+export function stopReasonLabel(reason) {
+  return reason ? STOP_REASON_LABELS[reason] || `停止原因：${reason}` : ''
 }

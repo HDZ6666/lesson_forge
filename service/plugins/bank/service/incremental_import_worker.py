@@ -27,7 +27,8 @@ from plugins.bank.service.incremental_import import (
 from plugins.bank.service.incremental_merge import prepare_incremental_verdicts
 from plugins.bank.service.incremental_snapshot import SealedSnapshotReader, check_sealed_snapshot, read_checked_batch
 from plugins.bank.service.large_snapshot_spool import spool_snapshot
-from plugins.bank.service.plan_work import PlanWorkPaused, assert_task
+from plugins.bank.service.plan_work import PlanWorkPaused
+from plugins.bank.service.plan_work import assert_results_task as assert_task
 from plugins.bank.service.question_apply_service import _asset_root, _normalise_snapshot_summary
 from plugins.bank.service.resource_guard import ResourcePressure, assert_import_resources
 from plugins.bank.service.source_write_lock import SourceWriteBusy
@@ -180,6 +181,11 @@ async def dispatch_incremental_imports_once(
     *, session_factory: Any = None, client: Any = None, root: Path | None = None,
 ):
     session_factory = session_factory or DataSourceRegistry.session
+    from plugins.bank.service.resource_wait import IMPORT_RESOURCE_WAIT
+    # Check public host resources before claiming or downloading anything;
+    # short resources leave imports queued with one persisted wait.
+    if not await IMPORT_RESOURCE_WAIT.allow(session_factory, root=root):
+        return
     async with session_factory() as db:
         ids = await pending_incremental_import_ids(db)
     for import_id in ids:
@@ -210,7 +216,9 @@ async def _run():
         try:
             await dispatch_incremental_imports_once()
             from plugins.bank.service.import_intake_worker import dispatch_import_intakes_once
-            await dispatch_import_intakes_once()
+            from plugins.bank.service.resource_wait import IMPORT_RESOURCE_WAIT
+            if not IMPORT_RESOURCE_WAIT.waiting:
+                await dispatch_import_intakes_once()
         except asyncio.CancelledError:
             raise
         except Exception as exc:

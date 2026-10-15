@@ -92,3 +92,31 @@ async def test_cleanup_keeps_latest_and_quarantined_then_reclaims_superseded(imp
     await db.rollback()
     await cleanup_once(session_factory=factory, client=Client(), root=tmp_path)
     assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_latest_complete_result_is_offered_once_and_collector_decides(import_db, tmp_path):
+    """A32: the newest fully accepted result may be released; a refusal is final until a newer run."""
+    db = import_db
+    ticket = await claim_incremental_import(db, 30, report())
+    row = await db.get(QbQuestionImport, ticket['importId'])
+    row.status, row.cursor, row.accepted_count, row.quarantined_count = 'completed', 3, 3, 0
+    row.worker_token = row.lease_until = row.active_source_slot = None
+    row.finished_at = datetime.utcnow() - timedelta(days=2)
+    scope = await db.get(QbSyncJobScope, row.scope_id)
+    scope.snapshot_complete = 1
+    await db.commit()
+    factory = async_sessionmaker(db.bind, expire_on_commit=False)
+    calls = []
+
+    class Refusing:
+        def reclaim_run(self, **payload):
+            calls.append(payload)
+            raise ServiceException(message='保留本教材最新成果供补采使用')
+
+    await cleanup_once(session_factory=factory, client=Refusing(), root=tmp_path)
+    assert calls and calls[0]['allowLatest'] is True
+    task = await db.get(QbSyncJob, row.task_id, populate_existing=True)
+    assert task.options_json['latestReclaimRefused'] and not task.options_json['snapshotCleanupPending']
+    await cleanup_once(session_factory=factory, client=Refusing(), root=tmp_path)
+    assert len(calls) == 1, 'no repeated requests while the collector still needs it'

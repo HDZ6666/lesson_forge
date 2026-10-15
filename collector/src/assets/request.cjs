@@ -10,8 +10,11 @@ const { MAX_ASSET_BYTES } = require('../sources/zujuan/constants.cjs');
 const agents = new WeakMap();
 
 function allowed(url) {
-  return assertAllowedUrl(url, ALLOWED_ASSET_HOSTS,
-    (message, code, cause) => new QuestionSyncError(message, code, cause));
+  return assertAllowedUrl(
+    url,
+    ALLOWED_ASSET_HOSTS,
+    (message, code, cause) => new QuestionSyncError(message, code, cause),
+  );
 }
 
 function beforeRequest(options) {
@@ -29,7 +32,8 @@ async function openAssetResponse(context, url, options) {
     beforeRequest(options);
     const response = await context.request.get(url, { timeout: options.timeout, failOnStatusCode: false });
     return {
-      status: () => responseStatus(response), headers: () => responseHeaders(response),
+      status: () => responseStatus(response),
+      headers: () => responseHeaders(response),
       dispose: () => response.dispose?.(),
       body: async () => {
         const body = Buffer.from(await response.body());
@@ -50,16 +54,24 @@ async function openAssetResponse(context, url, options) {
     for (let redirects = 0; ; redirects += 1) {
       beforeRequest(options);
       const cookies = await context.cookies(url);
-      const started=performance.now();
+      const started = performance.now();
       response = await (options.assetFetch || fetch)(url, {
-        redirect: 'manual', signal: controller.signal,
+        redirect: 'manual',
+        signal: controller.signal,
         headers: {
-          'user-agent': agents.get(context), 'accept-encoding': 'identity',
+          'user-agent': agents.get(context),
+          'accept-encoding': 'identity',
           referer: 'https://zujuan.xkw.com/',
           cookie: cookies.map((cookie) => `${cookie.name}=${cookie.value}`).join('; '),
         },
       });
-      diagnostics.write('asset_http_response',{url:diagnostics.safeUrl(url),redirects,status:response.status,retryAfter:response.headers.get('retry-after'),elapsedMs:Math.round(performance.now()-started)});
+      diagnostics.write('asset_http_response', {
+        url: diagnostics.safeUrl(url),
+        redirects,
+        status: response.status,
+        retryAfter: response.headers.get('retry-after'),
+        elapsedMs: Math.round(performance.now() - started),
+      });
       options.sourceControl?.observe(response.status, Object.fromEntries(response.headers), { verification: false });
       if (![301, 302, 303, 307, 308].includes(response.status)) break;
       const location = response.headers.get('location');
@@ -68,8 +80,12 @@ async function openAssetResponse(context, url, options) {
       url = allowed(new URL(location, url).href);
     }
     return {
-      status: () => response.status, headers: () => Object.fromEntries(response.headers),
-      dispose: async () => { clearTimeout(timer); controller.abort(); },
+      status: () => response.status,
+      headers: () => Object.fromEntries(response.headers),
+      dispose: async () => {
+        clearTimeout(timer);
+        controller.abort();
+      },
       body: async () => {
         const chunks = [];
         let size = 0;
@@ -84,7 +100,10 @@ async function openAssetResponse(context, url, options) {
             chunks.push(Buffer.from(chunk));
           }
           return Buffer.concat(chunks, size);
-        } finally { clearTimeout(timer); controller.abort(); }
+        } finally {
+          clearTimeout(timer);
+          controller.abort();
+        }
       },
     };
   } catch (error) {

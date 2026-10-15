@@ -34,28 +34,43 @@ function seedMetadata(dbPath, textbookIds = ['tb1']) {
   const store = new MetadataStore(dbPath);
   const runId = store.beginRun('https://zujuan.xkw.com/');
   const observedAt = new Date().toISOString();
-  store.saveVersionGroup({
-    externalVersionId: 'v1',
-    versionName: '测试版',
-    sourceUrl: 'https://zujuan.xkw.com/v1',
-    isNew: 'N',
-    sortOrder: 1,
-    raw: {},
-  }, textbookIds.map((externalTextbookId, index) => ({
-    externalTextbookId,
-    versionExternalId: 'v1',
-    textbookName: `教材 ${externalTextbookId}`,
-    grade: '九年级',
-    volume: '上册',
-    sourceUrl: `https://zujuan.xkw.com/${externalTextbookId}`,
-    sortOrder: index + 1,
-    bootstrapChapterExternalId: `${externalTextbookId}-c1`,
-    raw: {},
-  })), observedAt, runId);
-  store.finishRun(runId, 'success', {
-    versionsSeen: 1, textbooksSeen: textbookIds.length, inserted: textbookIds.length + 1,
-    updated: 0, unchanged: 0, errors: 0,
-  }, null, null);
+  store.saveVersionGroup(
+    {
+      externalVersionId: 'v1',
+      versionName: '测试版',
+      sourceUrl: 'https://zujuan.xkw.com/v1',
+      isNew: 'N',
+      sortOrder: 1,
+      raw: {},
+    },
+    textbookIds.map((externalTextbookId, index) => ({
+      externalTextbookId,
+      versionExternalId: 'v1',
+      textbookName: `教材 ${externalTextbookId}`,
+      grade: '九年级',
+      volume: '上册',
+      sourceUrl: `https://zujuan.xkw.com/${externalTextbookId}`,
+      sortOrder: index + 1,
+      bootstrapChapterExternalId: `${externalTextbookId}-c1`,
+      raw: {},
+    })),
+    observedAt,
+    runId,
+  );
+  store.finishRun(
+    runId,
+    'success',
+    {
+      versionsSeen: 1,
+      textbooksSeen: textbookIds.length,
+      inserted: textbookIds.length + 1,
+      updated: 0,
+      unchanged: 0,
+      errors: 0,
+    },
+    null,
+    null,
+  );
   store.close();
   return runId;
 }
@@ -65,19 +80,45 @@ function seedChildRun(dbPath, textbookId, status = 'success', { finish = true } 
   const runId = store.beginRun({ textbookId });
   const catalogId = `${textbookId}-c1`;
   const questionId = `${textbookId}-q1`;
-  store.saveRunCatalogTree(runId, textbookId, [{
-    externalId: catalogId, level: 1, name: `目录 ${textbookId}`, path: `/${catalogId}`,
-  }]);
-  store.saveRunQuestion(runId, textbookId, {
-    externalId: questionId, questionType: '单选题', contentHtml: `<p>${textbookId}</p>`, plainText: textbookId,
-  }, catalogId);
-  store.saveRunQuestionCatalogs(runId, textbookId, questionId, [{
-    externalId: catalogId, level: 1, name: `目录 ${textbookId}`, path: `/${catalogId}`,
-  }]);
+  store.saveRunCatalogTree(runId, textbookId, [
+    {
+      externalId: catalogId,
+      level: 1,
+      name: `目录 ${textbookId}`,
+      path: `/${catalogId}`,
+    },
+  ]);
+  store.saveRunQuestion(
+    runId,
+    textbookId,
+    {
+      externalId: questionId,
+      questionType: '单选题',
+      contentHtml: `<p>${textbookId}</p>`,
+      plainText: textbookId,
+    },
+    catalogId,
+  );
+  store.saveRunQuestionCatalogs(runId, textbookId, questionId, [
+    {
+      externalId: catalogId,
+      level: 1,
+      name: `目录 ${textbookId}`,
+      path: `/${catalogId}`,
+    },
+  ]);
   if (finish) {
-    store.finishRun(runId, status, {
-      pagesOk: 2, questionsSeen: 1, questionsInserted: 1, errors: status === 'success' ? 0 : 1,
-    }, status === 'success' ? null : `教材 ${textbookId} 采集失败`);
+    store.finishRun(
+      runId,
+      status,
+      {
+        pagesOk: 2,
+        questionsSeen: 1,
+        questionsInserted: 1,
+        errors: status === 'success' ? 0 : 1,
+      },
+      status === 'success' ? null : `教材 ${textbookId} 采集失败`,
+    );
   }
   store.close();
   return runId;
@@ -89,7 +130,10 @@ function fakeChild() {
   child.stderr = new PassThrough();
   child.pid = 2147483647;
   child.killed = [];
-  child.kill = (signal) => { child.killed.push(signal); return true; };
+  child.kill = (signal) => {
+    child.killed.push(signal);
+    return true;
+  };
   child.finish = (exitCode = 0) => {
     child.stdout.end();
     child.stderr.end();
@@ -118,12 +162,17 @@ async function closeServer(server) {
 }
 
 const contentPayload = (ids = ['tb1']) => ({
-  runType: 'content', acknowledgeSourcePolicy: true, metadataRunId: 1, textbookExternalIds: ids, maxPages: 1,
+  runType: 'content',
+  acknowledgeSourcePolicy: true,
+  metadataRunId: 1,
+  textbookExternalIds: ids,
+  maxPages: 1,
 });
 
 test('A3-2 管理器源码不再用日志正则推导 run、计数或版本数', () => {
   const sources = ['src/api/job_manager.cjs', 'src/api/routes.cjs', 'src/api/progress.cjs', 'server.cjs']
-    .map((file) => fs.readFileSync(path.join(ROOT, file), 'utf8')).join('\n');
+    .map((file) => fs.readFileSync(path.join(ROOT, file), 'utf8'))
+    .join('\n');
   assert.doesNotMatch(sources, /match\(\/\(?(metadata-run|发现|textbooksSeen|本次同步|questionsSeen|run=)/);
 });
 
@@ -155,7 +204,10 @@ test('A3-3 run_created 事件立即回绑 collectorRunId；结构化 error 决�
 
     child.stdout.write('[列表] 一些人类可读日志\n');
     child.emit('message', {
-      type: 'error', code: 'verification_required', message: '人工验证等待超时，已保留断点。', recoverable: true,
+      type: 'error',
+      code: 'verification_required',
+      message: '人工验证等待超时，已保留断点。',
+      recoverable: true,
       failedPages: [{ catalogExternalId: 'tb1-c1', pageNumber: 470, resultType: 'request_failed' }],
     });
     child.stderr.write('[错误] 人工验证等待超时，已保留断点。\n使用 --help 查看参数。\n');
@@ -172,7 +224,9 @@ test('A3-3 run_created 事件立即回绑 collectorRunId；结构化 error 决�
     assert.doesNotMatch(finished.logTail, /@@event/);
 
     const db = new DatabaseSync(dbPath, { readOnly: true });
-    const row = db.prepare('SELECT status, error_code, active_slot, collector_run_id FROM collector_jobs WHERE id = ?').get(started.id);
+    const row = db
+      .prepare('SELECT status, error_code, active_slot, collector_run_id FROM collector_jobs WHERE id = ?')
+      .get(started.id);
     db.close();
     assert.equal(row.status, 'blocked');
     assert.equal(row.error_code, 'verification_required');
@@ -201,7 +255,9 @@ test('A3-3b stdout 上的 @@event 行作为第二事件通道，同样不进入 
     const started = manager.start(contentPayload());
     await waitFor(() => child != null);
     child.stdout.write(`${formatEventLine({ type: 'run_created', runId, runType: 'content' })}\n`);
-    child.stdout.write(`${formatEventLine({ type: 'progress', runId, pagesOk: 7, questionsSeen: 70, catalogCount: 3 })}\n`);
+    child.stdout.write(
+      `${formatEventLine({ type: 'progress', runId, pagesOk: 7, questionsSeen: 70, catalogCount: 3 })}\n`,
+    );
     await waitFor(() => manager.get(started.id)?.scopeItems[0].collectorRunId === runId);
     const job = manager.get(started.id);
     assert.equal(job.scopeItems[0].pagesOk, 7);
@@ -240,7 +296,10 @@ test('A3-4 两个管理器共用同一 SQLite：第二个 start 得到 409，第
   try {
     const started = first.start(contentPayload(['tb1']));
     await waitFor(() => firstChild != null);
-    assert.throws(() => second.start(contentPayload(['tb2'])), (error) => error.statusCode === 409);
+    assert.throws(
+      () => second.start(contentPayload(['tb2'])),
+      (error) => error.statusCode === 409,
+    );
     assert.equal(second.activeJob, null, '被拒绝的任务不能留在第二个管理器的内存里');
     firstChild.finish(0);
     await waitFor(() => first.get(started.id)?.status === 'completed');
@@ -250,7 +309,10 @@ test('A3-4 两个管理器共用同一 SQLite：第二个 start 得到 409，第
     const rows = db.prepare('SELECT id, status, active_slot FROM collector_jobs ORDER BY created_at').all();
     db.close();
     assert.equal(rows.length, 2);
-    assert.deepEqual(rows.map((row) => row.active_slot), [null, null]);
+    assert.deepEqual(
+      rows.map((row) => row.active_slot),
+      [null, null],
+    );
   } finally {
     await first.shutdown();
     await second.shutdown();
@@ -278,7 +340,12 @@ test('A3-5 重启恢复：前一管理器崩溃后新管理器把遗留活动任
   // Simulate a crash: forget the manager without cancelling or finishing.
   crashed.dispose();
 
-  const restarted = new CollectorJobManager({ dbPath, spawnImpl() { throw new Error('不应再次启动子进程'); } });
+  const restarted = new CollectorJobManager({
+    dbPath,
+    spawnImpl() {
+      throw new Error('不应再次启动子进程');
+    },
+  });
   try {
     const recovered = restarted.get(started.id);
     assert.ok(recovered, '重启后 GET 仍能读到该任务');
@@ -352,12 +419,19 @@ test('A3-6 停滞检测：无心跳的子进程被终止并记 stalled；持续 
     });
     try {
       const next = patient.start({
-        runType: 'content', acknowledgeSourcePolicy: true, maxPages: 1,
+        runType: 'content',
+        acknowledgeSourcePolicy: true,
+        maxPages: 1,
         textbookExternalIds: ['tb2'],
-        textbookScopes: [{
-          sourceProvider: 'zujuan', externalVersionId: 'v1', externalTextbookId: 'tb2',
-          versionName: '测试版', textbookName: '教材 tb2',
-        }],
+        textbookScopes: [
+          {
+            sourceProvider: 'zujuan',
+            externalVersionId: 'v1',
+            externalTextbookId: 'tb2',
+            versionName: '测试版',
+            textbookName: '教材 tb2',
+          },
+        ],
       });
       await waitFor(() => waiting != null);
       const ticker = setInterval(() => {
@@ -419,7 +493,9 @@ test('资源低水位终止活动子进程并封存已采内容；恢复后可�
   let child;
   let memory = 10 * 1024 * 1024;
   const manager = new CollectorJobManager({
-    dbPath, jobTimeoutMs: 60000, stallTimeoutMs: 2000,
+    dbPath,
+    jobTimeoutMs: 60000,
+    stallTimeoutMs: 2000,
     resourceGuardOptions: { minMemoryMiB: 1, memoryReader: () => memory },
     spawnImpl(_node, args) {
       seedChildRun(dbPath, args[args.indexOf('--textbook-id') + 1], 'running', { finish: false });
@@ -465,7 +541,9 @@ test('真实子进程通过 IPC 通道发送结构化 error（不启动 Chrome�
   child.on('message', (message) => received.push(message));
   let stderr = '';
   child.stderr.setEncoding('utf8');
-  child.stderr.on('data', (chunk) => { stderr += chunk; });
+  child.stderr.on('data', (chunk) => {
+    stderr += chunk;
+  });
   const exitCode = await new Promise((resolve) => child.once('close', resolve));
   assert.equal(exitCode, 1);
   assert.equal(received.length, 1);
@@ -480,7 +558,9 @@ test('API 侧关闭 IPC 通道后，子进程 emitter 继续运行而不会因 p
   const { spawn } = require('node:child_process');
   const { directory } = temporaryDb();
   const script = path.join(directory, 'emitter-child.cjs');
-  fs.writeFileSync(script, `
+  fs.writeFileSync(
+    script,
+    `
     const { createProcessEventEmitter } = require(${JSON.stringify(path.join(ROOT, 'src', 'jobs', 'events.cjs'))});
     const events = createProcessEventEmitter();
     let ticks = 0;
@@ -489,14 +569,19 @@ test('API 侧关闭 IPC 通道后，子进程 emitter 继续运行而不会因 p
       events.emit('heartbeat', { stage: 'tick' });
       if (ticks >= 12) { clearInterval(timer); process.stdout.write('survived ipcOpen=' + events.ipcOpen + '\\n'); process.exit(0); }
     }, 40);
-  `);
+  `,
+  );
   const child = spawn(process.execPath, [script], { stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
   let stdout = '';
   let stderr = '';
   child.stdout.setEncoding('utf8');
   child.stderr.setEncoding('utf8');
-  child.stdout.on('data', (chunk) => { stdout += chunk; });
-  child.stderr.on('data', (chunk) => { stderr += chunk; });
+  child.stdout.on('data', (chunk) => {
+    stdout += chunk;
+  });
+  child.stderr.on('data', (chunk) => {
+    stderr += chunk;
+  });
   await new Promise((resolve) => child.once('message', resolve));
   child.disconnect();
   // After a parent-side disconnect Node may not emit 'close' for the IPC
@@ -567,7 +652,9 @@ test('JobStore 只新增任务、派发去重表与两个索引，其它 schema 
     before.close();
     const snapshot = () => {
       const db = new DatabaseSync(dbPath, { readOnly: true });
-      const rows = db.prepare("SELECT type, name, sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY type, name").all();
+      const rows = db
+        .prepare('SELECT type, name, sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY type, name')
+        .all();
       db.close();
       return rows;
     };
@@ -577,7 +664,10 @@ test('JobStore 只新增任务、派发去重表与两个索引，其它 schema 
     const after = snapshot();
     const added = after.filter((row) => !baseline.some((item) => item.name === row.name));
     assert.deepEqual(added.map((row) => row.name).sort(), [
-      'collector_job_requests', 'collector_jobs', 'ix_collector_jobs_created_at', 'ux_collector_jobs_active_slot',
+      'collector_job_requests',
+      'collector_jobs',
+      'ix_collector_jobs_created_at',
+      'ux_collector_jobs_active_slot',
     ]);
     const unchanged = after.filter((row) => baseline.some((item) => item.name === row.name));
     assert.deepEqual(unchanged, baseline);
@@ -590,23 +680,40 @@ test('派发 UUID 在响应丢失、另一管理器及终态后重试均不重�
   const { directory, dbPath } = temporaryDb('collector-dispatch-replay-');
   const id = 'ac4102a1-8237-4ef8-a56a-6611df50c9c8';
   const payload = {
-    runType: 'content', acknowledgeSourcePolicy: true, maxPages: 1, jobId: id,
+    runType: 'content',
+    acknowledgeSourcePolicy: true,
+    maxPages: 1,
+    jobId: id,
     textbookExternalIds: ['tb1'],
-    textbookScopes: [{ sourceProvider: 'zujuan', externalVersionId: 'v1', externalTextbookId: 'tb1',
-      versionName: '测试版', textbookName: '教材 1' }],
+    textbookScopes: [
+      {
+        sourceProvider: 'zujuan',
+        externalVersionId: 'v1',
+        externalTextbookId: 'tb1',
+        versionName: '测试版',
+        textbookName: '教材 1',
+      },
+    ],
   };
   const first = new CollectorJobManager({ dbPath });
   const second = new CollectorJobManager({ dbPath });
   let starts = 0;
-  first.execute = async () => { starts += 1; };
-  second.execute = async () => { throw new Error('duplicate execution'); };
+  first.execute = async () => {
+    starts += 1;
+  };
+  second.execute = async () => {
+    throw new Error('duplicate execution');
+  };
   try {
     assert.equal(first.start(payload).id, id);
     await Promise.resolve();
     assert.equal(first.start(payload).id, id);
     assert.equal(second.start(payload).id, id);
     assert.equal(starts, 1);
-    assert.throws(() => second.cancel(id), (error) => error.code === 'job_not_owned');
+    assert.throws(
+      () => second.cancel(id),
+      (error) => error.code === 'job_not_owned',
+    );
     assert.equal(second.store.load(id).ownerToken, first.ownerToken);
     assert.throws(() => second.start({ ...payload, maxPages: 2 }), /不同采集范围/);
     const job = first.get(id);
@@ -633,13 +740,22 @@ test('派发前确认停止会保存 UUID，迟到的启动请求不能再创建
   const { directory, dbPath } = temporaryDb('collector-dispatch-cancel-');
   const id = 'ad4102a1-8237-4ef8-a56a-6611df50c9c8';
   const manager = new CollectorJobManager({ dbPath });
-  manager.execute = async () => { throw new Error('cancelled dispatch started'); };
+  manager.execute = async () => {
+    throw new Error('cancelled dispatch started');
+  };
   try {
     assert.equal(manager.cancel(id), null, 'legacy missing-job cancel remains 404');
     assert.equal(manager.cancel(id, { reserveDispatch: true }).status, 'cancelled');
-    assert.throws(() => manager.start({
-      runType: 'metadata', maxPages: 1, acknowledgeSourcePolicy: true, jobId: id,
-    }), /已归档/);
+    assert.throws(
+      () =>
+        manager.start({
+          runType: 'metadata',
+          maxPages: 1,
+          acknowledgeSourcePolicy: true,
+          jobId: id,
+        }),
+      /已归档/,
+    );
     assert.equal(manager.store.load(id), null);
   } finally {
     manager.dispose();
@@ -652,7 +768,9 @@ test('实际 HTTP 丢弃首次启动响应后重试仍只执行一次，提前�
   const { directory, dbPath } = temporaryDb('collector-http-dispatch-');
   const manager = new CollectorJobManager({ dbPath });
   let starts = 0;
-  manager.execute = async () => { starts += 1; };
+  manager.execute = async () => {
+    starts += 1;
+  };
   const server = createCollectorServer({ manager, token: 'local-dispatch-test' });
   const base = await listen(server);
   const id = 'af4102a1-8237-4ef8-a56a-6611df50c9c8';
@@ -676,12 +794,16 @@ test('实际 HTTP 丢弃首次启动响应后重试仍只执行一次，提前�
     assert.equal(starts, 1);
     const cancelledId = 'aa4102a1-8237-4ef8-a56a-6611df50c9c8';
     const cancelled = await fetch(`${base}/v1/jobs/${cancelledId}/cancel`, {
-      method: 'POST', headers, body: JSON.stringify({ reserveDispatch: true }),
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ reserveDispatch: true }),
     });
     assert.equal(cancelled.status, 200);
     assert.equal((await cancelled.json()).status, 'cancelled');
     const late = await fetch(`${base}/v1/jobs`, {
-      method: 'POST', headers, body: JSON.stringify({ ...payload, jobId: cancelledId }),
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ ...payload, jobId: cancelledId }),
     });
     assert.equal(late.status, 409);
     assert.equal(starts, 1);
@@ -707,25 +829,45 @@ test('部署浏览器模式统一传递给教材发现和内容子进程', async
   }
 });
 
-test('单任务分页并发覆盖部署值，持久保存且派发重放不能换参数', async () => {
+test('单任务分页并发和数字页上限持久保存，派发重放不能换参数', async () => {
   const { directory, dbPath } = temporaryDb('task-concurrency-');
   seedMetadata(dbPath);
   let args;
-  const manager = new CollectorJobManager({ dbPath, listConcurrency: 1, spawnImpl(_node, argv) {
-    args = argv;
-    const child = fakeChild();
-    setTimeout(() => child.emit('close',1,null),10);
-    return child;
-  } });
-  const payload={...contentPayload(),jobId:'ac4102a1-8237-4ef8-a56a-6611df50c9c8',listConcurrency:4};
+  const manager = new CollectorJobManager({
+    dbPath,
+    listConcurrency: 1,
+    spawnImpl(_node, argv) {
+      args = argv;
+      const child = fakeChild();
+      setTimeout(() => child.emit('close', 1, null), 10);
+      return child;
+    },
+  });
+  const payload = {
+    ...contentPayload(),
+    jobId: 'ac4102a1-8237-4ef8-a56a-6611df50c9c8',
+    listConcurrency: 4,
+    catalogPageLimit: 1500,
+  };
   try {
-    const result=manager.start(payload);
-    await waitFor(()=>args!=null);
-    assert.equal(args[args.indexOf('--concurrency')+1],'4');
-    assert.equal(manager.store.load(result.id).listConcurrency,4);
-    assert.equal(manager.start(payload).listConcurrency,4);
-    assert.throws(()=>manager.start({...payload,listConcurrency:2}),/不同采集范围/);
-    for(const value of [0,17,1.2,true,'4']) assert.throws(()=>manager.start({...payload,listConcurrency:value}),/listConcurrency/);
-    await waitFor(()=>manager.get(result.id).status==='failed');
-  } finally {await manager.shutdown();fs.rmSync(directory,{recursive:true,force:true});}
+    const result = manager.start(payload);
+    await waitFor(() => args != null);
+    assert.equal(args[args.indexOf('--concurrency') + 1], '4');
+    assert.equal(args[args.indexOf('--catalog-page-limit') + 1], '1500');
+    assert.equal(parseArgs(args.slice(1)).catalogPageLimit, 1500);
+    assert.equal(manager.store.load(result.id).catalogPageLimit, 1500);
+    assert.equal(manager.start(payload).catalogPageLimit, 1500);
+    assert.throws(() => manager.start({ ...payload, catalogPageLimit: 1000 }), /不同采集范围/);
+    for (const value of [0, 10001, 1.5, true, '1500'])
+      assert.throws(() => manager.start({ ...payload, catalogPageLimit: value }), /catalogPageLimit/);
+    assert.equal(manager.store.load(result.id).listConcurrency, 4);
+    assert.equal(manager.start(payload).listConcurrency, 4);
+    assert.throws(() => manager.start({ ...payload, listConcurrency: 2 }), /不同采集范围/);
+    for (const value of [0, 17, 1.2, true, '4'])
+      assert.throws(() => manager.start({ ...payload, listConcurrency: value }), /listConcurrency/);
+    await waitFor(() => manager.get(result.id).status === 'failed');
+  } finally {
+    await manager.shutdown();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
 });

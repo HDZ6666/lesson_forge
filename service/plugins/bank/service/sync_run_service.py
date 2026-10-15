@@ -151,6 +151,9 @@ class _WorkerHandle:
     # A per-task question collection policy. Rehydrate this from options_json
     # so retries/resumes keep the same page-limit mode.
     list_concurrency: int | None = None
+    catalog_page_limit: int | None = None
+    # 'full' rescans each catalog window; anything else is incremental.
+    sync_mode: str | None = None
     limit_to_1000_pages: bool = False
     workflow_version: int = 1
     dispatch_job_id: str | None = None
@@ -757,7 +760,7 @@ def _bound_live_node(value: Any, budget: list[int]) -> dict[str, Any] | None:
         'lastContiguousSuccessfulPage', 'highestAttemptedPage',
         'failedPageCount', 'duplicatePageCount', 'emptyPageCount',
         'parseErrorCount', 'assetErrorCount', 'scanComplete', 'dataComplete',
-        'completionQuality', 'pageLimitReached', 'current',
+        'completionQuality', 'pageLimitReached', 'stopReason', 'current',
     ):
         if key in value and value[key] is not None:
             output[key] = _jsonable(value[key])
@@ -2157,6 +2160,12 @@ async def _execute_remote(  # noqa: PLR0912, PLR0915
             start_kwargs['limit_to_1000_pages'] = True
         if handle.task_module == 'question' and handle.list_concurrency is not None:
             start_kwargs['list_concurrency'] = handle.list_concurrency
+        if handle.task_module == 'question' and handle.catalog_page_limit is not None:
+            # Stored legacy limits above 1000 never request outside the window.
+            from plugins.bank.service.sync_plans import effective_page_limit
+            start_kwargs['catalog_page_limit'] = effective_page_limit(handle.catalog_page_limit)
+        if handle.task_module == 'question' and handle.sync_mode == 'full':
+            start_kwargs['sync_mode'] = 'full'
         if handle.workflow_version >= 2:
             start_kwargs['workflow_version'] = 2
         dispatch_id = handle.dispatch_job_id
@@ -2567,6 +2576,8 @@ async def _execute(run_id: int, handle: _WorkerHandle) -> None:  # noqa: PLR0912
                         options = {}
                 options = options if isinstance(options, Mapping) else {}
                 handle.list_concurrency = options.get('listConcurrency')
+                handle.catalog_page_limit = options.get('catalogPageLimit')
+                handle.sync_mode = options.get('syncMode')
                 handle.workflow_version = int(options.get('workflowVersion', 1))
                 handle.resumed = handle.resumed or bool(options.get('resumeTask') or options.get('resume_task'))
                 handle.limit_to_1000_pages = _status_flag(
@@ -2815,6 +2826,27 @@ async def _finalize_scopes(
         )
 
 
+async def _plan_book_logical_task(db: Any, plan_id: int, local_textbook_id: Any) -> int | None:
+    """The logical task this plan already holds for the textbook, if any."""
+    if not local_textbook_id:
+        return None
+    from plugins.bank.entity.do.bank_do import QbSyncBookState
+    from plugins.bank.service.plan_control import owned_condition
+    state = await db.scalar(select(QbSyncBookState).where(
+        QbSyncBookState.plan_id == plan_id, QbSyncBookState.textbook_id == int(local_textbook_id)))
+    ids = [i for i in ((state.last_task_id, state.last_manual_task_id) if state else ()) if i]
+    previous = await db.get(QbSyncJob, max(ids)) if ids else None
+    if previous is None:
+        # No state pointer yet (or a legacy plan): the plan's earliest execution
+        # for this textbook carries the logical identity.
+        previous = await db.scalar(select(QbSyncJob).join(QbSyncJobScope, QbSyncJobScope.run_id == QbSyncJob.run_id).where(
+            owned_condition(plan_id), QbSyncJob.task_module == 'question',
+            QbSyncJobScope.local_textbook_id == int(local_textbook_id)).order_by(QbSyncJob.run_id).limit(1))
+    if previous is None or previous.task_module != 'question':
+        return None
+    return previous.logical_task_id or previous.run_id
+
+
 async def _finish(  # noqa: PLR0913
     run_id: int,
     handle: _WorkerHandle,
@@ -2879,11 +2911,18 @@ async def _finish(  # noqa: PLR0913
                 'queued', 'starting', 'running', 'cancelling',
             ):
                 return
-            if parent.status == 'cancelling':
+            was_cancelling = parent.status == 'cancelling'
+            if was_cancelling:
                 status, error_message = 'cancelled', '同步已停止'
                 values = finish_values(status, status, error_message)
             for key, value in values.items():
                 setattr(parent, key, value)
+            from plugins.bank.service.issue_diagnostics import stop_cause
+            cause = stop_cause(parent.options_json, status, error_message, was_cancelling=was_cancelling)
+            if cause:
+                parent.options_json = {**(parent.options_json or {}), 'stopCause': cause}
+                from plugins.bank.service import diagnostics
+                diagnostics.event('collection_stopped', stage='collection', taskId=run_id, **cause)
             # Job and unfinished scopes settle together. A dispatcher must
             # not release the book between these two lifecycle writes.
             for scope in await SyncTaskDao.scopes_for_update(db, run_id):
@@ -3122,6 +3161,11 @@ class SyncRunService:
         if run_type == 'content' and options.get('workflowVersion', 2) >= 2 and len(selected) != 1:
             raise ServiceException(message='新同步任务必须且只能选择一本教材')
         plan_id=options.get('autoPlanId') or options.get('manualPlanId')
+        if plan_id and task_module == 'question':
+            from plugins.bank.entity.do.bank_do import QbSyncPlan
+            page_plan = await db.get(QbSyncPlan, plan_id)
+            if page_plan is not None:
+                options.update(catalogPageLimit=page_plan.catalog_page_limit, limitTo1000Pages=False)
         rank=0
         if plan_id:
             from plugins.bank.entity.do.bank_do import QbSyncPlan
@@ -3180,6 +3224,11 @@ class SyncRunService:
             previous = await db.get(QbSyncJob, retry_of_run_id)
             if previous is not None:
                 logical_task_id = previous.logical_task_id or previous.run_id
+        if task_module == 'question' and logical_task_id is None and plan_id and selected_scope_rows:
+            # One textbook in one plan is one stable logical task: every later
+            # round, rerun or supplement adds an execution to it (spec 2).
+            logical_task_id = await _plan_book_logical_task(
+                db, int(plan_id), _scope_field(selected_scope_rows[0], 'local_textbook_id', 'localTextbookId'))
         row = QbSyncJob(
             run_type=run_type,
             task_module=task_module,
@@ -3262,6 +3311,8 @@ class SyncRunService:
             textbook_scopes=resolved_textbook_scopes,
             workflow_version=int(options.get('workflowVersion', 1)),
             limit_to_1000_pages=bool(options.get('limitTo1000Pages', False)),
+            catalog_page_limit=options.get('catalogPageLimit'),
+            sync_mode=options.get('syncMode'),
         )
         task = asyncio.create_task(_execute(run_id, handle))
         handle.task = task

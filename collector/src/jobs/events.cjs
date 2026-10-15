@@ -68,8 +68,15 @@ function normalizeEvent(raw) {
       break;
     case 'progress':
       for (const key of [
-        'catalogCount', 'catalogsDone', 'pagesOk', 'pagesFailed', 'questionsSeen',
-        'uniqueQuestionCount', 'sourceTotal', 'assetsDownloaded', 'errors',
+        'catalogCount',
+        'catalogsDone',
+        'pagesOk',
+        'pagesFailed',
+        'questionsSeen',
+        'uniqueQuestionCount',
+        'sourceTotal',
+        'assetsDownloaded',
+        'errors',
       ]) {
         const value = boundedInt(raw[key]);
         if (value != null) event[key] = value;
@@ -87,6 +94,8 @@ function normalizeEvent(raw) {
       {
         const rss = boundedInt(raw.rssMb);
         if (rss != null && rss >= 0) event.rssMb = rss;
+        const browserRss = boundedInt(raw.browserRssMb);
+        if (browserRss != null && browserRss >= 0) event.browserRssMb = browserRss;
       }
       break;
     case 'verification_wait':
@@ -100,14 +109,20 @@ function normalizeEvent(raw) {
       event.recoverable = raw.recoverable === true;
       event.blocked = raw.blocked === true;
       event.stage = boundedString(raw.stage, 64);
+      if (raw.discoveryRequest && ['seed', 'textbooks'].includes(raw.discoveryRequest.stage)) {
+        event.discoveryRequest = {
+          stage: raw.discoveryRequest.stage,
+          seedUrl: boundedString(raw.discoveryRequest.seedUrl, 2000),
+          versionId: boundedString(raw.discoveryRequest.versionId, 64),
+          urlTemplate: boundedString(raw.discoveryRequest.urlTemplate, 500),
+        };
+      }
       if (Array.isArray(raw.failedPages)) {
-        event.failedPages = raw.failedPages
-          .slice(0, MAX_FAILED_PAGES)
-          .map((item) => ({
-            catalogExternalId: boundedString(item?.catalogExternalId, 64),
-            pageNumber: boundedInt(item?.pageNumber),
-            resultType: boundedString(item?.resultType, 64),
-          }));
+        event.failedPages = raw.failedPages.slice(0, MAX_FAILED_PAGES).map((item) => ({
+          catalogExternalId: boundedString(item?.catalogExternalId, 64),
+          pageNumber: boundedInt(item?.pageNumber),
+          resultType: boundedString(item?.resultType, 64),
+        }));
       }
       break;
     case 'sealed':
@@ -158,7 +173,9 @@ function formatEventLine(event) {
 
 function resolveChannel(options = {}) {
   if (options.channel) return String(options.channel);
-  const configured = String(process.env.COLLECTOR_EVENT_CHANNEL || '').trim().toLowerCase();
+  const configured = String(process.env.COLLECTOR_EVENT_CHANNEL || '')
+    .trim()
+    .toLowerCase();
   if (configured === 'stdout' || configured === 'ipc' || configured === 'none') return configured;
   return typeof process.send === 'function' ? 'ipc' : 'none';
 }
@@ -179,15 +196,24 @@ function createProcessEventEmitter(options = {}) {
   // callback so the crawl continues (or is stopped by SIGTERM) cleanly.
   let ipcOpen = ipcEnabled && process.connected !== false;
   if (ipcEnabled) {
-    process.once('disconnect', () => { ipcOpen = false; });
+    process.once('disconnect', () => {
+      ipcOpen = false;
+    });
   }
   const emit = (type, payload = {}) => {
     const event = normalizeEvent({ ...payload, type, at: new Date().toISOString() });
     if (!event) return null;
-    if (['run_created','metadata_run_created'].includes(type)) diagnostics.bind({runId:event.runId,runType:type==='metadata_run_created'?'metadata':event.runType,textbookExternalId:event.textbookExternalId});
-    diagnostics.write('child_event',{event});
+    if (['run_created', 'metadata_run_created'].includes(type))
+      diagnostics.bind({
+        runId: event.runId,
+        runType: type === 'metadata_run_created' ? 'metadata' : event.runType,
+        textbookExternalId: event.textbookExternalId,
+      });
+    diagnostics.write('child_event', { event });
     if (sink) {
-      try { sink(event); } catch {}
+      try {
+        sink(event);
+      } catch {}
     }
     if (options.record === true) emitted.push(event);
     if (ipcOpen && process.connected !== false) {
@@ -200,7 +226,9 @@ function createProcessEventEmitter(options = {}) {
       }
     }
     if (stdoutEnabled) {
-      try { process.stdout.write(`${formatEventLine(event)}\n`); } catch {}
+      try {
+        process.stdout.write(`${formatEventLine(event)}\n`);
+      } catch {}
     }
     return event;
   };
@@ -210,7 +238,9 @@ function createProcessEventEmitter(options = {}) {
     stdoutEnabled,
     ipcEnabled,
     emitted,
-    get ipcOpen() { return ipcOpen; },
+    get ipcOpen() {
+      return ipcOpen;
+    },
   };
 }
 

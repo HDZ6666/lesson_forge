@@ -19,6 +19,7 @@ from plugins.bank.entity.do.bank_do import (
     QbSyncJobScope,
     QbTextbook,
 )
+from plugins.bank.service import import_intake
 from plugins.bank.service import import_intake_worker as intake_worker
 from plugins.bank.service import incremental_import_worker as worker
 from plugins.bank.service import sync_run_service as runs
@@ -112,6 +113,8 @@ async def test_finish_registers_before_any_remote_fetch(import_db, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_transport_retry_budget_is_durable_and_manual_retry_extends_it(import_db, monkeypatch):
+    # Quick budget only here; the slow retries after it have their own test.
+    monkeypatch.setattr(import_intake, 'INTAKE_SLOW_RETRY_DELAYS', ())
     db = import_db
     client, _summary, _calls = _client(monkeypatch)
 
@@ -239,7 +242,9 @@ async def test_resume_and_delete_wait_for_intake_even_before_registration(import
     from plugins.bank.entity.do.bank_do import QbSyncIssue
     issue = await db.scalar(select(QbSyncIssue).where(QbSyncIssue.error_type == 'intake_failure'))
     assert issue.status == 'open' and issue.textbook_id == 1 and issue.latest_task_id == 28
-    assert issue.evidence_json['handling'] == 'manual' and issue.evidence_json['stage'] == 'intake'
+    # A non-retryable snapshot failure with no protection evidence is maintenance, not a teacher check.
+    assert issue.evidence_json['handling'] == 'maintenance' and issue.evidence_json['owner'] == 'maintenance'
+    assert issue.evidence_json['stage'] == 'intake'
     await db.rollback()
     with pytest.raises(ServiceException, match='人工判断'):
         await ensure_import_intake_finished(db, 28, automatic=True)

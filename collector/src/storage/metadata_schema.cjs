@@ -5,7 +5,7 @@
  *
  * `source_metadata_runs` plus the two per-run snapshot tables are sealed by
  * triggers once a run reaches a terminal status, mirroring the content run
- * snapshot rules in lib/run_snapshots.cjs.  The migration is additive and
+ * snapshot rules in src/storage/run_snapshots.cjs.  The migration is additive and
  * idempotent so the API server can upgrade an older collector database.
  */
 
@@ -14,16 +14,8 @@ const { DatabaseSync } = require('node:sqlite');
 
 const { ensureDir } = require('../shared/utils.cjs');
 
-const METADATA_TERMINAL_STATUSES = Object.freeze([
-  'success',
-  'completed',
-  'failed',
-  'blocked',
-  'cancelled',
-]);
-const METADATA_TERMINAL_STATUS_SQL = METADATA_TERMINAL_STATUSES
-  .map((status) => `'${status}'`)
-  .join(', ');
+const METADATA_TERMINAL_STATUSES = Object.freeze(['success', 'completed', 'failed', 'blocked', 'cancelled']);
+const METADATA_TERMINAL_STATUS_SQL = METADATA_TERMINAL_STATUSES.map((status) => `'${status}'`).join(', ');
 const METADATA_RUN_COLUMN_MIGRATIONS = Object.freeze({
   provider: "TEXT NOT NULL DEFAULT 'zujuan'",
   started_at: "TEXT NOT NULL DEFAULT ''",
@@ -47,13 +39,19 @@ function metadataQuoteIdentifier(value) {
 
 function metadataTableNames(db) {
   return new Set(
-    db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all().map((row) => String(row.name)),
+    db
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
+      .all()
+      .map((row) => String(row.name)),
   );
 }
 
 function metadataTableColumns(db, table) {
   return new Set(
-    db.prepare(`PRAGMA table_info(${metadataQuoteIdentifier(table)})`).all().map((row) => String(row.name)),
+    db
+      .prepare(`PRAGMA table_info(${metadataQuoteIdentifier(table)})`)
+      .all()
+      .map((row) => String(row.name)),
   );
 }
 
@@ -84,19 +82,21 @@ function backfillMetadataRunSnapshots(db) {
           ON version.provider = run.provider
         WHERE run.status IN ('success', 'completed')
           AND run.finished_at IS NOT NULL
-          ${columns.has('last_seen_at')
-    ? 'AND version.last_seen_at >= run.started_at AND version.last_seen_at <= run.finished_at'
-    : ''}
+          ${
+            columns.has('last_seen_at')
+              ? 'AND version.last_seen_at >= run.started_at AND version.last_seen_at <= run.finished_at'
+              : ''
+          }
       `);
     }
   }
   if (tables.has('source_textbooks')) {
     const columns = metadataTableColumns(db, 'source_textbooks');
     if (
-      columns.has('provider')
-      && columns.has('external_textbook_id')
-      && columns.has('version_external_id')
-      && columns.has('textbook_name')
+      columns.has('provider') &&
+      columns.has('external_textbook_id') &&
+      columns.has('version_external_id') &&
+      columns.has('textbook_name')
     ) {
       db.exec(`
         INSERT OR IGNORE INTO source_metadata_run_textbooks (
@@ -119,9 +119,11 @@ function backfillMetadataRunSnapshots(db) {
           ON textbook.provider = run.provider
         WHERE run.status IN ('success', 'completed')
           AND run.finished_at IS NOT NULL
-          ${columns.has('last_seen_at')
-    ? 'AND textbook.last_seen_at >= run.started_at AND textbook.last_seen_at <= run.finished_at'
-    : ''}
+          ${
+            columns.has('last_seen_at')
+              ? 'AND textbook.last_seen_at >= run.started_at AND textbook.last_seen_at <= run.finished_at'
+              : ''
+          }
       `);
     }
   }
@@ -152,9 +154,7 @@ function migrateMetadataSnapshotSchema(db) {
     const runColumns = metadataTableColumns(db, 'source_metadata_runs');
     for (const [name, definition] of Object.entries(METADATA_RUN_COLUMN_MIGRATIONS)) {
       if (runColumns.has(name)) continue;
-      db.exec(
-        `ALTER TABLE source_metadata_runs ADD COLUMN ${metadataQuoteIdentifier(name)} ${definition}`,
-      );
+      db.exec(`ALTER TABLE source_metadata_runs ADD COLUMN ${metadataQuoteIdentifier(name)} ${definition}`);
     }
     db.exec(`
       CREATE TABLE IF NOT EXISTS source_metadata_run_versions (
@@ -293,7 +293,9 @@ function migrateMetadataSnapshotSchema(db) {
     `);
     db.exec('COMMIT;');
   } catch (error) {
-    try { db.exec('ROLLBACK;'); } catch {}
+    try {
+      db.exec('ROLLBACK;');
+    } catch {}
     throw error;
   }
 }
@@ -306,9 +308,13 @@ function ensureMetadataSnapshotSchema(dbPath) {
     db.exec('PRAGMA foreign_keys = ON;');
     db.exec('PRAGMA busy_timeout = 5000;');
     const version = Number(db.prepare('PRAGMA user_version').get().user_version || 0);
-    const ready = (version & 1) !== 0 && Boolean(db.prepare(
-      "SELECT 1 FROM sqlite_master WHERE type='trigger' AND name='trg_source_metadata_runs_no_reopen'",
-    ).get());
+    const ready =
+      (version & 1) !== 0 &&
+      Boolean(
+        db
+          .prepare("SELECT 1 FROM sqlite_master WHERE type='trigger' AND name='trg_source_metadata_runs_no_reopen'")
+          .get(),
+      );
     if (!ready) {
       migrateMetadataSnapshotSchema(db);
       db.exec(`PRAGMA user_version = ${version | 1};`);

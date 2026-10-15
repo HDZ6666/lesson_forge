@@ -24,7 +24,8 @@ from plugins.bank.entity.do.bank_do import (
 from plugins.bank.service.import_dates import utc_datetime
 from plugins.bank.service.incremental_merge import MAX_MERGE_QUESTIONS, merge_prepared_incremental_batch
 from plugins.bank.service.incremental_snapshot import QC_FORMAT
-from plugins.bank.service.plan_work import allowed_condition, assert_options
+from plugins.bank.service.plan_work import assert_results_options as assert_options
+from plugins.bank.service.plan_work import results_allowed_condition as allowed_condition
 from plugins.bank.service.question_apply_service import (
     _coerce_datetime,
     _empty_stats,
@@ -550,7 +551,7 @@ async def defer_incremental_import(db: Any, ticket: dict[str, Any], message: str
         _owned(row, ticket, now)
         task=await db.get(QbSyncJob,row.task_id)
         options=task.options_json or {}
-        row.status = 'cancelled' if options.get('planWorkEnded') else 'paused' if options.get('planWorkPaused') else 'queued'
+        row.status = 'paused' if options.get('planWorkPaused') else 'queued'
         row.stage = row.status
         row.error_message = str(message)[:2000]
         row.worker_token = None

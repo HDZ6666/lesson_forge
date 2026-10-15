@@ -70,23 +70,12 @@ function cachedAggregate(key, read) {
 }
 
 function readRunQuestions(dbPath, runId, options = {}) {
-  const textbookExternalId = optionalExternalId(
-    options.textbookExternalId,
-    'textbookExternalId',
-  );
-  const catalogExternalId = optionalExternalId(
-    options.catalogExternalId,
-    'catalogExternalId',
-  );
+  const textbookExternalId = optionalExternalId(options.textbookExternalId, 'textbookExternalId');
+  const catalogExternalId = optionalExternalId(options.catalogExternalId, 'catalogExternalId');
   const questionType = boundedText(options.questionType, 'questionType', 80);
   const keyword = boundedText(options.keyword, 'keyword', 120);
   const page = positiveInt(options.page, 'page', 1, MAX_RUN_PAGE_NUMBER);
-  const pageSize = positiveInt(
-    options.pageSize,
-    'pageSize',
-    DEFAULT_RUN_PAGE_SIZE,
-    MAX_RUN_PAGE_SIZE,
-  );
+  const pageSize = positiveInt(options.pageSize, 'pageSize', DEFAULT_RUN_PAGE_SIZE, MAX_RUN_PAGE_SIZE);
   const db = openReadOnly(dbPath);
   if (!db) throw httpError('collector SQLite 不存在', 503, 'snapshot_unavailable');
   try {
@@ -112,13 +101,22 @@ function readRunQuestions(dbPath, runId, options = {}) {
       )`);
       parameters.push(catalogExternalId);
     }
-    const immutable = ['success', 'completed'].includes(run.status.toLowerCase())
-      && run.snapshotComplete && Boolean(run.snapshotLockedAt);
-    const cacheBase = immutable ? JSON.stringify([dbPath, run.id, run.snapshotLockedAt, textbookExternalId, catalogExternalId]) : null;
+    const immutable =
+      ['success', 'completed'].includes(run.status.toLowerCase()) &&
+      run.snapshotComplete &&
+      Boolean(run.snapshotLockedAt);
+    const cacheBase = immutable
+      ? JSON.stringify([dbPath, run.id, run.snapshotLockedAt, textbookExternalId, catalogExternalId])
+      : null;
     const questionTypes = cachedAggregate(cacheBase && `types:${cacheBase}`, () =>
-      db.prepare(`SELECT DISTINCT item.question_type AS value FROM sync_run_question_items AS item
-        WHERE ${predicates.join(' AND ')} AND item.question_type IS NOT NULL ORDER BY item.question_type`).all(...parameters)
-        .map(row => ({ value: row.value, label: row.value })));
+      db
+        .prepare(
+          `SELECT DISTINCT item.question_type AS value FROM sync_run_question_items AS item
+        WHERE ${predicates.join(' AND ')} AND item.question_type IS NOT NULL ORDER BY item.question_type`,
+        )
+        .all(...parameters)
+        .map((row) => ({ value: row.value, label: row.value })),
+    );
     if (questionType) {
       if (itemColumns.has('question_type_id')) {
         predicates.push('(item.question_type = ? OR item.question_type_id = ?)');
@@ -131,13 +129,13 @@ function readRunQuestions(dbPath, runId, options = {}) {
     if (keyword) {
       const like = `%${escapeLike(keyword)}%`;
       const keywordPredicates = [
-        'item.question_external_id LIKE ? ESCAPE \'\\\'',
-        'COALESCE(item.plain_text, \'\') LIKE ? ESCAPE \'\\\'',
-        'COALESCE(item.content_html, \'\') LIKE ? ESCAPE \'\\\'',
+        "item.question_external_id LIKE ? ESCAPE '\\'",
+        "COALESCE(item.plain_text, '') LIKE ? ESCAPE '\\'",
+        "COALESCE(item.content_html, '') LIKE ? ESCAPE '\\'",
       ];
       const keywordParameters = [like, like, like];
       if (itemColumns.has('source_title')) {
-        keywordPredicates.splice(2, 0, 'COALESCE(item.source_title, \'\') LIKE ? ESCAPE \'\\\'');
+        keywordPredicates.splice(2, 0, "COALESCE(item.source_title, '') LIKE ? ESCAPE '\\'");
         keywordParameters.splice(2, 0, like);
       }
       predicates.push(`(${keywordPredicates.join('\n        OR ')})`);
@@ -152,29 +150,49 @@ function readRunQuestions(dbPath, runId, options = {}) {
     const exclusionKey = excludedIds.length ? createHash('sha256').update(excludedJson).digest('hex') : '';
     const countKey = cacheBase && JSON.stringify(['counts', cacheBase, questionType, keyword, exclusionKey]);
     const counts = cachedAggregate(countKey, () => {
-      if (immutable && !catalogExternalId && !questionType && !keyword && !excludedIds.length
-          && textbookExternalId && run.textbookExternalId === textbookExternalId
-          && run.questionItemCount > 0) {
+      if (
+        immutable &&
+        !catalogExternalId &&
+        !questionType &&
+        !keyword &&
+        !excludedIds.length &&
+        textbookExternalId &&
+        run.textbookExternalId === textbookExternalId &&
+        run.questionItemCount > 0
+      ) {
         return { captured: run.questionItemCount, excluded: 0 };
       }
       if (!excludedIds.length) {
-        const row = db.prepare(`SELECT COUNT(*) AS captured FROM sync_run_question_items AS item WHERE ${baseWhere}`).get(...parameters);
+        const row = db
+          .prepare(`SELECT COUNT(*) AS captured FROM sync_run_question_items AS item WHERE ${baseWhere}`)
+          .get(...parameters);
         return { captured: Number(row.captured), excluded: 0 };
       }
-      return db.prepare(`SELECT COUNT(*) AS captured,
+      return db
+        .prepare(
+          `SELECT COUNT(*) AS captured,
         COALESCE(SUM(item.question_external_id IN (SELECT value FROM json_each(?))), 0) AS excluded
-        FROM sync_run_question_items AS item WHERE ${baseWhere}`).get(excludedJson, ...parameters);
+        FROM sync_run_question_items AS item WHERE ${baseWhere}`,
+        )
+        .get(excludedJson, ...parameters);
     });
     if (options.selection === 'included' || options.selection === 'excluded') {
-      predicates.push(`item.question_external_id ${options.selection === 'included' ? 'NOT IN' : 'IN'} (SELECT value FROM json_each(?))`);
+      predicates.push(
+        `item.question_external_id ${options.selection === 'included' ? 'NOT IN' : 'IN'} (SELECT value FROM json_each(?))`,
+      );
       parameters.push(excludedJson);
     }
     const where = predicates.join(' AND ');
-    const total = options.selection === 'included'
-      ? Number(counts.captured) - Number(counts.excluded)
-      : options.selection === 'excluded' ? Number(counts.excluded) : Number(counts.captured);
+    const total =
+      options.selection === 'included'
+        ? Number(counts.captured) - Number(counts.excluded)
+        : options.selection === 'excluded'
+          ? Number(counts.excluded)
+          : Number(counts.captured);
     const offset = pageBounds(page, pageSize);
-    const rows = db.prepare(`
+    const rows = db
+      .prepare(
+        `
       SELECT item.textbook_external_id, item.question_external_id,
              ${optionalSelect(itemColumns, 'item', 'chapter_id')},
              ${optionalSelect(itemColumns, 'item', 'detail_url')},
@@ -224,45 +242,48 @@ function readRunQuestions(dbPath, runId, options = {}) {
       WHERE ${where}
       ORDER BY item.question_external_id ASC
       LIMIT ? OFFSET ?
-    `).all(...parameters, pageSize, offset).map((row) => ({
-      sourceProvider: PROVIDER,
-      externalTextbookId: String(row.textbook_external_id),
-      externalQuestionId: String(row.question_external_id),
-      chapterId: row.chapter_id == null ? null : String(row.chapter_id),
-      detailUrl: boundedString(row.detail_url, 4000),
-      sourceShort: boundedString(row.source_short, 1000),
-      sourceTitle: boundedString(row.source_title, 4000),
-      sourceUrl: boundedString(row.source_url, 4000),
-      questionType: boundedString(row.question_type, 200),
-      questionTypeId: boundedString(row.question_type_id, 200),
-      difficultyLabel: boundedString(row.difficulty_label, 200),
-      difficultyCode: boundedString(row.difficulty_code, 200),
-      easeCoefficient: row.ease_coefficient == null ? null : Number(row.ease_coefficient),
-      contentHtml: boundedString(row.content_html, 4000),
-      plainText: boundedString(row.plain_text, 1000) || '',
-      answerHtml: boundedString(row.answer_html, 4000),
-      analysisHtml: boundedString(row.analysis_html, 4000),
-      answerStatus: boundedString(row.answer_status, 80) || 'not_collected',
-      solutionHtml: boundedString(row.solution_html, 4000),
-      contentHash: boundedString(row.content_hash, 200),
-      listContentHash: boundedString(row.list_content_hash, 200),
-      detailContentHash: boundedString(row.detail_content_hash, 200),
-      contentVersion: boundedString(row.content_version, 200),
-      questionVersion: Number(row.question_version || 1),
-      snapshotVersion: Number(row.snapshot_version || 1),
-      detailFetched: Boolean(row.detail_fetched),
-      subquestionCount: Number(row.subquestion_count || 0),
-      childCount: row.child_count == null ? null : Number(row.child_count),
-      hasImage: Boolean(row.has_image),
-      hasFormula: Boolean(row.has_formula),
-      hasTable: Boolean(row.has_table),
-      isNew: Boolean(row.is_new),
-      useCount: row.use_count == null ? null : Number(row.use_count),
-      providerUpdatedAt: row.provider_updated_at || null,
-      catalogCount: Number(row.catalog_count || 0),
-      catalogName: boundedString(row.catalog_name, 4000),
-      capturedAt: row.captured_at,
-    }));
+    `,
+      )
+      .all(...parameters, pageSize, offset)
+      .map((row) => ({
+        sourceProvider: PROVIDER,
+        externalTextbookId: String(row.textbook_external_id),
+        externalQuestionId: String(row.question_external_id),
+        chapterId: row.chapter_id == null ? null : String(row.chapter_id),
+        detailUrl: boundedString(row.detail_url, 4000),
+        sourceShort: boundedString(row.source_short, 1000),
+        sourceTitle: boundedString(row.source_title, 4000),
+        sourceUrl: boundedString(row.source_url, 4000),
+        questionType: boundedString(row.question_type, 200),
+        questionTypeId: boundedString(row.question_type_id, 200),
+        difficultyLabel: boundedString(row.difficulty_label, 200),
+        difficultyCode: boundedString(row.difficulty_code, 200),
+        easeCoefficient: row.ease_coefficient == null ? null : Number(row.ease_coefficient),
+        contentHtml: boundedString(row.content_html, 4000),
+        plainText: boundedString(row.plain_text, 1000) || '',
+        answerHtml: boundedString(row.answer_html, 4000),
+        analysisHtml: boundedString(row.analysis_html, 4000),
+        answerStatus: boundedString(row.answer_status, 80) || 'not_collected',
+        solutionHtml: boundedString(row.solution_html, 4000),
+        contentHash: boundedString(row.content_hash, 200),
+        listContentHash: boundedString(row.list_content_hash, 200),
+        detailContentHash: boundedString(row.detail_content_hash, 200),
+        contentVersion: boundedString(row.content_version, 200),
+        questionVersion: Number(row.question_version || 1),
+        snapshotVersion: Number(row.snapshot_version || 1),
+        detailFetched: Boolean(row.detail_fetched),
+        subquestionCount: Number(row.subquestion_count || 0),
+        childCount: row.child_count == null ? null : Number(row.child_count),
+        hasImage: Boolean(row.has_image),
+        hasFormula: Boolean(row.has_formula),
+        hasTable: Boolean(row.has_table),
+        isNew: Boolean(row.is_new),
+        useCount: row.use_count == null ? null : Number(row.use_count),
+        providerUpdatedAt: row.provider_updated_at || null,
+        catalogCount: Number(row.catalog_count || 0),
+        catalogName: boundedString(row.catalog_name, 4000),
+        capturedAt: row.captured_at,
+      }));
     return {
       available: true,
       message: 'collector 运行题目快照可用',
@@ -272,7 +293,11 @@ function readRunQuestions(dbPath, runId, options = {}) {
       pageSize,
       rows,
       questionTypes,
-      summary: { captured: Number(counts.captured), excluded: Number(counts.excluded), included: Number(counts.captured) - Number(counts.excluded) },
+      summary: {
+        captured: Number(counts.captured),
+        excluded: Number(counts.excluded),
+        included: Number(counts.captured) - Number(counts.excluded),
+      },
     };
   } finally {
     db.close();
@@ -318,11 +343,12 @@ function mapRunQuestionRow(row, { detail = false } = {}) {
     providerUpdatedAt: boundedString(row.provider_updated_at, 4000),
     capturedAt: row.captured_at || null,
   };
-  if (detail && (
-    row.answer_html != null
-    || row.analysis_html != null
-    || ['public_captured', 'not_visible', 'login_required'].includes(item.answerStatus)
-  )) {
+  if (
+    detail &&
+    (row.answer_html != null ||
+      row.analysis_html != null ||
+      ['public_captured', 'not_visible', 'login_required'].includes(item.answerStatus))
+  ) {
     item.answerHtml = boundedString(row.answer_html, MAX_RUN_TEXT_LENGTH);
     item.analysisHtml = boundedString(row.analysis_html, MAX_RUN_TEXT_LENGTH);
   }
@@ -338,44 +364,39 @@ function readRunQuestion(dbPath, runId, externalId, options = {}) {
   if (typeof options === 'string') options = { textbookExternalId: options };
   const questionExternalId = optionalExternalId(externalId, 'externalId');
   if (!questionExternalId) throw httpError('externalId 不能为空');
-  const textbookExternalId = optionalExternalId(
-    options?.textbookExternalId,
-    'textbookExternalId',
-  );
+  const textbookExternalId = optionalExternalId(options?.textbookExternalId, 'textbookExternalId');
   const db = openReadOnly(dbPath);
   if (!db) throw httpError('collector SQLite 不存在', 503, 'snapshot_unavailable');
   try {
     const run = resolveContentRun(db, runId);
     assertSnapshotTables(db);
     assertRunTextbook(db, run, textbookExternalId);
-    const predicates = [
-      'run_id = ?',
-      'provider = ?',
-      'question_external_id = ?',
-    ];
+    const predicates = ['run_id = ?', 'provider = ?', 'question_external_id = ?'];
     const parameters = [run.id, PROVIDER, questionExternalId];
     if (textbookExternalId) {
       predicates.push('textbook_external_id = ?');
       parameters.push(textbookExternalId);
     }
-    const rows = db.prepare(`
+    const rows = db
+      .prepare(
+        `
       SELECT * FROM sync_run_question_items
       WHERE ${predicates.join(' AND ')}
       ORDER BY textbook_external_id ASC LIMIT 2
-    `).all(...parameters);
+    `,
+      )
+      .all(...parameters);
     if (!rows.length) {
-      throw httpError(
-        `内容运行 ${run.id} 中不存在题目 ${questionExternalId}`,
-        404,
-        'question_not_found',
-      );
+      throw httpError(`内容运行 ${run.id} 中不存在题目 ${questionExternalId}`, 404, 'question_not_found');
     }
     if (rows.length > 1) {
       throw httpError('题目来源 ID 在该运行中不唯一', 409, 'question_ambiguous');
     }
     const row = rows[0];
     const catalogColumns = tableColumns(db, 'sync_run_question_catalogs');
-    const catalogs = db.prepare(`
+    const catalogs = db
+      .prepare(
+        `
       SELECT textbook_external_id, catalog_external_id,
              ${optionalSelect(catalogColumns, '', 'catalog_level')},
              ${optionalSelect(catalogColumns, '', 'catalog_name')},
@@ -385,14 +406,17 @@ function readRunQuestion(dbPath, runId, externalId, options = {}) {
       WHERE run_id = ? AND provider = ?
         AND textbook_external_id = ? AND question_external_id = ?
       ORDER BY ${catalogColumns.has('catalog_level') ? 'COALESCE(catalog_level, 2147483647)' : 'CAST(2147483647 AS INTEGER)'}, catalog_external_id
-    `).all(run.id, PROVIDER, row.textbook_external_id, questionExternalId).map((item) => ({
-      externalTextbookId: String(item.textbook_external_id),
-      externalCatalogId: String(item.catalog_external_id),
-      catalogLevel: item.catalog_level == null ? null : Number(item.catalog_level),
-      catalogName: boundedString(item.catalog_name, 4000),
-      catalogPath: boundedString(item.catalog_path, 8000),
-      evidenceType: boundedString(item.evidence_type, 200),
-    }));
+    `,
+      )
+      .all(run.id, PROVIDER, row.textbook_external_id, questionExternalId)
+      .map((item) => ({
+        externalTextbookId: String(item.textbook_external_id),
+        externalCatalogId: String(item.catalog_external_id),
+        catalogLevel: item.catalog_level == null ? null : Number(item.catalog_level),
+        catalogName: boundedString(item.catalog_name, 4000),
+        catalogPath: boundedString(item.catalog_path, 8000),
+        evidenceType: boundedString(item.evidence_type, 200),
+      }));
     const item = mapRunQuestionRow(row, { detail: true });
     item.catalogs = catalogs;
     return {

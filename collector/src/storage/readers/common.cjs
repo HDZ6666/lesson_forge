@@ -33,9 +33,16 @@ const MAX_SNAPSHOT_FETCH_BATCH_SIZE = 64;
 const MAX_ASSET_BYTES = 64 * 1024 * 1024;
 const ASSET_SHA256 = /^[a-f0-9]{64}$/i;
 const STRICT_SNAPSHOT_RUN_COLUMNS = Object.freeze([
-  'finished_at', 'scope_json', 'error_count', 'snapshot_locked_at',
-  'snapshot_complete', 'catalog_item_count', 'question_item_count',
-  'question_catalog_count', 'question_tag_count', 'question_asset_count',
+  'finished_at',
+  'scope_json',
+  'error_count',
+  'snapshot_locked_at',
+  'snapshot_complete',
+  'catalog_item_count',
+  'question_item_count',
+  'question_catalog_count',
+  'question_tag_count',
+  'question_asset_count',
 ]);
 const SNAPSHOT_COLLECTIONS = Object.freeze({
   catalogs: {
@@ -102,37 +109,79 @@ const ENTITIES = {
     table: 'source_textbook_versions',
     idColumn: 'external_version_id',
     columns: [
-      'provider', 'external_version_id', 'version_name', 'source_url', 'is_new',
-      'sort_order', 'status', 'first_seen_at', 'last_seen_at',
+      'provider',
+      'external_version_id',
+      'version_name',
+      'source_url',
+      'is_new',
+      'sort_order',
+      'status',
+      'first_seen_at',
+      'last_seen_at',
     ],
   },
   textbook: {
     table: 'source_textbooks',
     idColumn: 'external_textbook_id',
     columns: [
-      'provider', 'external_textbook_id', 'version_external_id', 'textbook_name',
-      'grade', 'volume', 'source_url', 'sort_order', 'status',
-      'bootstrap_chapter_external_id', 'first_seen_at', 'last_seen_at',
+      'provider',
+      'external_textbook_id',
+      'version_external_id',
+      'textbook_name',
+      'grade',
+      'volume',
+      'source_url',
+      'sort_order',
+      'status',
+      'bootstrap_chapter_external_id',
+      'first_seen_at',
+      'last_seen_at',
     ],
   },
   catalog: {
     table: 'textbook_nodes',
     idColumn: 'external_id',
     columns: [
-      'provider', 'external_id', 'textbook_external_id', 'parent_external_id',
-      'node_level', 'node_type', 'name', 'source_path', 'source_url', 'sort_order',
-      'status', 'first_seen_at', 'last_seen_at',
+      'provider',
+      'external_id',
+      'textbook_external_id',
+      'parent_external_id',
+      'node_level',
+      'node_type',
+      'name',
+      'source_path',
+      'source_url',
+      'sort_order',
+      'status',
+      'first_seen_at',
+      'last_seen_at',
     ],
   },
   question: {
     table: 'questions',
     idColumn: 'external_id',
     columns: [
-      'provider', 'external_id', 'chapter_id', 'detail_url', 'source_short',
-      'source_title', 'source_url', 'source_question_no', 'question_type',
-      'difficulty_label', 'difficulty_code', 'ease_coefficient', 'content_hash',
-      'detail_content_hash', 'plain_text', 'detail_fetched', 'subquestion_count', 'is_new',
-      'provider_updated_at', 'first_seen_at', 'last_seen_at',
+      'provider',
+      'external_id',
+      'chapter_id',
+      'detail_url',
+      'source_short',
+      'source_title',
+      'source_url',
+      'source_question_no',
+      'question_type',
+      'difficulty_label',
+      'difficulty_code',
+      'ease_coefficient',
+      'content_hash',
+      'detail_content_hash',
+      'plain_text',
+      'detail_fetched',
+      'subquestion_count',
+      'is_new',
+      'provider_updated_at',
+      'first_seen_at',
+      'last_seen_at',
     ],
   },
 };
@@ -152,8 +201,7 @@ function httpError(message, statusCode = 400, code = 'bad_request') {
 function snapshotLockPresent(value) {
   if (value == null || value === '' || value === false || value === 0) return false;
   const text = String(value).trim().toLowerCase();
-  return text !== '' && !['0', 'false', 'null', 'undefined'].includes(text)
-    && !/^0+(?:\.0+)?$/.test(text);
+  return text !== '' && !['0', 'false', 'null', 'undefined'].includes(text) && !/^0+(?:\.0+)?$/.test(text);
 }
 
 function boundedText(value, name, maxLength, { optional = true } = {}) {
@@ -251,9 +299,9 @@ function boundedScope(scope) {
     if (typeof value === 'string') output[key] = boundedString(value, 4000);
     else if (typeof value === 'number' || typeof value === 'boolean' || value == null) output[key] = value;
     else if (Array.isArray(value)) {
-      output[key] = value.slice(0, 500).map((item) => (
-        typeof item === 'object' && item !== null ? boundedScope(item) : boundedString(item, 400)
-      ));
+      output[key] = value
+        .slice(0, 500)
+        .map((item) => (typeof item === 'object' && item !== null ? boundedScope(item) : boundedString(item, 400)));
     } else if (typeof value === 'object') output[key] = boundedScope(value);
   }
   return output;
@@ -268,8 +316,8 @@ function scopeTextbookIds(scope) {
   };
   add(scope?.textbookId);
   add(scope?.textbookExternalId);
-  for (const value of (Array.isArray(scope?.textbookIds) ? scope.textbookIds : [])) add(value);
-  for (const value of (Array.isArray(scope?.textbookExternalIds) ? scope.textbookExternalIds : [])) add(value);
+  for (const value of Array.isArray(scope?.textbookIds) ? scope.textbookIds : []) add(value);
+  for (const value of Array.isArray(scope?.textbookExternalIds) ? scope.textbookExternalIds : []) add(value);
   return ids;
 }
 
@@ -284,18 +332,28 @@ function openReadOnly(dbPath) {
   // A page save runs in a short IMMEDIATE transaction.  WAL lets this
   // reader observe the previous committed snapshot while that transaction
   // is in flight, and busy_timeout covers the small checkpoint/lock window.
-  try { db.exec('PRAGMA busy_timeout = 5000; PRAGMA query_only = true;'); } catch {}
+  try {
+    db.exec('PRAGMA busy_timeout = 5000; PRAGMA query_only = true;');
+  } catch {}
   return db;
 }
 
 function tableNames(db) {
   return new Set(
-    db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all().map((row) => String(row.name)),
+    db
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
+      .all()
+      .map((row) => String(row.name)),
   );
 }
 
 function tableColumns(db, table) {
-  return new Set(db.prepare(`PRAGMA table_info("${table}")`).all().map((row) => String(row.name)));
+  return new Set(
+    db
+      .prepare(`PRAGMA table_info("${table}")`)
+      .all()
+      .map((row) => String(row.name)),
+  );
 }
 
 function optionalSelect(columns, tableAlias, column, alias = column) {
@@ -308,17 +366,20 @@ function resolveContentRun(db, runId) {
   if (!tableNames(db).has('sync_runs')) {
     throw httpError('collector SQLite 缺少 sync_runs 表', 503, 'snapshot_unavailable');
   }
-  if (tableNames(db).has('sync_result_cleanup') && db.prepare('SELECT 1 FROM sync_result_cleanup WHERE run_id=?').get(id)) {
+  if (
+    tableNames(db).has('sync_result_cleanup') &&
+    db.prepare('SELECT 1 FROM sync_result_cleanup WHERE run_id=?').get(id)
+  ) {
     throw httpError(`内容运行 ${id} 已入库并回收原始成果，请查看正式题库或最新任务`, 410, 'snapshot_reclaimed');
   }
   const columns = tableColumns(db, 'sync_runs');
   if (!columns.has('id') || !columns.has('provider') || !columns.has('status')) {
     throw httpError('collector SQLite 的 sync_runs 字段不完整', 503, 'snapshot_unavailable');
   }
-  const optional = (name, alias = name) => columns.has(name)
-    ? `"${name}" AS "${alias}"`
-    : `NULL AS "${alias}"`;
-  const row = db.prepare(`
+  const optional = (name, alias = name) => (columns.has(name) ? `"${name}" AS "${alias}"` : `NULL AS "${alias}"`);
+  const row = db
+    .prepare(
+      `
     SELECT "id", "provider", "status",
            ${optional('started_at')}, ${optional('finished_at')},
            ${optional('scope_json')}, ${optional('pages_ok')},
@@ -333,7 +394,9 @@ function resolveContentRun(db, runId) {
            ${optional('question_catalog_count')}, ${optional('question_tag_count')},
            ${optional('question_asset_count')}
     FROM "sync_runs" WHERE "id" = ?
-  `).get(id);
+  `,
+    )
+    .get(id);
   if (!row) throw httpError(`内容运行 ${id} 不存在`, 404, 'run_not_found');
   if (String(row.provider || '') !== PROVIDER) {
     throw httpError(`内容运行 ${id} 来源不受支持`, 404, 'run_not_found');
@@ -359,8 +422,7 @@ function resolveContentRun(db, runId) {
     assetsDownloaded: Number(row.assets_downloaded || 0),
     errorCount: Number(row.error_count || 0),
     message: boundedString(row.message, 4000),
-    snapshotLockedAt: snapshotLockPresent(row.snapshot_locked_at)
-      ? row.snapshot_locked_at : null,
+    snapshotLockedAt: snapshotLockPresent(row.snapshot_locked_at) ? row.snapshot_locked_at : null,
     snapshotComplete: Number(row.snapshot_complete || 0) === 1,
     scanComplete: Number(row.scan_complete || 0) === 1,
     dataComplete: Number(row.data_complete || 0) === 1,
@@ -382,48 +444,68 @@ function assertSnapshotTables(db, { all = false } = {}) {
     ...(all ? ['sync_run_question_tags', 'sync_run_question_assets'] : []),
   ].filter((table) => !tables.has(table));
   if (missing.length) {
-    throw httpError(
-      `collector SQLite 缺少运行快照表：${missing.join(', ')}`,
-      503,
-      'snapshot_unavailable',
-    );
+    throw httpError(`collector SQLite 缺少运行快照表：${missing.join(', ')}`, 503, 'snapshot_unavailable');
   }
   const requiredColumns = {
-    sync_run_catalog_items: [
-      'run_id', 'provider', 'textbook_external_id', 'catalog_external_id', 'name',
-    ],
+    sync_run_catalog_items: ['run_id', 'provider', 'textbook_external_id', 'catalog_external_id', 'name'],
     sync_run_question_items: [
-      'run_id', 'provider', 'textbook_external_id', 'question_external_id',
-      'content_html', 'plain_text', 'question_type',
-      'answer_html', 'analysis_html', 'answer_status', 'solution_html',
+      'run_id',
+      'provider',
+      'textbook_external_id',
+      'question_external_id',
+      'content_html',
+      'plain_text',
+      'question_type',
+      'answer_html',
+      'analysis_html',
+      'answer_status',
+      'solution_html',
     ],
     sync_run_question_catalogs: [
-      'run_id', 'provider', 'textbook_external_id', 'question_external_id',
+      'run_id',
+      'provider',
+      'textbook_external_id',
+      'question_external_id',
       'catalog_external_id',
     ],
-    ...(all ? {
-      sync_run_question_tags: [
-        'run_id', 'provider', 'textbook_external_id', 'question_external_id',
-        'dimension', 'tag_external_id', 'tag_value', 'relation_type',
-        'evidence_type', 'query_fingerprint', 'observed_at',
-      ],
-      sync_run_question_assets: [
-        'run_id', 'provider', 'textbook_external_id', 'question_external_id',
-        'asset_key', 'asset_type', 'source_url', 'content_sha256',
-        'storage_path', 'mime_type', 'byte_size', 'observed_at',
-      ],
-    } : {}),
+    ...(all
+      ? {
+          sync_run_question_tags: [
+            'run_id',
+            'provider',
+            'textbook_external_id',
+            'question_external_id',
+            'dimension',
+            'tag_external_id',
+            'tag_value',
+            'relation_type',
+            'evidence_type',
+            'query_fingerprint',
+            'observed_at',
+          ],
+          sync_run_question_assets: [
+            'run_id',
+            'provider',
+            'textbook_external_id',
+            'question_external_id',
+            'asset_key',
+            'asset_type',
+            'source_url',
+            'content_sha256',
+            'storage_path',
+            'mime_type',
+            'byte_size',
+            'observed_at',
+          ],
+        }
+      : {}),
   };
   const invalid = Object.entries(requiredColumns).flatMap(([table, columns]) => {
     const actual = tableColumns(db, table);
     return columns.filter((column) => !actual.has(column)).map((column) => `${table}.${column}`);
   });
   if (invalid.length) {
-    throw httpError(
-      `collector SQLite 运行快照字段不完整：${invalid.join(', ')}`,
-      503,
-      'snapshot_unavailable',
-    );
+    throw httpError(`collector SQLite 运行快照字段不完整：${invalid.join(', ')}`, 503, 'snapshot_unavailable');
   }
 }
 
@@ -446,7 +528,9 @@ function assertApplyableSnapshotRun(db, run, { sealedForImport = false } = {}) {
       'snapshot_unavailable',
     );
   }
-  const statuses = sealedForImport ? ['success', 'completed', 'interrupted', 'failed', 'blocked', 'cancelled'] : ['success', 'completed'];
+  const statuses = sealedForImport
+    ? ['success', 'completed', 'interrupted', 'failed', 'blocked', 'cancelled']
+    : ['success', 'completed'];
   if (!statuses.includes(String(run.status || '').toLowerCase()) || !run.finishedAt) {
     throw httpError(`内容运行 ${run.id} 未成功完成，暂无可用快照`, 409, 'snapshot_unavailable');
   }
@@ -478,20 +562,29 @@ function snapshotScopeIds(db, run) {
     // On a single-textbook run, DISTINCT would walk every tag/asset index
     // entry just to return one ID. The two indexed endpoints prove whether
     // this table contains one or several scopes without a full scan.
-    const edge = (direction) => db.prepare(`
+    const edge = (direction) =>
+      db
+        .prepare(
+          `
       SELECT textbook_external_id FROM "${table}"
       WHERE run_id = ? AND provider = ?
       ORDER BY textbook_external_id ${direction} LIMIT 1
-    `).get(run.id, PROVIDER)?.textbook_external_id;
+    `,
+        )
+        .get(run.id, PROVIDER)?.textbook_external_id;
     const first = edge('ASC');
     if (first == null) continue;
     const last = edge('DESC');
     scopeIds.add(String(first));
     if (first !== last) {
-      for (const row of db.prepare(`
+      for (const row of db
+        .prepare(
+          `
         SELECT DISTINCT textbook_external_id FROM "${table}"
         WHERE run_id = ? AND provider = ?
-      `).all(run.id, PROVIDER)) {
+      `,
+        )
+        .all(run.id, PROVIDER)) {
         if (row.textbook_external_id != null) scopeIds.add(String(row.textbook_external_id));
       }
     }
@@ -516,9 +609,7 @@ function resolveSnapshotTextbook(db, run, requestedTextbookId) {
   }
 
   // A declared single-textbook run does not need DISTINCT scans either.
-  const scopeIds = declaredScopeIds.size === 1
-    ? declaredScopeIds
-    : snapshotScopeIds(db, run);
+  const scopeIds = declaredScopeIds.size === 1 ? declaredScopeIds : snapshotScopeIds(db, run);
   let textbookExternalId = requestedTextbookId;
   if (!textbookExternalId) {
     if (scopeIds.size !== 1) {
@@ -542,27 +633,27 @@ function assertRunTextbook(db, run, textbookExternalId) {
   const requested = String(textbookExternalId);
   const scopedIds = Array.isArray(run.textbookExternalIds) ? run.textbookExternalIds : [];
   if (scopedIds.length > 0 && !scopedIds.includes(requested)) {
-    throw httpError(
-      `内容运行 ${run.id} 不属于教材 ${requested}`,
-      404,
-      'run_scope_not_found',
-    );
+    throw httpError(`内容运行 ${run.id} 不属于教材 ${requested}`, 404, 'run_scope_not_found');
   }
   // Older runs may not have recorded a textbook in scope_json.  In that case
   // establish ownership from the immutable rows themselves instead of
   // silently accepting an arbitrary textbook filter.
   const tables = tableNames(db);
   if (scopedIds.length === 0) {
-    const owned = (table) => tables.has(table) && Number(db.prepare(`
+    const owned = (table) =>
+      tables.has(table) &&
+      Number(
+        db
+          .prepare(
+            `
       SELECT COUNT(*) AS n FROM "${table}"
       WHERE run_id = ? AND provider = ? AND textbook_external_id = ?
-    `).get(run.id, PROVIDER, requested).n || 0) > 0;
+    `,
+          )
+          .get(run.id, PROVIDER, requested).n || 0,
+      ) > 0;
     if (!owned('sync_run_catalog_items') && !owned('sync_run_question_items')) {
-      throw httpError(
-        `内容运行 ${run.id} 不属于教材 ${requested}`,
-        404,
-        'run_scope_not_found',
-      );
+      throw httpError(`内容运行 ${run.id} 不属于教材 ${requested}`, 404, 'run_scope_not_found');
     }
   }
 }
@@ -575,9 +666,15 @@ function assertRunCatalog(db, run, catalogExternalId, textbookExternalId = null)
     predicates.push('textbook_external_id = ?');
     parameters.push(String(textbookExternalId));
   }
-  const catalogCount = Number(db.prepare(`
+  const catalogCount = Number(
+    db
+      .prepare(
+        `
     SELECT COUNT(*) AS n FROM sync_run_catalog_items WHERE ${predicates.join(' AND ')}
-  `).get(...parameters).n || 0);
+  `,
+      )
+      .get(...parameters).n || 0,
+  );
   if (catalogCount > 0) return;
   // A partially migrated database may have relation rows but no catalog item;
   // those rows still provide sufficient run ownership evidence.
@@ -587,18 +684,19 @@ function assertRunCatalog(db, run, catalogExternalId, textbookExternalId = null)
     linkPredicates.push('textbook_external_id = ?');
     linkParameters.push(String(textbookExternalId));
   }
-  const linkCount = Number(db.prepare(`
+  const linkCount = Number(
+    db
+      .prepare(
+        `
     SELECT COUNT(*) AS n FROM sync_run_question_catalogs WHERE ${linkPredicates.join(' AND ')}
-  `).get(...linkParameters).n || 0);
+  `,
+      )
+      .get(...linkParameters).n || 0,
+  );
   if (linkCount === 0) {
-    throw httpError(
-      `内容运行 ${run.id} 中不存在目录 ${catalogExternalId}`,
-      404,
-      'catalog_not_found',
-    );
+    throw httpError(`内容运行 ${run.id} 中不存在目录 ${catalogExternalId}`, 404, 'catalog_not_found');
   }
 }
-
 
 module.exports = {
   PROVIDER,

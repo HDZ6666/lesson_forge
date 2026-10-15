@@ -65,9 +65,9 @@ function buildQuestionListRequest(options, catalog, pageNumber) {
 function normalizeHeaders(headers) {
   if (!headers) return {};
   if (typeof headers === 'object' && !Array.isArray(headers)) {
-    return Object.fromEntries(Object.entries(headers).map(([key, value]) => [
-      String(key).toLowerCase(), String(value),
-    ]));
+    return Object.fromEntries(
+      Object.entries(headers).map(([key, value]) => [String(key).toLowerCase(), String(value)]),
+    );
   }
   return {};
 }

@@ -18,7 +18,7 @@ class EventMethods {
   record(job, rawLine, label = 'stdout') {
     const line = String(rawLine || '').trim();
     if (!line) return;
-    diagnostics.write('task_output',{jobId:job.id,runId:job.collectorRunId,label,line},job.id);
+    diagnostics.write('task_output', { jobId: job.id, runId: job.collectorRunId, label, line }, job.id);
     const event = label === 'stdout' ? parseEventLine(line) : null;
     if (event) {
       this.handleEvent(job, event);
@@ -33,7 +33,7 @@ class EventMethods {
   handleEvent(job, rawEvent) {
     const event = normalizeEvent(rawEvent);
     if (!event || !job || TERMINAL_STATUSES.has(String(job.status))) return;
-    diagnostics.write('task_event',{jobId:job.id,event},job.id);
+    diagnostics.write('task_event', { jobId: job.id, event }, job.id);
     job.lastActivityAt = Date.now();
     const scope = this.scopeFor(job, job.currentTextbookId);
     switch (event.type) {
@@ -63,13 +63,16 @@ class EventMethods {
         break;
       case 'progress': {
         if (scope) {
-          if (event.catalogCount != null) job._scriptCatalogCount = Math.max(job._scriptCatalogCount || 0, event.catalogCount);
-          if (event.questionsSeen != null) job._scriptQuestionCount = Math.max(job._scriptQuestionCount || 0, event.questionsSeen);
+          if (event.catalogCount != null)
+            job._scriptCatalogCount = Math.max(job._scriptCatalogCount || 0, event.catalogCount);
+          if (event.questionsSeen != null)
+            job._scriptQuestionCount = Math.max(job._scriptQuestionCount || 0, event.questionsSeen);
           if (event.pagesOk != null) scope.pagesOk = event.pagesOk;
           if (event.questionsSeen != null) scope.questionsSeen = event.questionsSeen;
           if (event.assetsDownloaded != null) scope.assetsDownloaded = event.assetsDownloaded;
           if (event.errors != null) scope.errorCount = event.errors;
-          if (event.catalogCount != null) scope.catalogCount = Math.max(Number(scope.catalogCount || 0), event.catalogCount);
+          if (event.catalogCount != null)
+            scope.catalogCount = Math.max(Number(scope.catalogCount || 0), event.catalogCount);
           if (event.runId && !scope.collectorRunId) {
             scope.collectorRunId = event.runId;
             if (job.scopeItems.length === 1) job.collectorRunId = event.runId;
@@ -80,6 +83,14 @@ class EventMethods {
         break;
       }
       case 'heartbeat':
+        if (event.stage === 'browser_recycled') {
+          job.browserRecycleCount = Number(job.browserRecycleCount || 0) + 1;
+          if (this.metrics) this.metrics.browserRecycles += 1;
+        }
+        if (event.browserRssMb != null) {
+          job.childBrowserRssMb = event.browserRssMb;
+          job.childBrowserRssPeakMb = Math.max(Number(job.childBrowserRssPeakMb || 0), event.browserRssMb);
+        }
         if (event.rssMb != null) {
           job.childRssMb = event.rssMb;
           job.childRssPeakMb = Math.max(Number(job.childRssPeakMb || 0), event.rssMb);
@@ -107,6 +118,7 @@ class EventMethods {
           stage: event.stage || null,
           runId: event.runId || null,
           failedPages: event.failedPages || [],
+          discoveryRequest: event.discoveryRequest || null,
           at: event.at,
         };
         if (scope) {
@@ -148,4 +160,3 @@ class EventMethods {
 }
 
 module.exports = { EventMethods };
-

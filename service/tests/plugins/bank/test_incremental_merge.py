@@ -29,6 +29,7 @@ from plugins.bank.entity.do.bank_do import (
     QbSyncBookState,
     QbSyncControl,
     QbSyncCycle,
+    QbSyncSupplement,
     QbSyncIssue,
     QbSyncIssueTask,
     QbSyncJob,
@@ -71,7 +72,7 @@ async def bank_db():
     else:
         engine = create_async_engine('sqlite+aiosqlite:///:memory:')
     models = (
-        QbSyncControl, QbSyncPlan, QbSyncCycle, QbSyncBookState, QbSyncIssue, QbSyncIssueTask,
+        QbSyncControl, QbSyncPlan, QbSyncCycle, QbSyncSupplement, QbSyncBookState, QbSyncIssue, QbSyncIssueTask,
         QbSubject,
         QbTextbookVersion,
         QbTextbook,

@@ -67,31 +67,45 @@ function readCatalogProgress(dbPath) {
   try {
     const tables = tableNames(db);
     if (!tables.has('textbook_nodes')) return { ...empty, message: 'collector SQLite 缺少 textbook_nodes' };
-    const nodes = db.prepare(`
+    const nodes = db
+      .prepare(
+        `
       SELECT external_id, parent_external_id, node_level, name
       FROM textbook_nodes WHERE provider = ?
-    `).all(PROVIDER).map((row) => ({
-      externalId: String(row.external_id),
-      parentExternalId: row.parent_external_id,
-      level: row.node_level,
-      name: row.name,
-      path: row.name,
-    }));
+    `,
+      )
+      .all(PROVIDER)
+      .map((row) => ({
+        externalId: String(row.external_id),
+        parentExternalId: row.parent_external_id,
+        level: row.node_level,
+        name: row.name,
+        path: row.name,
+      }));
     const memberships = tables.has('question_catalog_memberships')
-      ? db.prepare(`
+      ? db
+          .prepare(
+            `
           SELECT catalog_external_id, question_external_id
           FROM question_catalog_memberships WHERE provider = ?
-        `).all(PROVIDER).map((row) => ({
-          catalogExternalId: String(row.catalog_external_id),
-          questionExternalId: String(row.question_external_id),
-        }))
+        `,
+          )
+          .all(PROVIDER)
+          .map((row) => ({
+            catalogExternalId: String(row.catalog_external_id),
+            questionExternalId: String(row.question_external_id),
+          }))
       : [];
     const stats = {};
     if (tables.has('catalog_list_stats')) {
-      for (const row of db.prepare(`
+      for (const row of db
+        .prepare(
+          `
         SELECT catalog_external_id, expected_total, expected_pages, last_completed_page, updated_at
         FROM catalog_list_stats WHERE provider = ? ORDER BY updated_at DESC
-      `).all(PROVIDER)) {
+      `,
+        )
+        .all(PROVIDER)) {
         const id = String(row.catalog_external_id);
         if (stats[id]) continue;
         stats[id] = {
@@ -103,11 +117,15 @@ function readCatalogProgress(dbPath) {
     }
     const currentByCatalog = {};
     if (tables.has('sync_progress')) {
-      for (const row of db.prepare(`
+      for (const row of db
+        .prepare(
+          `
         SELECT run_id, worker_id, catalog_external_id, catalog_name, catalog_path,
                current_page, expected_pages, expected_total, updated_at
         FROM sync_progress ORDER BY updated_at DESC
-      `).all()) {
+      `,
+        )
+        .all()) {
         if (!row.catalog_external_id) continue;
         const id = String(row.catalog_external_id);
         if (currentByCatalog[id]) continue;

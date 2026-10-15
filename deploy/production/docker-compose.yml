@@ -1,9 +1,17 @@
 name: lesson-forge
 
+# Docker 默认的 json-file 日志驱动不轮转。采集器每采一页打一行日志，连续跑几天会占满系统盘。
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: ${LOG_MAX_SIZE:-20m}
+    max-file: ${LOG_MAX_FILE:-5}
+
 services:
   mysql:
     image: mysql:8.0.46
     container_name: lesson-forge-mysql
+    logging: *default-logging
     restart: unless-stopped
     environment:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?MYSQL_ROOT_PASSWORD is required}
@@ -31,11 +39,13 @@ services:
   redis:
     image: redis:7-alpine
     container_name: lesson-forge-redis
+    logging: *default-logging
     restart: unless-stopped
     environment:
       REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
       TZ: Asia/Shanghai
-    command: ["sh", "-c", "exec redis-server --appendonly yes --requirepass \"$$REDIS_PASSWORD\""]
+    # 只保留 AOF：关闭默认 RDB 快照，避免内存紧张时频繁 fork（COL-016）。
+    command: ["sh", "-c", "exec redis-server --appendonly yes --save '' --requirepass \"$$REDIS_PASSWORD\""]
     volumes:
       - redis_data:/data
     healthcheck:
@@ -54,6 +64,7 @@ services:
         SOURCE_REVISION: ${SOURCE_REVISION:-uncommitted}
     image: lesson-forge-collector:${SOURCE_REVISION:-production}
     container_name: lesson-forge-collector
+    logging: *default-logging
     init: true
     stop_grace_period: 90s
     restart: unless-stopped
@@ -76,13 +87,27 @@ services:
       COLLECTOR_SOURCE_DAILY_DOWNLOAD_MIB: ${COLLECTOR_SOURCE_DAILY_DOWNLOAD_MIB:-0}
       COLLECTOR_MIN_DISK_FREE_MIB: ${COLLECTOR_MIN_DISK_FREE_MIB:-0}
       COLLECTOR_MIN_MEMORY_FREE_MIB: ${COLLECTOR_MIN_MEMORY_FREE_MIB:-0}
+      # 两级内存水位（COL-016）：低于预警值先在安全点回收浏览器；低于保留值持续超过宽限期才停止。
+      COLLECTOR_SOFT_MEMORY_FREE_MIB: ${COLLECTOR_SOFT_MEMORY_FREE_MIB:-800}
+      COLLECTOR_MEMORY_GRACE_MS: ${COLLECTOR_MEMORY_GRACE_MS:-60000}
+      # 每采集多少页或 Chrome 进程树占用多少 MB 时回收浏览器（0 关闭该条件）。
+      COLLECTOR_BROWSER_RECYCLE_PAGES: ${COLLECTOR_BROWSER_RECYCLE_PAGES:-400}
+      COLLECTOR_BROWSER_RECYCLE_MB: ${COLLECTOR_BROWSER_RECYCLE_MB:-1000}
       # 采集子进程内存上限（MB）：超过即停止并封存为可续采，避免再次拖垮 3.7GB 的宿主机（COL-015）。
       COLLECTOR_CHILD_MAX_RSS_MB: "1536"
+      # API 读取线程：快照分页等 SQLite 读取不占用主事件循环（0 回到主线程读取）。
+      COLLECTOR_READER_THREADS: ${COLLECTOR_READER_THREADS:-2}
+      COLLECTOR_READER_TIMEOUT_MS: ${COLLECTOR_READER_TIMEOUT_MS:-25000}
+      COLLECTOR_PERSIST_INTERVAL_MS: ${COLLECTOR_PERSIST_INTERVAL_MS:-5000}
       TZ: Asia/Shanghai
     volumes:
       - collector_data:/data
       - collector_profile:/profile
     shm_size: 512m
+    # API、采集子进程、Chrome 和人工验证 Chrome 合计的硬上限。超过时只 OOM 这个容器，不拖垮整台 3.7GB 宿主机。
+    # 资源水位会读取这个 cgroup 上限，在达到之前先回收 Chrome。
+    # 这个值应大于 COLLECTOR_CHILD_MAX_RSS_MB + COLLECTOR_BROWSER_RECYCLE_MB。
+    mem_limit: ${COLLECTOR_MEM_LIMIT:-2560m}
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:9110/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
       interval: 10s
@@ -100,6 +125,7 @@ services:
         SOURCE_REVISION: ${SOURCE_REVISION:-uncommitted}
     image: lesson-forge-service:${SOURCE_REVISION:-production}
     container_name: lesson-forge-service
+    logging: *default-logging
     restart: unless-stopped
     environment:
       APP_ENV: prod
@@ -170,6 +196,7 @@ services:
   nginx:
     image: nginx:1.27-alpine
     container_name: lesson-forge-nginx
+    logging: *default-logging
     restart: unless-stopped
     depends_on:
       service:

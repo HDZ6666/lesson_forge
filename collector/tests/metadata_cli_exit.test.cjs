@@ -15,11 +15,18 @@ async function runChild(args) {
   const messages = [];
   let stdout = '';
   let stderr = '';
-  child.on('message', value => messages.push(value));
-  child.stdout.on('data', chunk => { stdout += chunk; });
-  child.stderr.on('data', chunk => { stderr += chunk; });
+  child.on('message', (value) => messages.push(value));
+  child.stdout.on('data', (chunk) => {
+    stdout += chunk;
+  });
+  child.stderr.on('data', (chunk) => {
+    stderr += chunk;
+  });
   let timedOut = false;
-  const timer = setTimeout(() => { timedOut = true; child.kill('SIGKILL'); }, 5000);
+  const timer = setTimeout(() => {
+    timedOut = true;
+    child.kill('SIGKILL');
+  }, 5000);
   try {
     const code = await new Promise((resolve, reject) => {
       child.once('error', reject);
@@ -34,7 +41,9 @@ async function runChild(args) {
 }
 
 test('metadata CLI exits after cleanup and delivers final sealed IPC event', async () => {
-  const result = await runChild(['-e', `
+  const result = await runChild([
+    '-e',
+    `
     const discovery = require.resolve('./src/jobs/metadata_run.cjs');
     const { createProcessEventEmitter } = require('./src/jobs/events.cjs');
     require.cache[discovery] = { id: discovery, filename: discovery, loaded: true, exports: {
@@ -49,10 +58,14 @@ test('metadata CLI exits after cleanup and delivers final sealed IPC event', asy
     }};
     process.argv = [process.execPath, './zujuan_metadata_sync.cjs', '--acknowledge-source-policy'];
     require('node:module').runMain();
-  `]);
+  `,
+  ]);
   assert.equal(result.code, 0, result.stderr);
   assert.match(result.stdout, /CLEANUP_FINISHED/);
-  assert.deepEqual(result.messages.map(x => x.type), ['metadata_run_created', 'metadata_summary', 'sealed']);
+  assert.deepEqual(
+    result.messages.map((x) => x.type),
+    ['metadata_run_created', 'metadata_summary', 'sealed'],
+  );
   assert.equal(result.messages.at(-1).snapshotComplete, true);
 });
 

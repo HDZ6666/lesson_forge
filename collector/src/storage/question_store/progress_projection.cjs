@@ -14,7 +14,9 @@ const { growTargetPages } = require('../../policies/pagination.cjs');
 
 class ProgressProjectionMethods {
   getRunCatalogProgress(runId, textbookId, catalogId) {
-    const row = this.db.prepare(`
+    const row = this.db
+      .prepare(
+        `
       SELECT expected_total, page_capacity, expected_pages, last_completed_page,
         list_seen_count, status, target_pages, max_observed_total,
         highest_attempted_page, scan_complete, data_complete, completion_quality,
@@ -23,7 +25,9 @@ class ProgressProjectionMethods {
       FROM sync_run_catalog_progress
       WHERE run_id = ? AND provider = ? AND textbook_external_id = ?
         AND catalog_external_id = ?
-    `).get(Number(runId), PROVIDER, String(textbookId), String(catalogId));
+    `,
+      )
+      .get(Number(runId), PROVIDER, String(textbookId), String(catalogId));
     if (!row) return null;
     return {
       expectedTotal: row.expected_total == null ? null : Number(row.expected_total),
@@ -45,7 +49,7 @@ class ProgressProjectionMethods {
       parseErrorCount: Number(row.parse_error_count || 0),
       assetErrorCount: Number(row.asset_error_count || 0),
       stallReason: row.stall_reason || null,
-      pageLimitReached: row.stall_reason === 'page_limit_1000',
+      pageLimitReached: ['page_limit_1000', 'configured_page_limit'].includes(row.stall_reason),
       scanPercentHighWater: row.scan_percent_high_water == null ? null : Number(row.scan_percent_high_water),
     };
   }
@@ -69,17 +73,27 @@ class ProgressProjectionMethods {
     observedAt = nowIso(),
   }) {
     const issueCounts = this.catalogPageIssueCounts(runId, textbookId, catalogId);
-    const highestAttempted = Number(this.db.prepare(`
+    const highestAttempted = Number(
+      this.db
+        .prepare(
+          `
       SELECT COALESCE(MAX(page_number), 0) AS n FROM sync_run_catalog_pages
       WHERE run_id = ? AND provider = ? AND textbook_external_id = ?
         AND catalog_external_id = ?
-    `).get(Number(runId), PROVIDER, String(textbookId), String(catalogId))?.n || 0);
-    const existing = this.db.prepare(`
+    `,
+        )
+        .get(Number(runId), PROVIDER, String(textbookId), String(catalogId))?.n || 0,
+    );
+    const existing = this.db
+      .prepare(
+        `
       SELECT max_observed_total, target_pages, asset_error_count, scan_percent_high_water
       FROM sync_run_catalog_progress
       WHERE run_id = ? AND provider = ? AND textbook_external_id = ?
         AND catalog_external_id = ?
-    `).get(Number(runId), PROVIDER, String(textbookId), String(catalogId));
+    `,
+      )
+      .get(Number(runId), PROVIDER, String(textbookId), String(catalogId));
     const maxObserved = Math.max(
       Number(existing?.max_observed_total) || 0,
       expectedTotal == null ? 0 : Number(expectedTotal) || 0,
@@ -93,25 +107,36 @@ class ProgressProjectionMethods {
     if (Number.isFinite(boundedTargetPageLimit) && boundedTargetPageLimit > 0) {
       grownTarget = Math.min(grownTarget, boundedTargetPageLimit);
     }
-    const latestTotal = expectedTotal == null
-      ? (existing?.max_observed_total == null ? null : Number(existing.max_observed_total))
-      : Number(expectedTotal);
+    const latestTotal =
+      expectedTotal == null
+        ? existing?.max_observed_total == null
+          ? null
+          : Number(existing.max_observed_total)
+        : Number(expectedTotal);
     const assets = Number(existing?.asset_error_count || 0) + Math.max(0, Number(assetErrorDelta) || 0);
-    const attemptedTarget = grownTarget > 0
-      ? Number(this.db.prepare(`
+    const attemptedTarget =
+      grownTarget > 0
+        ? Number(
+            this.db
+              .prepare(
+                `
           SELECT COUNT(*) AS n FROM sync_run_catalog_pages
           WHERE run_id = ? AND provider = ? AND textbook_external_id = ?
             AND catalog_external_id = ? AND page_number BETWEEN 1 AND ?
-        `).get(Number(runId), PROVIDER, String(textbookId), String(catalogId), grownTarget)?.n || 0)
-      : issueCounts.attemptedPageCount;
+        `,
+              )
+              .get(Number(runId), PROVIDER, String(textbookId), String(catalogId), grownTarget)?.n || 0,
+          )
+        : issueCounts.attemptedPageCount;
     const rawPercent = scanComplete
       ? 100
-      : (grownTarget > 0 ? Math.min(100, (attemptedTarget / grownTarget) * 100) : null);
-    const highWater = Math.max(
-      Number(existing?.scan_percent_high_water) || 0,
-      rawPercent == null ? 0 : rawPercent,
-    );
-    this.db.prepare(`
+      : grownTarget > 0
+        ? Math.min(100, (attemptedTarget / grownTarget) * 100)
+        : null;
+    const highWater = Math.max(Number(existing?.scan_percent_high_water) || 0, rawPercent == null ? 0 : rawPercent);
+    this.db
+      .prepare(
+        `
       INSERT INTO sync_run_catalog_progress (
         run_id, provider, textbook_external_id, catalog_external_id,
         expected_total, page_capacity, expected_pages, last_completed_page,
@@ -157,26 +182,37 @@ class ProgressProjectionMethods {
           COALESCE(sync_run_catalog_progress.scan_percent_high_water, 0),
           COALESCE(excluded.scan_percent_high_water, 0)
         )
-    `).run(
-      Number(runId), PROVIDER, String(textbookId), String(catalogId),
-      latestTotal, Number(pageCapacity) || DEFAULT_PAGE_CAPACITY,
-      grownTarget || null, Number(lastCompletedPage) || 0, Number(occurrenceCount) || 0,
-      String(status || 'running'), observedAt, grownTarget || null,
-      maxObserved || null, highestAttempted, scanComplete ? 1 : 0, dataComplete ? 1 : 0,
-      completionQuality, issueCounts.failedPageCount, issueCounts.duplicatePageCount,
-      issueCounts.emptyPageCount, issueCounts.parseErrorCount, assets, stallReason,
-      rawPercent == null ? (existing?.scan_percent_high_water ?? null) : highWater,
-    );
+    `,
+      )
+      .run(
+        Number(runId),
+        PROVIDER,
+        String(textbookId),
+        String(catalogId),
+        latestTotal,
+        Number(pageCapacity) || DEFAULT_PAGE_CAPACITY,
+        grownTarget || null,
+        Number(lastCompletedPage) || 0,
+        Number(occurrenceCount) || 0,
+        String(status || 'running'),
+        observedAt,
+        grownTarget || null,
+        maxObserved || null,
+        highestAttempted,
+        scanComplete ? 1 : 0,
+        dataComplete ? 1 : 0,
+        completionQuality,
+        issueCounts.failedPageCount,
+        issueCounts.duplicatePageCount,
+        issueCounts.emptyPageCount,
+        issueCounts.parseErrorCount,
+        assets,
+        stallReason,
+        rawPercent == null ? (existing?.scan_percent_high_water ?? null) : highWater,
+      );
   }
 
-
-  upsertFetchWindow({
-    runId,
-    catalog,
-    expectedPages = null,
-    expectedTotal = null,
-    slots = [],
-  }) {
+  upsertFetchWindow({ runId, catalog, expectedPages = null, expectedTotal = null, slots = [] }) {
     const observedAt = nowIso();
     const catalogId = String(catalog?.externalId || '');
     const catalogName = String(catalog?.name || catalogId);
@@ -211,20 +247,28 @@ class ProgressProjectionMethods {
       });
       this.db.exec('COMMIT;');
     } catch (error) {
-      try { this.db.exec('ROLLBACK;'); } catch {}
+      try {
+        this.db.exec('ROLLBACK;');
+      } catch {}
       throw error;
     }
   }
 
   updateFetchSlot(runId, pageNumber, patch = {}) {
     const observedAt = nowIso();
-    const existing = this.db.prepare(`
+    const existing = this.db
+      .prepare(
+        `
       SELECT worker_id FROM sync_progress
       WHERE run_id = ? AND current_page = ?
       ORDER BY worker_id ASC LIMIT 1
-    `).get(Number(runId), Number(pageNumber));
+    `,
+      )
+      .get(Number(runId), Number(pageNumber));
     if (!existing) return false;
-    this.db.prepare(`
+    this.db
+      .prepare(
+        `
       UPDATE sync_progress
       SET slot_status = COALESCE(?, slot_status),
           question_count = COALESCE(?, question_count),
@@ -234,25 +278,25 @@ class ProgressProjectionMethods {
           expected_pages = COALESCE(?, expected_pages),
           updated_at = ?
       WHERE run_id = ? AND worker_id = ?
-    `).run(
-      patch.status || null,
-      patch.questionCount == null ? null : Number(patch.questionCount),
-      patch.resultType || null,
-      patch.line || patch.message || null,
-      patch.sourceTotal == null ? null : Number(patch.sourceTotal),
-      patch.targetPages == null ? null : Number(patch.targetPages),
-      observedAt,
-      Number(runId),
-      Number(existing.worker_id),
-    );
+    `,
+      )
+      .run(
+        patch.status || null,
+        patch.questionCount == null ? null : Number(patch.questionCount),
+        patch.resultType || null,
+        patch.line || patch.message || null,
+        patch.sourceTotal == null ? null : Number(patch.sourceTotal),
+        patch.targetPages == null ? null : Number(patch.targetPages),
+        observedAt,
+        Number(runId),
+        Number(existing.worker_id),
+      );
     return true;
   }
 
   clearFetchWindow(runId) {
     this.db.prepare('DELETE FROM sync_progress WHERE run_id = ?').run(Number(runId));
   }
-
-
 }
 
 module.exports = { ProgressProjectionMethods };

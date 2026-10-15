@@ -14,7 +14,9 @@ function saveRawPage(options, runId, catalog, pageNumber, responseText) {
   if (!options.saveRaw) return null;
   const capturedAt = nowIso();
   const relative = path.join(
-    'raw', capturedAt.slice(0, 10), `run-${runId}`,
+    'raw',
+    capturedAt.slice(0, 10),
+    `run-${runId}`,
     `question-list-${safeFilePart(catalog.externalId)}-${pageNumber}.json.gz`,
   );
   const filePath = path.join(options.dataDir, relative);

@@ -92,12 +92,16 @@ async def cleanup_once(*, session_factory=None, client=None, root=None):
                     dependent_scope.resume_from_collector_run_id == QbSyncJobScope.collector_run_id,
                     dependent_task.status.in_(('queued', 'starting', 'running', 'cancelling')),
                 ),
+                # Superseded results go first; the newest result is released
+                # only after a complete, fully accepted import (the collector
+                # also requires its incremental baselines).
                 exists().where(
                     newer.local_textbook_id == QbSyncJobScope.local_textbook_id,
                     newer.collector_run_id > QbSyncJobScope.collector_run_id,
                     newer.question_count > 0,
                     newer.snapshot_locked_at.is_not(None),
-                ),
+                ) | ((QbSyncJobScope.snapshot_complete == 1) & (QbQuestionImport.status == 'completed')
+                     & func.coalesce(QbSyncJob.options_json['latestReclaimRefused'].as_boolean(), False).is_(False)),
                 ~exists().where(QbSyncIssue.latest_task_id == QbSyncJob.run_id, QbSyncIssue.status != 'resolved'),
             )
             .order_by(QbSyncJob.run_id)
@@ -129,15 +133,32 @@ async def cleanup_once(*, session_factory=None, client=None, root=None):
         if dependency:
             return
         task.options_json = {**options, 'snapshotCleanupPending': True}
+        superseded = await db.scalar(select(newer.scope_id).where(
+            newer.local_textbook_id == scope.local_textbook_id,
+            newer.collector_run_id > scope.collector_run_id,
+            newer.question_count > 0,
+            newer.snapshot_locked_at.is_not(None),
+        ).limit(1))
         ticket = {
             'runId': scope.collector_run_id,
             'textbookExternalId': scope.external_textbook_id,
             'snapshotLockedAt': scope.snapshot_locked_at.isoformat(timespec='milliseconds') + 'Z',
         }
+        if superseded is None:
+            ticket['allowLatest'] = True
         await db.commit()
     try:
         result = await asyncio.to_thread((client or CollectorClient()).reclaim_run, **ticket)
     except Exception as exc:
+        if ticket.get('allowLatest') and '最新成果' in str(getattr(exc, 'message', exc)):
+            # The collector still needs this newest snapshot (no baseline
+            # yet). Keep it and stop asking until a newer result exists.
+            async with factory() as db:
+                task = await db.get(QbSyncJob, task_id, with_for_update=True, populate_existing=True)
+                task.options_json = {**(task.options_json or {}), 'snapshotCleanupPending': False,
+                                     'latestReclaimRefused': True}
+                await db.commit()
+            return
         # Keep the reservation across an uncertain network result. Repeating
         # the endpoint is idempotent and manual resume rejects this reservation.
         logger.info(f'采集成果 {ticket["runId"]} 回收延后：{str(exc)[:160]}')

@@ -638,6 +638,7 @@ class QbQuestionImportIntake(Base):
     status = Column(String(20), nullable=False)
     attempt_count = Column(Integer, nullable=False, server_default='0')
     attempt_limit = Column(Integer, nullable=False, server_default='3')
+    slow_retry_count = Column(Integer, nullable=False, server_default='0')
     next_attempt_at = Column(DateTime, nullable=True)
     worker_token = Column(CHAR(64), nullable=True)
     lease_until = Column(DateTime, nullable=True)
@@ -817,6 +818,8 @@ class QbSyncControl(Base):
     reason = Column(String(500), nullable=True)
     revision = Column(Integer, nullable=False, server_default='1')
     issue_cursor = Column(BigInteger, nullable=False, server_default='0')
+    # The one public host-resource wait (reason, since, nextCheckAt).
+    resource_wait_json = Column(JSON, nullable=True)
     updated_by = Column(String(64), nullable=True)
     update_time = Column(DateTime, nullable=False)
 
@@ -833,6 +836,7 @@ class QbSyncPlan(Base):
     next_cycle_at = Column(DateTime, nullable=True)
     textbook_order = Column(JSON, nullable=True)
     list_concurrency = Column(Integer, nullable=False, server_default='8')
+    catalog_page_limit = Column(Integer, nullable=False, server_default='1000')
     plan_name = Column(String(100), nullable=False, server_default='')
     cycle_name = Column(String(180), nullable=True)
     enabled = Column(SmallInteger, nullable=False, server_default='0')
@@ -847,10 +851,33 @@ class QbSyncPlan(Base):
     discovery_processed_task_id = Column(BigInteger, nullable=False, server_default='0')
     discovery_next_at = Column(DateTime, nullable=True)
     discovery_error = Column(String(500), nullable=True)
+    session_no = Column(Integer, nullable=False, server_default='0')
+    session_round = Column(Integer, nullable=False, server_default='0')
+    max_rounds = Column(Integer, nullable=True)
+    session_started_at = Column(DateTime, nullable=True)
+    session_end_reason = Column(String(30), nullable=True)
+    session_mode = Column(String(20), nullable=True)
     worker_token = Column(CHAR(32), nullable=True)
     lease_until = Column(DateTime, nullable=True)
     revision = Column(Integer, nullable=False, server_default='1')
     update_time = Column(DateTime, nullable=False)
+
+
+class QbSyncSupplement(Base):
+    """A one-book supplement run between sessions, recorded on its own (A09)."""
+
+    __tablename__ = 'qb_sync_supplement'
+
+    supplement_id = Column(BigInteger, primary_key=True, autoincrement=True)
+    plan_id = Column(BigInteger, nullable=False)
+    textbook_id = Column(BigInteger, nullable=False)
+    task_id = Column(BigInteger, nullable=True)
+    sync_mode = Column(String(20), nullable=False, server_default='incremental')
+    status = Column(String(20), nullable=False)
+    summary_json = Column(JSON, nullable=True)
+    created_by = Column(String(64), nullable=True)
+    started_at = Column(DateTime, nullable=False)
+    finished_at = Column(DateTime, nullable=True)
 
 
 class QbSyncCycle(Base):
@@ -863,6 +890,10 @@ class QbSyncCycle(Base):
     status = Column(String(20), nullable=False)
     targets = Column(JSON, nullable=False)
     summary_json = Column(JSON, nullable=True)
+    session_no = Column(Integer, nullable=True)
+    round_no = Column(Integer, nullable=True)
+    legacy = Column(SmallInteger, nullable=False, server_default='0')
+    end_reason = Column(String(30), nullable=True)
     started_at = Column(DateTime, nullable=False)
     finished_at = Column(DateTime, nullable=True)
 

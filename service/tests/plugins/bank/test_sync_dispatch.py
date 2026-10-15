@@ -281,6 +281,10 @@ async def test_host_pressure_waits_and_recovery_checks_collector_without_losing_
 async def test_cached_ready_reader_starts_actual_dispatch_loop(bank_db, monkeypatch):
     from plugins.bank.service import incremental_import_worker, question_readiness_worker
 
+    # on_startup validates the collector configuration; do not depend on
+    # the developer's shell having BANK_COLLECTOR_URL set.
+    monkeypatch.setenv('BANK_COLLECTOR_URL', 'http://collector.test:8080')
+    monkeypatch.setenv('BANK_COLLECTOR_TOKEN', 'test-token')
     first = await enqueue(bank_db)
     factory = async_sessionmaker(bank_db.bind, expire_on_commit=False)
     monkeypatch.setattr(runs.DataSourceRegistry, 'session', factory)
@@ -641,7 +645,11 @@ async def test_dispatch_checks_actual_manual_candidate_after_skipping_auto(bank_
         await asyncio.sleep(0)
         assert executed == [manual['taskId']]
         row = await bank_db.get(QbSyncJob, auto['taskId'], populate_existing=True)
-        assert row.status == 'queued' and row.active_slot is None
+        if gate == 'book_pause':
+            assert row.status == 'cancelled' and row.options_json['planSkipped'] and row.dispatch_book_key is None
+        else:
+            assert row.status == 'queued'
+        assert row.active_slot is None
     finally:
         runs._WORKERS.pop(manual['taskId'], None)
 
@@ -677,3 +685,25 @@ def test_expired_queue_reason_is_not_presented_as_current():
     assert dispatch.queue_fields(row)['queueReason'] is None
     row.dispatch_not_before=datetime(2099,1,1)
     assert dispatch.queue_fields(row)['queueReason']=='来源当日教材启动预算已用完'
+
+
+@pytest.mark.asyncio
+async def test_host_shortage_backs_off_collection_dispatch_and_clears_on_claim(bank_db, monkeypatch):
+    from plugins.bank.service import resource_guard
+
+    first = await enqueue(bank_db)
+    state = {'paused': True, 'reason': '后端主机可用内存低于保留水位，等待内存恢复'}
+    monkeypatch.setattr(resource_guard, 'resource_status', lambda **_: dict(state))
+    delays = []
+    for _ in range(3):
+        assert await dispatch.claim_next(bank_db) is None
+        row = await bank_db.get(QbSyncJob, first['taskId'], populate_existing=True)
+        delays.append((row.dispatch_not_before - datetime.utcnow()).total_seconds())
+        row.dispatch_not_before = None
+        await bank_db.commit()
+    assert delays[0] < delays[1] < delays[2] <= 600
+    assert '内存' in row.dispatch_error
+    state['paused'] = False
+    claim = await dispatch.claim_next(bank_db)
+    row = await bank_db.get(QbSyncJob, first['taskId'], populate_existing=True)
+    assert claim['taskId'] == first['taskId'] and 'resourceWaitStreak' not in row.options_json
