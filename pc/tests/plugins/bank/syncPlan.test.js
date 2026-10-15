@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { discoveryFailureText, planBookStage, planProgress, planPhase } from '../../../plugins/bank/utils/sync-plan.js'
+import { discoveryFailureText, isNewPlan, planBookStage, planProgress, planPhase } from '../../../plugins/bank/utils/sync-plan.js'
 const book = { enabled: true, inCurrentCycle: true, taskInCurrentCycle: true }
 const books = ['queued', 'collecting', 'checking', 'importing', 'completed', 'partial', 'failed'].map(taskStage => ({ ...book, taskStage }))
 books.push({ ...book, enabled: false }, { ...book, inCurrentCycle: false })
@@ -26,3 +26,11 @@ assert.match(discoveryFailureText({discoveryError:'返回验证',discoveryFailur
 assert.doesNotMatch(discoveryFailureText({discoveryError:'返回验证',discoveryFailure:'source_protection'}), /继续同步已知教材/)
 assert.equal(planPhase({planId:1,enabled:true,cycleNo:2,cycleState:'running',discoveryError:'接口超时',discoveryFailure:'stale_list'},{finished:0,total:2}),'逐本同步中')
 assert.equal(planPhase({planId:1,enabled:true,discoveryError:'接口超时',discoveryFailure:'no_list'},{finished:0,total:0}),'教材发现待处理')
+
+// A newly recreated, paused plan has no prior queue to "continue".
+const pristine = { planId: 2, enabled: false, cycleState: 'idle', cycleNo: 0, controlState: 'paused' }
+assert.equal(isNewPlan(pristine), true)
+assert.match(planPhase(pristine, planProgress([])), /尚未开始/)
+assert.equal(isNewPlan({ ...pristine, cycleNo: 1 }), false)
+assert.equal(isNewPlan({ ...pristine, discoveryTaskId: 9 }), false)
+assert.equal(isNewPlan({ ...pristine, lastDiscoveryTaskId: 9 }), false)

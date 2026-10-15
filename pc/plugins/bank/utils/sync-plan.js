@@ -22,8 +22,12 @@ export function planProgress(books) {
   counts.finished = counts.completed + counts.partial + counts.failed + counts.cancelled + counts.excluded
   return counts
 }
+export function isNewPlan(plan) {
+  return !!plan.planId && plan.cycleState === 'idle' && !plan.cycleNo && !plan.discoveryTaskId && !plan.lastDiscoveryTaskId
+}
 export function planPhase(plan, progress) {
   if (!plan.planId) return '尚未创建'
+  if (isNewPlan(plan)) return '尚未开始；开始同步后先发现教材，再生成逐本任务'
   if (plan.controlState==='pausing') return '正在停止采集、核验和入库，请等待当前工作收尾'
   if (plan.controlState==='ending') return '正在结束本轮，保留已有成果'
   if (!plan.enabled || plan.controlState==='paused') return '整个计划已暂停，队列和成果保留'

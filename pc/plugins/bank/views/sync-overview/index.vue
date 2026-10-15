@@ -55,7 +55,7 @@
           <div><h4>后端服务</h4><p>可用内存 <strong>{{ mib(control.serviceResources?.availableMemoryMiB) }}</strong></p><p>可用磁盘 <strong>{{ mib(control.serviceResources?.freeDiskMiB) }}</strong></p><p>数据库 <strong>{{ mib(summary.storage?.databaseBytes == null ? null : summary.storage.databaseBytes / 1048576) }}</strong></p></div>
           <div><h4>采集器</h4><p>可用内存 <strong>{{ mib(control.collector?.resources?.memoryMiB) }}</strong></p><p v-for="disk in control.collector?.resources?.disks || []" :key="disk.kind">{{ diskLabels[disk.kind] || disk.kind }} <strong>{{ mib(disk.freeMiB) }}</strong></p></div>
           <div><h4>今日采集</h4><p>主动请求 <strong>{{ number(control.collector?.sourceBudget?.usage?.requests) }} 次</strong></p><p>启动教材 <strong>{{ number(control.collector?.sourceBudget?.usage?.bookStarts) }} 本</strong></p><p>运行时长 <strong>{{ Math.ceil((control.collector?.sourceBudget?.usage?.activeMilliseconds || 0) / 60000) }} 分钟</strong></p></div>
-          <div><h4>素材</h4><p>今日下载 <strong>{{ mib((control.collector?.sourceBudget?.usage?.downloadBytes || 0) / 1048576) }}</strong></p><p>去重素材 <strong>{{ number(summary.storage?.uniqueAssetCount) }} 份</strong></p></div>
+          <div><h4>素材 <small>统计每分钟更新</small></h4><p>今日下载 <strong>{{ mib((control.collector?.sourceBudget?.usage?.downloadBytes || 0) / 1048576) }}</strong></p><p>去重素材 <strong>{{ number(summary.storage?.uniqueAssetCount) }} 份</strong></p></div>
         </div>
       </details>
     </section>

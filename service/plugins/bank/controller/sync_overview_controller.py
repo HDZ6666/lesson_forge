@@ -34,15 +34,13 @@ async def overview(
         books = books.where(QbTextbook.subject_id == subject_id)
         jobs = jobs.where(QbSyncJob.subject_id == subject_id)
     from plugins.bank.entity.do.bank_do import QbSyncIssue
-    from plugins.bank.service.coverage_queries import book_stem_counts
+    from plugins.bank.service.coverage_queries import books_with_usable_questions
     from plugins.bank.service.sync_plans import control_status, list_plans
 
     ids = list((await db.scalars(books)).all())
-    stem_counts = {}
-    for offset in range(0, len(ids), 500):
-        stem_counts.update(await book_stem_counts(db, ids[offset : offset + 500], display=True))
+    populated_books = await books_with_usable_questions(db, ids)
     total = len(ids)
-    populated = sum(value['usableQuestionCount'] > 0 for value in stem_counts.values())
+    populated = len(populated_books)
     issue_query = select(QbSyncIssue.status, func.count()).group_by(QbSyncIssue.status)
     if subject_id is not None:
         issue_query = issue_query.where(QbSyncIssue.subject_id == subject_id)
@@ -76,17 +74,14 @@ async def overview(
             break
         if deferred is None:
             deferred = (pending, reason)
-    from plugins.bank.entity.do.bank_do import QbQuestionAsset, QbQuestionImport, QbSyncBookState
+    from plugins.bank.entity.do.bank_do import QbQuestionImport, QbSyncBookState
     states = list((await db.scalars(select(QbSyncBookState).where(QbSyncBookState.plan_id.in_([p['planId'] for p in plans])))).all()) if plans else []
     cycle_targets = {(p['planId'], b): p['cycleNo'] for p in plans for b in (await db.get(QbSyncPlan, p['planId'])).cycle_targets or []}
     cycle_attempted = sum(s.last_cycle_no >= cycle_targets.get((s.plan_id, s.textbook_id), 10**10) for s in states)
     ranked = select(QbQuestionImport.local_textbook_id.label('book'), QbQuestionImport.status, QbQuestionImport.snapshot_complete, func.row_number().over(partition_by=QbQuestionImport.local_textbook_id, order_by=QbQuestionImport.import_id.desc()).label('pos')).where(QbQuestionImport.local_textbook_id.in_(ids)).subquery()
     incomplete = set((await db.scalars(select(ranked.c.book).where(ranked.c.pos == 1, (ranked.c.status != 'completed') | (ranked.c.snapshot_complete == 0)))).all())
-    need_refill = set(b for b in ids if not stem_counts.get(b, {}).get('usableQuestionCount')) | incomplete
-    asset_count = await db.scalar(select(func.count(func.distinct(QbQuestionAsset.file_hash))).where(QbQuestionAsset.download_status == 'downloaded'))
-    database_bytes = None
-    if db.bind.dialect.name == 'mysql':
-        database_bytes = await db.scalar(text('SELECT COALESCE(SUM(data_length + index_length),0) FROM information_schema.tables WHERE table_schema = DATABASE()'))
+    need_refill = (set(ids) - populated_books) | incomplete
+    storage = await _storage_stats(db)
 
     from plugins.bank.entity.do.bank_do import QbSyncJobScope
     visible_task_ids = [row.run_id for row in (current, next_task, deferred[0] if deferred else None) if row is not None]
@@ -136,7 +131,7 @@ async def overview(
             'deferredTask': dict(brief(deferred[0]), reason=deferred[1]) if deferred else None,
             'cycleTargetCount': len(cycle_targets), 'cycleAttemptedCount': cycle_attempted,
             'textbooksNeedingRefill': len(need_refill), 'openIssueCount': manual_issues, 'retryIssueCount': issue_counts.get('open', 0) - manual_issues,
-            'storage': {'databaseBytes': int(database_bytes) if database_bytes is not None else None, 'uniqueAssetCount': asset_count},
+            'storage': storage,
             'textbooksWithQuestions': populated,
             'textbooksWithoutQuestions': total - populated,
             'taskCounts': dict(counts),
@@ -152,3 +147,36 @@ async def overview(
             ],
         }
     )
+
+
+async def _storage_stats(db):
+    """Global storage totals are display statistics, refreshed once a minute."""
+    from plugins.bank.entity.do.bank_do import QbQuestionAsset
+
+    async def read(session):
+        query = select(func.count(func.distinct(QbQuestionAsset.file_hash))).where(
+            QbQuestionAsset.download_status == 'downloaded')
+        database_bytes = None
+        if session.bind.dialect.name == 'mysql':
+            query = query.with_hint(QbQuestionAsset, 'FORCE INDEX (idx_qb_question_asset_download_hash)',
+                                   dialect_name='mysql')
+            database_bytes = await session.scalar(text(
+                'SELECT COALESCE(SUM(data_length + index_length),0) '
+                'FROM information_schema.tables WHERE table_schema = DATABASE()'))
+        return {'databaseBytes': int(database_bytes) if database_bytes is not None else None,
+                'uniqueAssetCount': await session.scalar(query)}
+
+    if db.bind.dialect.name != 'mysql':
+        return await read(db)
+    import hashlib
+
+    from plugins.bank.service.live_progress_cache import get_or_load
+
+    engine = db.bind
+    key = 'bank:overview-storage:v1:' + hashlib.sha256(str(engine.url).encode()).hexdigest()
+
+    async def load():
+        async with AsyncSession(bind=engine) as snapshot:
+            return await read(snapshot)
+
+    return await get_or_load(key, load, ttl=60)

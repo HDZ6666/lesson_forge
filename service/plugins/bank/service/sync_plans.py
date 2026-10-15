@@ -284,6 +284,10 @@ async def list_books(db, plan_id, *, display=False):
         row.textbook_id: row
         for row in (await db.scalars(select(QbSyncBookState).where(QbSyncBookState.plan_id == plan_id))).all()
     }
+    # Formal textbooks outlive sync plans. Do not present the whole library
+    # as a new plan's registered list before its first discovery/assignment.
+    if display and not (plan.cycle_no or plan.discovery_processed_task_id or plan.textbook_order or states):
+        return []
     counts = {}
     for offset in range(0, len(books), 500):
         counts.update(await book_stem_counts(db, [book.textbook_id for book, _, _ in books[offset : offset + 500]], display=display))

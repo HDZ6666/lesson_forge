@@ -11,7 +11,7 @@
     <section v-if="plan.planId" class="sync-panel">
       <div class="section-heading"><div><h3>{{ plan.cycleName || '准备首次同步' }}</h3><p v-if="plan.sessionNo">第 {{ plan.sessionNo }} 次同步 · 第 {{ plan.sessionRound || 1 }} 轮<template v-if="plan.maxRounds"> / 最多 {{ plan.maxRounds }} 轮</template><template v-if="plan.sessionEndReason"> · {{ endReasonLabel(plan.sessionEndReason) }}</template></p><p>{{ phase }}</p><p v-if="plan.nextCycleAt">下一轮：{{ formatTime(plan.nextCycleAt) }}</p><p v-else-if="!plan.autoUpdate">自动更新已关闭，本轮结束后不再自动创建下一轮。</p></div><el-tag :type="plan.enabled ? 'success' : 'warning'">{{ controlLabel }}</el-tag></div>
       <div class="plan-actions">
-        <el-button v-if="plan.controlState==='paused'" v-hasPermi="['bank:sync:plans:edit']" type="primary" :loading="saving" @click="act('resume')">继续整个计划</el-button>
+        <el-button v-if="plan.controlState==='paused'" v-hasPermi="['bank:sync:plans:edit']" type="primary" :loading="saving" @click="act(isNewPlan(plan) ? 'start' : 'resume')">{{ isNewPlan(plan) ? '开始同步' : '继续整个计划' }}</el-button>
         <el-button v-else-if="['pausing','ending'].includes(plan.controlState)" disabled>{{ plan.controlState==='ending' ? '正在结束本轮' : '正在暂停' }}</el-button>
         <el-button v-else v-hasPermi="['bank:sync:plans:edit']" type="warning" :loading="saving" @click="pause">暂停整个计划</el-button>
         <el-button v-if="plan.enabled && plan.controlState==='active' && ['completed','stopped'].includes(plan.cycleState)" v-hasPermi="['bank:sync:plans:edit']" type="primary" :loading="saving" @click="act('start')">提前同步一次</el-button><el-button v-if="plan.enabled && plan.controlState==='active' && ['completed','stopped'].includes(plan.cycleState)" v-hasPermi="['bank:sync:plans:edit']" :loading="saving" @click="startFull">全量扫描一次</el-button>
@@ -20,17 +20,17 @@
         <el-button v-if="plan.cycleNo" @click="openCycle(plan.cycleNo)">本轮全部任务</el-button>
         <el-button v-if="plan.lastDiscoveryTaskId" link type="primary" @click="router.push(`/bank/sync-textbook/${plan.lastDiscoveryTaskId}`)">教材发现 #{{ plan.lastDiscoveryTaskId }}</el-button>
       </div>
-      <el-progress :percentage="progress.total ? Math.round(progress.finished/progress.total*100) : 0"/>
-      <p class="field-hint">本轮 {{ progress.total }} 本 · 已处理 {{ progress.finished }} 本。暂停保留所有成果；继续后先处理暂停时的教材，再恢复队列。</p>
+      <el-progress v-if="plan.cycleNo" :percentage="progress.total ? Math.round(progress.finished/progress.total*100) : 0"/>
+      <p v-if="plan.cycleNo" class="field-hint">本轮 {{ progress.total }} 本 · 已处理 {{ progress.finished }} 本。暂停保留所有成果；继续后先处理暂停时的教材，再恢复队列。</p>
       <el-alert v-if="plan.discoveryError" :title="`教材发现：${plan.discoveryError}`" :type="plan.discoveryFailure==='stale_list'?'info':'warning'" :closable="false"><p>{{ discoveryFailureText(plan) }}</p><el-button v-hasPermi="['bank:sync:plans:edit']" :loading="saving" @click="retryDiscovery">重试教材发现</el-button></el-alert>
     </section>
-    <div v-if="plan.planId" class="sync-stat-grid">
+    <div v-if="plan.planId && plan.cycleNo" class="sync-stat-grid">
       <div class="sync-stat"><span>待执行</span><strong>{{ progress.queued }}</strong><small>{{ progress.paused || 0 }} 本暂停</small></div>
       <div class="sync-stat accent"><span>完整完成</span><strong>{{ progress.completed }}</strong><small>{{ progress.partial }} 本部分完成</small></div>
       <div class="sync-stat"><span>正在处理</span><strong>{{ progress.collecting + progress.checking + progress.importing }}</strong><small>采集、核验及入库</small></div>
       <div class="sync-stat"><span>需要关注</span><strong>{{ progress.failed }}</strong><small>{{ progress.cancelled }} 本停止 · {{ progress.excluded }} 本排除</small></div>
     </div>
-    <section v-if="plan.planId && queue" class="sync-panel">
+    <section v-if="plan.planId && queue && (plan.cycleNo || queue.current || queue.queue.length)" class="sync-panel">
       <div class="section-heading"><div><h3>当前队列</h3><p>按后端实际派发顺序显示。“置顶”只让该教材在当前任务结束后优先执行，不改变计划顺序，也不中断当前任务。</p></div></div>
       <div class="queue-now"><div><span class="cell-sub">当前任务</span><strong>{{ queue.current ? queue.current.textbookName : '无' }}</strong><span v-if="queue.current?.settling" class="cell-sub">{{ queue.current.waitReason }}</span><span v-if="queue.current" class="cell-sub">{{ queue.current.syncMode==='full' ? '全量窗口扫描' : '增量' }}</span></div><div><span class="cell-sub">下一任务</span><strong>{{ queue.next ? queue.next.textbookName : '无' }}</strong><span v-if="queue.next?.waitReason" class="cell-sub">{{ queue.next.waitReason }}</span></div><div><span class="cell-sub">待执行</span><strong>{{ queue.queue.length }} 本</strong></div></div>
       <el-table v-if="queue.queue.length" max-height="min(320px, 40vh)" scrollbar-always-on :data="queue.queue.slice(0,50)" row-key="taskId">
@@ -41,7 +41,7 @@
       </el-table>
     </section>
     <section v-if="showCreate" class="sync-panel"><h3>创建本学科的计划</h3><PlanSettingsFields v-model="form"/><el-button v-hasPermi="['bank:sync:plans:edit']" type="primary" :loading="saving" :disabled="loading || !!error" @click="save">创建并开始同步</el-button></section>
-    <section v-if="plan.planId" class="sync-panel">
+    <section v-if="plan.planId && books.length" class="sync-panel">
       <div class="section-heading"><div><h3>教材清单与执行顺序</h3><p>排序影响本轮未开始的任务和以后各轮；“提前执行”只调整这一次。</p></div><el-button v-hasPermi="['bank:sync:plans:edit']" :disabled="loading || saving" @click="openOrder">调整顺序</el-button></div>
       <div class="book-filters"><el-input v-model="bookSearch" clearable placeholder="搜索版本或教材" aria-label="搜索版本或教材"/><el-select v-model="bookStatus" clearable placeholder="全部教材" aria-label="教材调度状态"><el-option label="正在处理" value="active"/><el-option label="需要处理" value="issues"/><el-option label="本轮待执行" value="waiting"/><el-option label="暂停或人工单列" value="paused"/></el-select></div>
       <el-table max-height="min(560px, 60vh)" scrollbar-always-on v-loading="loading" :data="filteredBooks" row-key="textbookId">
@@ -55,6 +55,10 @@
         <el-table-column label="操作" width="310"><template #default="{row}"><el-button v-if="row.lastTaskId" link type="primary" @click="router.push(`/bank/sync-question/${row.lastTaskId}`)">查看</el-button><el-button v-hasPermi="['bank:sync:question:add']" link type="primary" :disabled="saving" @click="openSingle(row)">{{ planBookStage(row).key==='queued' ? '提前执行' : ['collecting','checking','importing'].includes(planBookStage(row).key) ? '查看当前任务' : '再同步一次' }}</el-button><el-button v-if="planBookStage(row).key==='queued'" v-hasPermi="['bank:sync:plans:edit']" link :disabled="saving" @click="pin(row.textbookId)">置顶</el-button><el-button v-hasPermi="['bank:sync:plans:edit']" link @click="editBook(row)">设置</el-button></template></el-table-column>
         <template #empty><el-empty :image-size="64" :description="books.length ? '没有符合筛选的教材' : '计划正在发现教材，登记后自动生成清单与任务'"/></template>
       </el-table><footer class="table-footer">显示 {{filteredBooks.length}} / {{books.length}} 本教材</footer>
+    </section>
+    <section v-if="plan.planId && !books.length && !loading" class="sync-panel">
+      <el-empty :image-size="64" :description="isNewPlan(plan) ? '尚未生成教材清单，点击“开始同步”后自动发现教材并建立队列' : plan.discoveryError ? '教材发现尚未完成，请查看上方原因和处理方式' : '等待教材发现完成，登记后自动生成清单与任务'"/>
+      <p class="field-hint">教材管理和正式题库独立保留。这里展示本计划登记的清单及执行记录。</p>
     </section>
     <el-dialog v-model="settingsVisible" title="计划设置" width="560px" class="detail-scroll-dialog sync-center-dialog"><PlanSettingsFields v-model="form"/><template #footer><el-button @click="settingsVisible=false">取消</el-button><el-button v-hasPermi="['bank:sync:plans:edit']" type="primary" :loading="saving" @click="save">保存设置</el-button></template></el-dialog>
     <el-dialog v-model="endVisible" title="结束本次同步" width="480px" class="detail-scroll-dialog sync-center-dialog"><p>停止当前工作，取消本轮未完成的队列，保留已采集和已入库成果。</p><el-checkbox v-model="keepUpdates">继续自动更新：结束本轮后 {{form.refreshDays}} 天开始新一轮</el-checkbox><template #footer><el-button @click="endVisible=false">取消</el-button><el-button type="danger" :loading="saving" @click="act('end',keepUpdates)">结束本次同步</el-button></template></el-dialog>
@@ -91,7 +95,7 @@ import ManualRecovery from '../../components/ManualRecovery.vue'
 import SyncCenterNav from '../../components/SyncCenterNav.vue'
 import SyncWorkflow from '../../components/SyncWorkflow.vue'
 import PlanSettingsFields from '../../components/PlanSettingsFields.vue'
-import {discoveryFailureText,planBookStage,planProgress,planPhase} from '../../utils/sync-plan.js'
+import {discoveryFailureText,isNewPlan,planBookStage,planProgress,planPhase} from '../../utils/sync-plan.js'
 import '../../styles/sync-center.scss'
 const route=useRoute(),router=useRouter(),subjectId=ref(Number(route.query.subjectId)||1),books=ref([]),plan=ref({}),control=ref({}),loading=ref(true),saving=ref(false),error=ref('')
 const form=ref({planName:'',enabled:true,autoUpdate:true,refreshDays:7,listConcurrency:8,catalogPageLimit:1000,maxRounds:null}),settingsVisible=ref(false),endVisible=ref(false),keepUpdates=ref(true)

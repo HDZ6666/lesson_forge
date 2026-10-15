@@ -382,3 +382,42 @@ def test_budget_input_validates_and_serializes_collector_contract():
     for key, value in [('books', -1), ('requests', True), ('activeSeconds', 0.5), ('downloadMiB', 8589934592)]:
         with pytest.raises(ValidationError):
             BudgetInput(**{**payload, key: value})
+
+
+@pytest.mark.asyncio
+async def test_pristine_plan_display_has_no_inherited_library_queue(bank_db, monkeypatch):
+    from unittest.mock import AsyncMock
+
+    result = await plans.save_plan(bank_db, PlanInput(subjectId=1))
+    plan_id = result['planId']
+    # The scheduler still has access to the preserved formal textbook library.
+    assert len(await plans.list_books(bank_db, plan_id)) == 2
+    expensive_counts = AsyncMock(side_effect=AssertionError('No queue exists to count yet'))
+    monkeypatch.setattr(plans, 'book_stem_counts', expensive_counts)
+    assert await plans.list_books(bank_db, plan_id, display=True) == []
+    expensive_counts.assert_not_awaited()
+    plan = await bank_db.get(QbSyncPlan, plan_id)
+    plan.textbook_order = [1, 2]
+    await bank_db.commit()
+    expensive_counts.side_effect = None
+    expensive_counts.return_value = {}
+    assert len(await plans.list_books(bank_db, plan_id, display=True)) == 2
+
+
+@pytest.mark.asyncio
+async def test_overview_with_empty_sync_history_uses_formal_existence_not_full_counts(bank_db, monkeypatch):
+    import json
+    from unittest.mock import AsyncMock
+
+    from plugins.bank.controller.sync_overview_controller import overview
+    from plugins.bank.service import coverage_queries
+
+    exact = AsyncMock(side_effect=AssertionError('Overview only needs question existence'))
+    monkeypatch.setattr(coverage_queries, 'book_stem_counts', exact)
+    populated = await coverage_queries.books_with_usable_questions(bank_db, [1, 2])
+    result = json.loads((await overview(bank_db, subject_id=1)).body)['data']
+    assert result['textbooks'] == 2
+    assert result['textbooksWithQuestions'] == len(populated)
+    assert result['textbooksWithoutQuestions'] == 2 - len(populated)
+    assert result['taskCounts'] == {} and result['recentTasks'] == []
+    exact.assert_not_awaited()

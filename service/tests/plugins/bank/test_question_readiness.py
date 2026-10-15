@@ -472,7 +472,7 @@ async def test_multi_book_directory_query_does_not_follow_foreign_book_parent(ba
 
 @pytest.mark.asyncio
 async def test_book_counts_deduplicate_evidence_and_keep_stale_invalid_separate(bank_db, tmp_path):
-    from plugins.bank.service.coverage_queries import book_stem_counts
+    from plugins.bank.service.coverage_queries import book_stem_counts, books_with_usable_questions
     node = await bank_db.get(QbCatalogNode, 1)
     node.status = '0'
     for number in (1, 2, 3):
@@ -494,8 +494,42 @@ async def test_book_counts_deduplicate_evidence_and_keep_stale_invalid_separate(
     counts = await book_stem_counts(bank_db, [1, 2])
     assert counts[1] == {'usableQuestionCount': 1, 'uncheckedQuestionCount': 1, 'unusableQuestionCount': 1}
     assert counts[2]['usableQuestionCount'] == 1
+    assert await books_with_usable_questions(bank_db, [1, 2]) == {1, 2}
+    assert await books_with_usable_questions(bank_db, []) == set()
     node.status = '1'
     await bank_db.commit()
     assert (await book_stem_counts(bank_db, [1]))[1] == {
         'usableQuestionCount': 0, 'uncheckedQuestionCount': 0, 'unusableQuestionCount': 0,
     }
+
+
+@pytest.mark.asyncio
+async def test_usable_book_existence_enforces_current_facts_and_enabled_ownership(bank_db, tmp_path):
+    from plugins.bank.entity.do.bank_do import QbSubject, QbTextbook, QbTextbookVersion
+    from plugins.bank.service.coverage_queries import book_stem_counts, books_with_usable_questions
+
+    # The cheap overview result must agree with exact counts after edits,
+    # disabled scopes and a version from the wrong provider.
+    row = await bank_db.get(QbQuestion, 1)
+    row.status = '0'
+    row.content_html = '<p>可用题目</p>'
+    node = await bank_db.get(QbCatalogNode, 1)
+    node.status = '0'
+    await bank_db.commit()
+    await cache(bank_db, row, [], tmp_path)
+    await bank_db.commit()
+    book = await bank_db.get(QbTextbook, 1)
+    version = await bank_db.get(QbTextbookVersion, book.version_id)
+    subject = await bank_db.get(QbSubject, book.subject_id)
+    for target, attribute, value in ((row, 'plain_text', '已编辑'), (node, 'status', '1'),
+                                     (book, 'status', '1'), (version, 'status', '1'),
+                                     (subject, 'status', '1'), (version, 'source_provider', 'other')):
+        previous = getattr(target, attribute)
+        setattr(target, attribute, value)
+        await bank_db.commit()
+        counts = await book_stem_counts(bank_db, [1, 2])
+        assert await books_with_usable_questions(bank_db, [1, 2]) == {
+            key for key, metrics in counts.items() if metrics['usableQuestionCount'] > 0
+        }
+        setattr(target, attribute, previous)
+        await bank_db.commit()
