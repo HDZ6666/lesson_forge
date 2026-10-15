@@ -25,6 +25,19 @@ def _now():
 
 
 @pytest.mark.asyncio
+async def test_plan_display_uses_execution_results_without_formal_question_census(bank_db, monkeypatch):
+    pid, _ = await setup(bank_db, monkeypatch)
+
+    async def expensive_counts(*args, **kwargs):
+        raise AssertionError('同步清单展示不应统计正式题库')
+
+    monkeypatch.setattr(sync_plans, 'book_stem_counts', expensive_counts)
+    books = await sync_plans.list_books(bank_db, pid, display=True)
+    assert len(books) == 2
+    assert all('usableQuestionCount' not in book and book['savedQuestionCount'] == 0 for book in books)
+
+
+@pytest.mark.asyncio
 async def test_discovery_scopes_never_replace_question_execution_links(bank_db, monkeypatch):
     pid, jobs = await setup(bank_db, monkeypatch)
     plan = await bank_db.get(QbSyncPlan, pid)

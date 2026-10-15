@@ -310,8 +310,9 @@ async def list_books(db, plan_id, *, display=False):
     if display and not (plan.cycle_no or plan.discovery_processed_task_id or plan.textbook_order or states):
         return []
     counts = {}
-    for offset in range(0, len(books), 500):
-        counts.update(await book_stem_counts(db, [book.textbook_id for book, _, _ in books[offset : offset + 500]], display=display))
+    if not display:
+        for offset in range(0, len(books), 500):
+            counts.update(await book_stem_counts(db, [book.textbook_id for book, _, _ in books[offset : offset + 500]]))
     targets = set(plan.cycle_targets or [])
     task_progress = await _book_task_progress(db, states.values(), plan.cycle_no)
     ordered=list(plan.textbook_order or [])
@@ -341,7 +342,7 @@ async def list_books(db, plan_id, *, display=False):
             'lastCycleNo': states[book.textbook_id].last_cycle_no if book.textbook_id in states else 0,
             'nextDueAt': utc_datetime(states[book.textbook_id].next_due_at) if book.textbook_id in states else None,
             'revision': states[book.textbook_id].revision if book.textbook_id in states else 0,
-            **counts.get(book.textbook_id, {'usableQuestionCount': 0}),
+            **counts.get(book.textbook_id, {} if display else {'usableQuestionCount': 0}),
             **task_progress.get(book.textbook_id, {}),
             # Rounds of the current sync session this book took part in,
             # counted by round, never inferred from execution counts (A07).
