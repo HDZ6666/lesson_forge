@@ -345,7 +345,8 @@ async def test_overview_skips_deferred_queue_and_uses_enabled_scope(bank_db):
     payload=json.loads((await overview(bank_db,subject_id=1)).body)['data']
     assert payload['nextTask']['taskId']==second['taskId']
     assert payload['deferredTask']['taskId']==first['taskId'] and payload['deferredTask']['notBefore']
-    assert payload['cycleTargetCount']==0 and payload['storage']['uniqueAssetCount']==0
+    assert payload['cycleTargetCount']==0 and payload['savedQuestionCount']==0
+    assert 'storage' not in payload
 
 
 @pytest.mark.asyncio
@@ -405,19 +406,19 @@ async def test_pristine_plan_display_has_no_inherited_library_queue(bank_db, mon
 
 
 @pytest.mark.asyncio
-async def test_overview_with_empty_sync_history_uses_formal_existence_not_full_counts(bank_db, monkeypatch):
+async def test_overview_empty_sync_history_does_not_count_preserved_formal_bank(bank_db, monkeypatch):
     import json
     from unittest.mock import AsyncMock
 
     from plugins.bank.controller.sync_overview_controller import overview
     from plugins.bank.service import coverage_queries
 
-    exact = AsyncMock(side_effect=AssertionError('Overview only needs question existence'))
+    exact = AsyncMock(side_effect=AssertionError('Overview must not query the formal question bank'))
     monkeypatch.setattr(coverage_queries, 'book_stem_counts', exact)
-    populated = await coverage_queries.books_with_usable_questions(bank_db, [1, 2])
+    await plans.save_plan(bank_db, PlanInput(subjectId=1))
     result = json.loads((await overview(bank_db, subject_id=1)).body)['data']
-    assert result['textbooks'] == 2
-    assert result['textbooksWithQuestions'] == len(populated)
-    assert result['textbooksWithoutQuestions'] == 2 - len(populated)
+    assert result['textbooks'] == 0
+    assert result['savedQuestionCount'] == 0 and result['acceptedQuestionCount'] == 0
+    assert 'textbooksWithQuestions' not in result and 'storage' not in result
     assert result['taskCounts'] == {} and result['recentTasks'] == []
     exact.assert_not_awaited()

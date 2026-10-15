@@ -1,22 +1,23 @@
 <template>
   <div class="app-container sync-center-page">
     <header class="page-heading">
-      <div><h2>同步中心</h2><p>逐本建立题库，查看采集进度，集中处理需要你关注的问题。</p></div>
+      <div><h2>同步中心</h2><p>查看本次同步的教材、采集成果、入库进度和待处理问题。</p></div>
       <div class="heading-actions"><SubjectSelect v-model="subjectId" @change="load" /><SourceBudgetSettings @updated="load" /><el-button :icon="Refresh" :loading="loading" @click="load">刷新</el-button></div>
     </header>
     <SyncCenterNav active="overview" :subject-id="subjectId" />
     <SyncWorkflow />
     <el-alert v-if="error" :title="error" type="error" :closable="false" show-icon />
-    <section v-if="!loading && !error && !summary.textbooks" class="welcome sync-panel">
+    <section v-if="!loading && !error && !(summary.plans || []).length" class="welcome sync-panel">
       <div class="welcome-icon"><el-icon><Collection /></el-icon></div>
       <div class="welcome-copy"><span class="eyebrow">从这里开始</span><h3>创建一个计划，自动建立题库</h3><p>选择学科创建同步计划，系统自动发现教材、逐本排队采集，并将合格题目分批入库。</p></div>
       <el-button type="primary" @click="router.push({path:'/sync-center/plans',query:{subjectId}})">创建学科同步计划 <el-icon class="el-icon--right"><ArrowRight /></el-icon></el-button>
     </section>
+    <el-alert v-if="!loading && !error && (summary.plans || []).length && !hasCurrentTasks" title="本次同步尚未生成任务。在学科计划中点击“开始同步”，发现教材后自动建立队列。" type="info" :closable="false" show-icon />
     <div class="sync-stat-grid" v-loading="loading">
-      <div class="sync-stat"><span>当前教材</span><strong>{{ number(summary.textbooks) }}</strong><small>{{ number(summary.textbooksWithoutQuestions) }} 本尚无可用题</small></div>
-      <div class="sync-stat accent"><span>有可用题的教材</span><strong>{{ number(summary.textbooksWithQuestions) }}</strong><small>题干和必要素材已检查</small></div>
-      <div class="sync-stat"><span>待补齐教材</span><strong>{{ number(summary.textbooksNeedingRefill) }}</strong><small>后续循环继续补齐</small></div>
-      <div class="sync-stat" :class="{ warning: summary.openIssueCount > 0 }"><span>待处理问题</span><strong>{{ number(summary.openIssueCount) }}</strong><el-button link type="primary" @click="openIssues">查看问题 <el-icon><ArrowRight /></el-icon></el-button></div>
+      <div class="sync-stat"><span>本次参与教材</span><strong>{{ number(summary.textbooks) }}</strong><small>仅统计本次同步已登记的教材</small></div>
+      <div class="sync-stat accent"><span>本次已保存题目</span><strong>{{ number(summary.savedQuestionCount) }}</strong><small>按执行成果累计（条次）</small></div>
+      <div class="sync-stat"><span>本次已接受入库</span><strong>{{ number(summary.acceptedQuestionCount) }}</strong><small>条次 · 新增题 {{ number(summary.newQuestionCount) }} 道 · 新增关联 {{ number(summary.newRelationCount) }} 条</small></div>
+      <div class="sync-stat" :class="{ warning: summary.openIssueCount > 0 }"><span>本次待处理问题</span><strong>{{ number(summary.openIssueCount) }}</strong><el-button link type="primary" @click="openIssues">查看问题 <el-icon><ArrowRight /></el-icon></el-button></div>
     </div>
     <div class="overview-grid">
       <section class="sync-panel">
@@ -29,7 +30,7 @@
         <div class="panel-actions"><el-button type="primary" plain @click="router.push('/sync-center/tasks')">管理同步任务</el-button><el-button v-hasPermi="['bank:sync:control']" :type="summary.control?.paused ? 'primary' : 'danger'" link :disabled="loading || !!error" :loading="controlling" @click="toggleControl">{{ summary.control?.paused ? '恢复同步' : '紧急暂停' }}</el-button></div>
       </section>
       <section class="sync-panel">
-        <div class="section-heading"><h3>本轮覆盖进度</h3><el-button link type="primary" @click="router.push({path:'/sync-center/plans',query:{subjectId}})">查看学科计划 <el-icon><ArrowRight /></el-icon></el-button></div>
+        <div class="section-heading"><h3>当前轮次进度</h3><el-button link type="primary" @click="router.push({path:'/sync-center/plans',query:{subjectId}})">查看学科计划 <el-icon><ArrowRight /></el-icon></el-button></div>
         <div class="cycle-number"><strong>{{ number(summary.cycleAttemptedCount) }}</strong><span>/ {{ number(summary.cycleTargetCount) }} 本已尝试</span></div>
         <el-progress :percentage="cyclePercent" :show-text="false" :stroke-width="8" />
         <p class="sync-muted">{{ summary.cycleTargetCount ? '按计划顺序处理全部教材，本轮结束后再计算下一轮时间。' : '尚未开始本轮同步，请在学科计划中查看发现进度或创建计划。' }}</p>
@@ -38,24 +39,24 @@
       </section>
     </div>
     <section class="sync-panel">
-      <div class="section-heading"><div><h3>最近任务</h3><p>采集完成后，合格题目会在后台分批入库。</p></div><el-button link type="primary" @click="router.push('/sync-center/tasks')">全部任务 <el-icon><ArrowRight /></el-icon></el-button></div>
+      <div class="section-heading"><div><h3>本次同步任务</h3><p>仅展示本次同步的执行；过往记录可在任务历史中查看。</p></div><el-button link type="primary" @click="router.push('/sync-center/tasks')">任务历史 <el-icon><ArrowRight /></el-icon></el-button></div>
       <el-table v-loading="loading" :data="summary.recentTasks || []">
         <el-table-column label="任务" min-width="150"><template #default="{row}"><el-button link type="primary" @click="open(row)">#{{ row.taskId }} · {{ row.taskModule === 'textbook' ? '教材发现' : row.taskModule === 'question' ? '教材同步' : '历史同步' }}</el-button></template></el-table-column>
         <el-table-column label="状态" width="115"><template #default="{row}"><el-tag :type="syncTaskStatusMeta(row.status).type" effect="light">{{ syncTaskStatusMeta(row.status).label }}</el-tag></template></el-table-column>
         <el-table-column label="创建时间" min-width="170"><template #default="{row}">{{ formatTaskTime(row.createTime) }}</template></el-table-column>
         <el-table-column label="需关注的信息" min-width="220" show-overflow-tooltip><template #default="{row}">{{ row.error || '—' }}</template></el-table-column>
         <el-table-column label="操作" width="100" fixed="right"><template #default="{row}"><el-button link type="primary" @click="open(row)">查看详情</el-button></template></el-table-column>
-        <template #empty><el-empty :image-size="64" description="还没有同步任务"><el-button type="primary" plain @click="router.push({path:'/sync-center/plans',query:{subjectId}})">创建同步计划</el-button></el-empty></template>
+        <template #empty><el-empty :image-size="64" description="本次暂无同步任务"><el-button type="primary" plain @click="router.push({path:'/sync-center/plans',query:{subjectId}})">查看学科计划</el-button></el-empty></template>
       </el-table>
     </section>
     <section class="sync-panel resource-panel">
-      <p class="sync-muted">采集与入库独立排队；内存不足时入库自动让步。已回收 {{ summary.cleanup?.spools || 0 }} 份入库临时文件、{{ summary.cleanup?.runs || 0 }} 份旧采集成果。每本保留最新成果和仍需补采、处理问题的数据，正式题库及图片保留。</p>
+      <p class="sync-muted">采集与入库独立排队；内存不足时入库自动让步。本次已回收 {{ summary.cleanup?.spools || 0 }} 份入库临时文件、{{ summary.cleanup?.runs || 0 }} 份旧采集成果。需要补采或排查的问题成果会保留。</p>
       <details><summary>运行环境与今日用量 <span class="sync-muted">查看服务资源、存储及请求统计</span></summary>
         <div class="resource-grid">
-          <div><h4>后端服务</h4><p>可用内存 <strong>{{ mib(control.serviceResources?.availableMemoryMiB) }}</strong></p><p>可用磁盘 <strong>{{ mib(control.serviceResources?.freeDiskMiB) }}</strong></p><p>数据库 <strong>{{ mib(summary.storage?.databaseBytes == null ? null : summary.storage.databaseBytes / 1048576) }}</strong></p></div>
+          <div><h4>后端服务</h4><p>可用内存 <strong>{{ mib(control.serviceResources?.availableMemoryMiB) }}</strong></p><p>可用磁盘 <strong>{{ mib(control.serviceResources?.freeDiskMiB) }}</strong></p></div>
           <div><h4>采集器</h4><p>可用内存 <strong>{{ mib(control.collector?.resources?.memoryMiB) }}</strong></p><p v-for="disk in control.collector?.resources?.disks || []" :key="disk.kind">{{ diskLabels[disk.kind] || disk.kind }} <strong>{{ mib(disk.freeMiB) }}</strong></p></div>
           <div><h4>今日采集</h4><p>主动请求 <strong>{{ number(control.collector?.sourceBudget?.usage?.requests) }} 次</strong></p><p>启动教材 <strong>{{ number(control.collector?.sourceBudget?.usage?.bookStarts) }} 本</strong></p><p>运行时长 <strong>{{ Math.ceil((control.collector?.sourceBudget?.usage?.activeMilliseconds || 0) / 60000) }} 分钟</strong></p></div>
-          <div><h4>素材 <small>统计每分钟更新</small></h4><p>今日下载 <strong>{{ mib((control.collector?.sourceBudget?.usage?.downloadBytes || 0) / 1048576) }}</strong></p><p>去重素材 <strong>{{ number(summary.storage?.uniqueAssetCount) }} 份</strong></p></div>
+          <div><h4>今日下载</h4><p>今日下载 <strong>{{ mib((control.collector?.sourceBudget?.usage?.downloadBytes || 0) / 1048576) }}</strong></p></div>
         </div>
       </details>
     </section>
@@ -78,6 +79,7 @@ const controlling = ref(false), control = ref({})
 const number = value => Number(value || 0).toLocaleString('zh-CN')
 const mib = value => value == null ? '—' : value >= 1024 ? `${(value / 1024).toFixed(1)} GB` : `${Number(value).toFixed(0)} MB`
 const diskLabels = { database:'快照磁盘', data:'素材磁盘', profile:'浏览器磁盘' }
+const hasCurrentTasks = computed(() => Object.values(summary.value.taskCounts || {}).some(count => count > 0))
 const activeCount = computed(() => ['starting','running','cancelling'].reduce((n,s) => n + (summary.value.taskCounts?.[s] || 0), 0))
 const cyclePercent = computed(() => summary.value.cycleTargetCount ? Math.min(100, Math.round(summary.value.cycleAttemptedCount / summary.value.cycleTargetCount * 100)) : 0)
 const importStage = computed(() => ({queued:'等待入库',paused:'已暂停',preparing:'质量检查中',running:'分批入库中'}[summary.value.currentImport?.status] || '处理中'))

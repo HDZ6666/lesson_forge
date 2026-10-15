@@ -55,36 +55,6 @@ def _scope_joins(query):
     )
 
 
-async def books_with_usable_questions(db, textbook_ids):
-    """Overview needs existence per book, not a census of all memberships."""
-    if not textbook_ids:
-        return set()
-    ready = and_(
-        QbQuestion.status == '0',
-        QbQuestionReadiness.status == 'ready',
-        QbQuestionReadiness.stem_valid == 1,
-        QbQuestionReadiness.assets_ready == 1,
-    )
-    membership = (
-        select(1).select_from(QbCatalogNode)
-        .join(QbQuestionCatalog, and_(
-            QbQuestionCatalog.catalog_id == QbCatalogNode.catalog_id,
-            QbQuestionCatalog.relation_type == 'query_catalog',
-        ))
-        .join(QbQuestion, QbQuestion.question_id == QbQuestionCatalog.question_id)
-        .join(QbQuestionReadiness, current_facts_predicate())
-        .join(QbTextbookVersion, QbTextbookVersion.version_id == QbTextbook.version_id)
-        .join(QbSubject, QbSubject.subject_id == QbTextbook.subject_id)
-        .where(QbCatalogNode.textbook_id == QbTextbook.textbook_id, enabled_scope(), ready)
-        .correlate(QbTextbook)
-    )
-    # Keep EXISTS in the projection: MySQL can stop at the first usable
-    # question for each book, instead of materializing every matching ID.
-    rows = (await db.execute(select(QbTextbook.textbook_id, exists(membership))
-                             .where(QbTextbook.textbook_id.in_(textbook_ids)))).all()
-    return {book for book, populated in rows if populated}
-
-
 async def book_stem_counts(db, textbook_ids, *, display=False):
     counts = await book_metrics(db, textbook_ids, display=display)
     return {book: {key: row[key] for key in (
