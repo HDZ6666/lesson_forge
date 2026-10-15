@@ -22,12 +22,12 @@
     <div class="overview-grid">
       <section class="sync-panel">
         <div class="section-heading"><h3>运行状态</h3><el-tag :type="runtime.type" effect="light" round>{{ runtime.label }}</el-tag></div>
-        <el-alert v-if="runtime.reason" :title="runtime.reason" :type="runtime.type === 'danger' ? 'error' : 'warning'" :closable="false" show-icon />
+        <el-alert v-if="runtime.reason" :title="runtime.reason" :type="runtime.type === 'danger' ? 'error' : runtime.type === 'info' ? 'info' : 'warning'" :closable="false" show-icon />
         <div class="task-slot"><span class="slot-label">正在采集</span><template v-if="summary.currentTask"><strong>{{ summary.currentTask.textbookName || `任务 #${summary.currentTask.taskId}` }}</strong><el-button link type="primary" @click="open(summary.currentTask)">查看进度</el-button></template><template v-else><strong>暂无正在采集的教材</strong><span class="sync-muted">新任务会在后台依次执行，可随时离开页面。</span></template></div>
         <div class="task-slot import-slot"><span class="slot-label">质量检查与入库 · {{ summary.pendingImportCount || 0 }} 本待处理</span><template v-if="summary.currentImport"><strong>{{ summary.currentImport.textbookName || `任务 #${summary.currentImport.taskId}` }} · {{ importStage }}</strong><el-button link type="primary" @click="open({...summary.currentImport,taskModule:'question'})">查看入库</el-button><span class="sync-muted">已入库处理 {{ number(summary.currentImport.processedCount) }} / {{ number(summary.currentImport.questionCount) }} 道<template v-if="summary.currentImport.errorMessage"> · {{ summary.currentImport.errorMessage }}</template></span></template><span v-else>暂无待入库成果</span></div>
         <div class="queue-line"><span>下一项到期待办</span><el-button v-if="summary.nextTask" link type="primary" @click="open(summary.nextTask)">{{ summary.nextTask.textbookName || `任务 #${summary.nextTask.taskId}` }}</el-button><span v-else>暂无</span></div>
         <p v-if="summary.deferredTask" class="sync-muted">暂缓：{{ summary.deferredTask.textbookName || `任务 #${summary.deferredTask.taskId}` }} · {{ summary.deferredTask.reason }}<template v-if="summary.deferredTask.notBefore"> · 最早 {{ formatTaskTime(summary.deferredTask.notBefore) }}</template></p>
-        <div class="panel-actions"><el-button type="primary" plain @click="router.push('/sync-center/tasks')">管理同步任务</el-button><el-button v-hasPermi="['bank:sync:control']" :type="summary.control?.paused ? 'primary' : 'danger'" link :disabled="loading || !!error" :loading="controlling" @click="toggleControl">{{ summary.control?.paused ? '恢复同步' : '紧急暂停' }}</el-button></div>
+        <div class="panel-actions"><el-button type="primary" plain @click="router.push('/sync-center/tasks')">管理同步任务</el-button><el-button v-hasPermi="['bank:sync:control']" :type="summary.control?.paused ? 'primary' : 'danger'" link :disabled="loading || controlLoading || !!error || (!summary.control?.paused && !summary.control?.canEmergencyPause)" :title="summary.control?.paused ? '解除公共暂停，不会自动启动已暂停的学科计划' : summary.control?.canEmergencyPause ? '暂停全部学科的同步调度，并停止当前采集' : '当前没有需要暂停的同步任务'" :loading="controlling" @click="toggleControl">{{ summary.control?.paused ? '恢复调度' : '紧急暂停' }}</el-button></div>
       </section>
       <section class="sync-panel">
         <div class="section-heading"><h3>当前轮次进度</h3><el-button link type="primary" @click="router.push({path:'/sync-center/plans',query:{subjectId}})">查看学科计划 <el-icon><ArrowRight /></el-icon></el-button></div>
@@ -86,12 +86,14 @@ const importStage = computed(() => ({queued:'等待入库',paused:'已暂停',pr
 const runtime = computed(() => {
   if (loading.value || controlLoading.value) return {label:'读取状态',type:'info'}
   if (error.value || control.value.collectorError) return {label:'状态需检查',type:'danger',reason:error.value || control.value.collectorError}
-  const reason = summary.value.control?.paused ? summary.value.control.reason || '同步已紧急暂停' : control.value.source?.paused ? control.value.source.reason || '来源暂停中' : control.value.serviceResources?.reason || control.value.collector?.resources?.reason || control.value.collector?.sourceBudget?.reason
-  return reason ? {label:'等待处理',type:'warning',reason} : {label:summary.value.currentTask ? '正在采集' : summary.value.currentImport ? '正在处理入库成果' : '就绪',type:'success'}
+  if (summary.value.control?.paused) return {label:'调度已暂停',type:'info',reason:summary.value.control.hasPendingWork ? summary.value.control.reason || '同步调度已暂停' : '当前没有待处理任务；调度仍处于暂停状态，可点击“恢复调度”解除。'}
+  const reason = control.value.source?.paused ? control.value.source.reason || '来源暂停中' : control.value.serviceResources?.reason || control.value.collector?.resources?.reason || control.value.collector?.sourceBudget?.reason
+  return reason ? {label:'等待处理',type:'warning',reason} : {label:summary.value.currentTask ? '正在采集' : summary.value.currentImport ? '正在处理入库成果' : summary.value.control?.hasPendingWork ? '就绪' : '空闲',type:'success'}
 })
 const controlLoading = ref(false)
 async function toggleControl() {
   if (!summary.value.control?.paused) {
+    if (!summary.value.control?.canEmergencyPause) return
     try { await ElMessageBox.confirm('暂停调度并停止当前采集，已取得的成果会保留。', '紧急暂停同步', {confirmButtonText:'暂停同步',cancelButtonText:'取消',type:'warning'}) } catch { return }
   }
   controlling.value=true

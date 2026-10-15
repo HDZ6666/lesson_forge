@@ -85,10 +85,29 @@ def settle_round(*, eligible_count, problem_count, new_questions, new_relations,
     return 'no_new'
 
 
+async def has_pending_work(db):
+    """Emergency pause applies to unfinished work, including pre-dispatch planning."""
+    return bool(await db.scalar(select(or_(
+        select(QbSyncJob.run_id).where(or_(
+            QbSyncJob.status.in_(('queued', 'starting', 'running', 'cancelling')),
+            QbSyncJob.active_slot.is_not(None))).exists(),
+        select(QbQuestionImportIntake.intake_id).where(
+            QbQuestionImportIntake.status.in_(UNSETTLED_INTAKE),
+            QbQuestionImportIntake.import_id.is_(None)).exists(),
+        select(QbQuestionImport.import_id).where(QbQuestionImport.status.in_(UNSETTLED_IMPORT)).exists(),
+        select(QbSyncPlan.plan_id).where(QbSyncPlan.enabled == 1, QbSyncPlan.control_state == 'active',
+                                      QbSyncPlan.cycle_state.in_(('discovering', 'running'))).exists(),
+    ))))
+
+
 async def control_status(db):
     row = await db.get(QbSyncControl, 1)
+    pending = await has_pending_work(db)
+    paused = bool(row and row.paused)
     return {
-        'paused': bool(row and row.paused),
+        'paused': paused,
+        'hasPendingWork': pending,
+        'canEmergencyPause': pending and not paused,
         'reason': row.reason if row else None,
         'revision': row.revision if row else 1,
         'updateTime': utc_datetime(row.update_time) if row else None,
@@ -101,6 +120,8 @@ async def set_control(db, paused, revision, reason, operator):
     row = await db.get(QbSyncControl, 1, with_for_update=True, populate_existing=True)
     if row is None or row.revision != revision:
         raise ServiceException(message='公共暂停状态已变化，请刷新')
+    if paused and not row.paused and not await has_pending_work(db):
+        raise ServiceException(message='当前没有需要暂停的同步任务')
     row.paused = int(paused)
     row.reason = reason if paused else None
     row.revision += 1
