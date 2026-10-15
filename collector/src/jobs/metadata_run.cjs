@@ -273,6 +273,7 @@ async function runDiscovery(options, dependencies = {}) {
   let finalStatus = 'success';
   let finalMessage = null;
   let report = null;
+  let discoveryRequest = { stage: 'seed', seedUrl: options.seedUrl };
   const validation = emptyValidation();
   const events = options.events || createProcessEventEmitter({ stdout: options.eventsStdout === true });
 
@@ -331,6 +332,12 @@ async function runDiscovery(options, dependencies = {}) {
     for (const version of versions) {
       if (signalName) throw new StopCrawlError(`收到 ${signalName}，任务安全停止。`, 'signal');
       console.log(`[版本] ${version.versionName} (${version.externalVersionId})`);
+      discoveryRequest = {
+        stage: 'textbooks',
+        seedUrl: options.seedUrl,
+        versionId: String(version.externalVersionId),
+        urlTemplate: version.urlTemplate || version.raw?.url || `/${options.bankPath || 'czsx'}/zj{0}/`,
+      };
       const listed = await selectVersion(page, version, gate, options);
       const textbooks = normalizeTextbookRecords(listed, {
         versionExternalId: version.externalVersionId,
@@ -413,6 +420,7 @@ async function runDiscovery(options, dependencies = {}) {
       recoverable: finalStatus === 'cancelled',
       blocked: finalStatus === 'blocked',
       stage: 'run',
+      discoveryRequest,
     });
     error.eventEmitted = true;
     try {

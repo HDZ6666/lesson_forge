@@ -118,6 +118,7 @@ class EventMethods {
           stage: event.stage || null,
           runId: event.runId || null,
           failedPages: event.failedPages || [],
+          discoveryRequest: event.discoveryRequest || null,
           at: event.at,
         };
         if (scope) {

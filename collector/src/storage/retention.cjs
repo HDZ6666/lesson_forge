@@ -59,16 +59,31 @@ function unreleasedRuns(db) {
     const rows = db.prepare(`SELECT id${hasStarted ? ', started_at' : ''} FROM sync_runs`).all();
     return rows
       .filter((row) => !releasableRun(db, row.id))
-      .map((row) => ({ id: Number(row.id), startedAt: row.started_at ? Date.parse(row.started_at) : null }));
+      .map((row) => ({
+        id: Number(row.id),
+        kind: 'content',
+        startedAt: row.started_at ? Date.parse(row.started_at) : null,
+      }))
+      .concat(
+        db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='source_metadata_runs'").get()
+          ? db
+              .prepare("SELECT id, started_at FROM source_metadata_runs WHERE status != 'success'")
+              .all()
+              .map((row) => ({
+                id: Number(row.id),
+                kind: 'metadata',
+                startedAt: row.started_at ? Date.parse(row.started_at) : null,
+              }))
+          : [],
+      );
   } catch {
     return null;
   }
 }
 
-function jobRunId(db, jobId) {
+function diagnosticJob(db, jobId) {
   try {
-    const row = db.prepare('SELECT collector_run_id FROM collector_jobs WHERE id=?').get(jobId);
-    return row && row.collector_run_id != null ? Number(row.collector_run_id) : null;
+    return db.prepare('SELECT * FROM collector_jobs WHERE id=?').get(jobId);
   } catch {
     return null;
   }
@@ -77,8 +92,17 @@ function jobRunId(db, jobId) {
 function diagnosticsNeeded(db, name, mtimeMs, pending) {
   if (pending === null) return true;
   const job = name.match(/^job-([\w-]+)\.jsonl\.gz$/);
-  const runId = job && db ? jobRunId(db, job[1]) : null;
-  if (runId != null) return pending.some((run) => run.id === runId);
+  const row = job && db ? diagnosticJob(db, job[1]) : null;
+  if (row?.run_type === 'metadata') {
+    // Failed/blocked discoveries have no content collector_run_id. Their
+    // diagnostics still describe the unresolved source/contract failure.
+    return (
+      row.status !== 'completed' ||
+      pending.some((run) => run.kind === 'metadata' && run.id === Number(row.metadata_run_id))
+    );
+  }
+  const runId = row?.collector_run_id;
+  if (runId != null) return pending.some((run) => run.kind === 'content' && run.id === Number(runId));
   // Not tied to a run: keep it while any run that may have written it is unreleased.
   return pending.some((run) => run.startedAt === null || Number.isNaN(run.startedAt) || run.startedAt <= mtimeMs);
 }

@@ -109,6 +109,14 @@ function normalizeEvent(raw) {
       event.recoverable = raw.recoverable === true;
       event.blocked = raw.blocked === true;
       event.stage = boundedString(raw.stage, 64);
+      if (raw.discoveryRequest && ['seed', 'textbooks'].includes(raw.discoveryRequest.stage)) {
+        event.discoveryRequest = {
+          stage: raw.discoveryRequest.stage,
+          seedUrl: boundedString(raw.discoveryRequest.seedUrl, 2000),
+          versionId: boundedString(raw.discoveryRequest.versionId, 64),
+          urlTemplate: boundedString(raw.discoveryRequest.urlTemplate, 500),
+        };
+      }
       if (Array.isArray(raw.failedPages)) {
         event.failedPages = raw.failedPages.slice(0, MAX_FAILED_PAGES).map((item) => ({
           catalogExternalId: boundedString(item?.catalogExternalId, 64),

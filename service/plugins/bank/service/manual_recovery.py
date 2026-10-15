@@ -56,10 +56,12 @@ async def _open_discovery(db, subject_id, owner, source):
     if row is None:
         raise ServiceException(message='没有匹配的题目列表或教材发现阻断任务，无法确定要复核的请求')
     state = {'owner': owner, 'taskId': row.run_id, 'kind': 'discovery'}
-    seed = (row.options_json or {}).get('seedUrl')
+    collector_job_id = row.collector_job_id
+    if not collector_job_id:
+        raise ServiceException(message='旧发现任务缺少采集执行关联，无法确定原失败请求，请重新执行教材发现')
     # Only a plain read happened here (no row locks), so nothing is held
     # across the Collector call.
-    result = await call('open', {**state, **({'seedUrl': seed} if seed else {})})
+    result = await call('open', {**state, 'collectorJobId': collector_job_id})
     return state, {**result, 'textbookName': '教材清单发现', 'savedCount': 0}
 
 
@@ -67,10 +69,22 @@ async def _finish_discovery(db, payload, state):
     from plugins.bank.entity.do.bank_do import QbSyncPlan
     from plugins.bank.service.incremental_import import _clock
     now = await _clock(db)
+    task = await db.get(QbSyncJob, state['taskId'], with_for_update=True)
+    if task and task.status in ('blocked', 'failed') and task.active_slot is None:
+        # Verification can finish before the dispatcher releases the failed
+        # discovery's reservation. The new attempt must not deduplicate to it.
+        task.dispatch_book_key = None
+        task.worker_token = None
     plans = (await db.scalars(select(QbSyncPlan).where(
-        QbSyncPlan.discovery_processed_task_id == state['taskId']).with_for_update())).all()
+        or_(QbSyncPlan.discovery_task_id == state['taskId'],
+            (QbSyncPlan.discovery_task_id.is_(None)) &
+            (QbSyncPlan.discovery_processed_task_id == state['taskId']))).with_for_update())).all()
     for plan in plans:
         # Discovery runs again on the next tick; a plan the user paused stays paused.
+        if plan.discovery_task_id == state['taskId']:
+            plan.discovery_processed_task_id = state['taskId']
+            plan.discovery_task_id = None
+        plan.discovery_error = None
         plan.discovery_next_at = now
     await db.commit()
     await call('finish', payload)

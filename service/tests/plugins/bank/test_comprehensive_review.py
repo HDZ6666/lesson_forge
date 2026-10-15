@@ -188,6 +188,7 @@ async def test_metadata_protection_can_open_manual_browser(bank_db,monkeypatch):
     pid,jobs=await setup(bank_db,monkeypatch)
     plan=await bank_db.get(QbSyncPlan,pid)
     metadata=await bank_db.get(QbSyncJob,plan.discovery_processed_task_id)
+    metadata.collector_job_id='metadata-blocked'
     metadata.status='blocked'
     metadata.error_message='站点返回验证/防护页面，任务已熔断'
     await bank_db.commit()

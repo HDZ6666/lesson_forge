@@ -331,13 +331,28 @@ async def sync_book_once(db, plan_id, textbook_id, payload, operator):
                               textbookId=textbook_id, taskId=task_id, syncMode=supplement.sync_mode, operator=operator)
         await db.commit()
     except Exception as exc:
-        # The supplement row was committed before the execution existed; a
-        # failed create must close it, or it would block every wake-up (R03).
+        # A failed response can follow a committed execution. Relink it; only
+        # a create with no execution should close the supplement as failed.
         await db.rollback()
         if options.get('supplementId'):
-            await fail_supplement(db, options['supplementId'], getattr(exc, 'message', None) or str(exc))
+            recovered = await fail_supplement(db, options['supplementId'], getattr(exc, 'message', None) or str(exc))
+            if recovered:
+                return {'taskId': recovered, 'existing': True}
         raise
     return {'taskId':task_id,'existing':False}
+
+
+async def relink_supplement(db, supplement, execution):
+    supplement.task_id = execution.run_id
+    state = await db.scalar(select(QbSyncBookState).where(
+        QbSyncBookState.plan_id == supplement.plan_id,
+        QbSyncBookState.textbook_id == supplement.textbook_id))
+    if state is None:
+        state = QbSyncBookState(plan_id=supplement.plan_id, textbook_id=supplement.textbook_id,
+                               enabled=1, last_cycle_no=0, revision=1)
+        db.add(state)
+    state.last_task_id = max(state.last_task_id or 0, execution.run_id)
+    state.last_manual_task_id = max(state.last_manual_task_id or 0, execution.run_id)
 
 
 async def fail_supplement(db, supplement_id, reason):
@@ -346,6 +361,15 @@ async def fail_supplement(db, supplement_id, reason):
     row=await db.get(QbSyncSupplement,supplement_id,with_for_update=True,populate_existing=True)
     if row is None or row.status!='running':
         return
+    execution=await db.scalar(select(QbSyncJob).where(QbSyncJob.task_module=='question',
+        QbSyncJob.options_json['supplementId'].as_integer()==supplement_id)
+        .order_by(QbSyncJob.run_id.desc()).limit(1))
+    if execution:
+        await relink_supplement(db, row, execution)
+        await db.commit()
+        diagnostics.event('supplement_execution_relinked', stage='plan', planId=row.plan_id,
+                          supplementId=supplement_id, taskId=execution.run_id)
+        return execution.run_id
     row.status='failed'
     row.finished_at=await _clock(db)
     row.summary_json={**(row.summary_json or {}),'error':str(reason or '创建补采执行失败')[:500]}

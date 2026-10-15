@@ -77,3 +77,32 @@ test('a job diagnostics file follows its own run release', () => {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('blocked discovery keeps job and process diagnostics even without content runs', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'metadata-retention-'));
+  const db = new DatabaseSync(':memory:');
+  db.exec(`CREATE TABLE sync_runs(id INTEGER PRIMARY KEY,started_at TEXT);
+    CREATE TABLE sync_result_cleanup(run_id INTEGER PRIMARY KEY);
+    CREATE TABLE source_metadata_runs(id INTEGER PRIMARY KEY,status TEXT,started_at TEXT);
+    CREATE TABLE collector_jobs(id TEXT PRIMARY KEY,run_type TEXT,status TEXT,metadata_run_id INTEGER,collector_run_id INTEGER);
+    INSERT INTO source_metadata_runs VALUES(1,'blocked','2026-09-01T00:00:00Z'),(2,'success','2026-09-03T00:00:00Z');
+    INSERT INTO collector_jobs VALUES('blocked','metadata','blocked',1,NULL),('success','metadata','completed',2,NULL);`);
+  const diagnostics = path.join(dir, 'diagnostics');
+  fs.mkdirSync(diagnostics);
+  const file = (name) => path.join(diagnostics, name + '.jsonl.gz');
+  const names = ['job-blocked', 'job-success', 'events-2026-09-02-1'];
+  for (const name of names) {
+    fs.writeFileSync(file(name), 'x');
+    fs.utimesSync(file(name), new Date('2026-09-04'), new Date('2026-09-04'));
+  }
+  try {
+    const result = pruneRetention(dir, db, { now: Date.parse('2026-10-15T00:00:00Z') });
+    assert.ok(fs.existsSync(file('job-blocked')));
+    assert.ok(fs.existsSync(file('events-2026-09-02-1')));
+    assert.ok(!fs.existsSync(file('job-success')));
+    assert.equal(result.diagnosticsFiles, 1);
+  } finally {
+    db.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

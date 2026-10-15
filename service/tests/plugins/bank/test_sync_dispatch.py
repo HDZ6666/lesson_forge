@@ -645,7 +645,11 @@ async def test_dispatch_checks_actual_manual_candidate_after_skipping_auto(bank_
         await asyncio.sleep(0)
         assert executed == [manual['taskId']]
         row = await bank_db.get(QbSyncJob, auto['taskId'], populate_existing=True)
-        assert row.status == 'queued' and row.active_slot is None
+        if gate == 'book_pause':
+            assert row.status == 'cancelled' and row.options_json['planSkipped'] and row.dispatch_book_key is None
+        else:
+            assert row.status == 'queued'
+        assert row.active_slot is None
     finally:
         runs._WORKERS.pop(manual['taskId'], None)
 

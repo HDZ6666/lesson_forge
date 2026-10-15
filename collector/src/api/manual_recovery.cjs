@@ -8,6 +8,8 @@ const { buildQuestionListRequest } = require('../sources/zujuan/request.cjs');
 const { evaluateFetch } = require('../sources/zujuan/list_window.cjs');
 const { classifyHtmlProtection, classifyQuestionResponse } = require('../sources/zujuan/response_classifier.cjs');
 const { DEFAULT_SEED_URL } = require('../sources/zujuan/constants.cjs');
+const { buildChapterTextbooksUrl } = require('../sources/zujuan/urls.cjs');
+const { parseTextbooksFromApiHtml, parseVersionsFromHtml } = require('../sources/zujuan/metadata_parser.cjs');
 const { ALLOWED_PAGE_HOSTS, assertAllowedUrl } = require('../shared/url_policy.cjs');
 const { parseQuestionListPayload } = require('../sources/zujuan/question_parser.cjs');
 const { launchCollectorContext } = require('../sources/zujuan/session.cjs');
@@ -20,13 +22,36 @@ function fail(message, statusCode = 409) {
 }
 // Textbook discovery fails on the seed page or the textbook-list request,
 // not on a question page, so it is re-checked against its own request.
-function discoveryTarget(input) {
-  const url = input.seedUrl || DEFAULT_SEED_URL;
+function discoveryTarget(dbPath, input) {
+  const db = new DatabaseSync(dbPath, { readOnly: true });
+  let failure;
+  try {
+    const job = db.prepare('SELECT run_type, payload_json FROM collector_jobs WHERE id=?').get(input.collectorJobId);
+    if (!job || job.run_type !== 'metadata') fail('没有匹配的教材发现执行，无法复核原失败请求');
+    failure = JSON.parse(job.payload_json).lastErrorEvent?.discoveryRequest;
+  } finally {
+    db.close();
+  }
+  if (!failure || !['seed', 'textbooks'].includes(failure.stage))
+    fail('旧发现任务没有保存原失败请求，无法确认来源已恢复，请重新执行教材发现');
+  const url = failure.seedUrl || DEFAULT_SEED_URL;
   assertAllowedUrl(url, ALLOWED_PAGE_HOSTS);
-  return { kind: 'discovery', url, request: { url, method: 'GET' }, catalogName: '教材清单发现' };
+  let requestUrl = url;
+  if (failure.stage === 'textbooks') {
+    if (!/^\d+$/.test(failure.versionId || '')) fail('原失败版本 ID 无效');
+    requestUrl = buildChapterTextbooksUrl({ externalVersionId: failure.versionId, urlTemplate: failure.urlTemplate });
+  }
+  return {
+    kind: 'discovery',
+    stage: failure.stage,
+    url,
+    request: { url: assertAllowedUrl(requestUrl, ALLOWED_PAGE_HOSTS), method: 'GET' },
+    versionId: failure.versionId,
+    catalogName: '教材清单发现',
+  };
 }
 function recoveryTarget(dbPath, input) {
-  if (input.kind === 'discovery') return discoveryTarget(input);
+  if (input.kind === 'discovery') return discoveryTarget(dbPath, input);
   const db = new DatabaseSync(dbPath, { readOnly: true });
   try {
     const run = db.prepare('SELECT * FROM sync_runs WHERE id=?').get(input.collectorRunId);
@@ -230,26 +255,40 @@ class ManualRecovery {
     return this.public(s);
   }
   async checkDiscovery(s) {
-    const result = await s.page.evaluate(async (target) => {
-      try {
-        const response = await fetch(target, { credentials: 'include', headers: { Accept: 'text/html' } });
-        const headers = {};
-        response.headers.forEach((value, key) => {
-          headers[key] = value;
-        });
-        return { status: response.status, headers, text: await response.text() };
-      } catch (error) {
-        return { status: 0, headers: {}, text: '', networkError: String(error?.message || error) };
-      }
-    }, s.target.request.url);
+    const result = await s.page.evaluate(
+      async (target) => {
+        try {
+          const response = await fetch(target.url, {
+            credentials: 'include',
+            headers: {
+              Accept: 'text/html, */*;q=0.1',
+              ...(target.stage === 'textbooks' ? { 'X-Requested-With': 'XMLHttpRequest' } : {}),
+            },
+          });
+          const headers = {};
+          response.headers.forEach((value, key) => {
+            headers[key] = value;
+          });
+          return { status: response.status, headers, text: await response.text() };
+        } catch (error) {
+          return { status: 0, headers: {}, text: '', networkError: String(error?.message || error) };
+        }
+      },
+      { url: s.target.request.url, stage: s.target.stage },
+    );
     this.manager.sourceControl.observe(result.status, result.headers, { verification: false });
     const protection = classifyHtmlProtection(result.text);
-    if (result.status !== 200 || protection.terminalBlock || protection.transientChallenge || !protection.hasContent)
+    if (result.status !== 200 || protection.terminalBlock || protection.transientChallenge)
       fail(
         `仍未恢复：教材清单页面 HTTP ${result.status}，${protection.hasContent ? '请核对浏览器提示' : '仍返回验证/防护页面或缺少教材内容'}`,
       );
+    const records =
+      s.target.stage === 'textbooks'
+        ? parseTextbooksFromApiHtml(result.text, { versionExternalId: s.target.versionId, allowEmpty: true })
+        : parseVersionsFromHtml(result.text);
+    if (!records.length) fail('原失败请求未返回有效的教材或版本清单，暂不能确认恢复');
     s.verifiedAt = Date.now();
-    s.message = '检查成功：教材清单页面正常返回，可以恢复教材发现';
+    s.message = `检查成功：原失败${s.target.stage === 'textbooks' ? '教材列表接口' : '版本入口页'}返回 ${records.length} 条记录，可以恢复教材发现`;
   }
   validate(input) {
     const s = this.require(input);

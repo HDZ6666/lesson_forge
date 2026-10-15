@@ -448,6 +448,7 @@ async def save_book_override(db, plan_id, textbook_id, payload):
     row.enabled = int(payload.enabled)
     row.exception_kind, row.operator_note = payload.exception_kind, payload.operator_note
     row.revision += 1
+    await _close_excluded_waiting(db, plan_id)
     await db.commit()
     return {'revision': row.revision}
 
@@ -538,6 +539,7 @@ async def tick_plan(db, plan_id, *, client):
             return
         cycle_no,cycle_name,plan_name=plan.cycle_no,plan.cycle_name,plan.plan_name
         plan_mode,plan_round=plan.session_mode,plan.session_round or 1
+        await _close_excluded_waiting(db, plan_id)
         books=await list_books(db,plan_id)
         states={r.textbook_id:r for r in (await db.scalars(select(QbSyncBookState).where(QbSyncBookState.plan_id==plan_id))).all()}
         jobs=list((await db.scalars(select(QbSyncJob).where(
@@ -644,6 +646,37 @@ async def open_issue_snapshot(db, task_ids):
     return {'openIssueCountAtEnd': len(rows),
             'openIssuesAtEnd': [{'issueId': r.issue_id, 'textbookId': r.textbook_id, 'errorType': r.error_type,
                                  'status': r.status, 'reason': (r.reason or '')[:120]} for r in rows[:50]]}
+
+
+async def _close_excluded_waiting(db, plan_id):
+    """End unstarted automatic executions that an operator excluded.
+
+    Reconcile persisted queues too; manual executions and already claimed
+    collection keep their normal collection/import lifecycle.
+    """
+    await db.flush()
+    rows = (await db.execute(select(QbSyncJob, QbSyncJobScope)
+        .join(QbSyncJobScope, QbSyncJobScope.run_id == QbSyncJob.run_id)
+        .join(QbSyncBookState, (QbSyncBookState.plan_id == plan_id) &
+              (QbSyncBookState.textbook_id == QbSyncJobScope.local_textbook_id))
+        .where(QbSyncJob.options_json['autoPlanId'].as_integer() == plan_id,
+               QbSyncJob.task_module == 'question', QbSyncJob.status == 'queued',
+               QbSyncJob.active_slot.is_(None),
+               or_(QbSyncBookState.enabled == 0, QbSyncBookState.exception_kind.is_not(None)))
+        .with_for_update())).all()
+    now = await _clock(db)
+    for job, scope in rows:
+        if (job.options_json or {}).get('manualDispatchRequested'):
+            continue
+        reason = '本轮跳过：该教材已停用或人工排除'
+        job.status = job.phase = scope.status = 'cancelled'
+        job.finished_at = job.update_time = scope.finished_at = scope.update_time = now
+        job.error_message = scope.error_message = reason
+        job.dispatch_book_key = job.dispatch_not_before = job.dispatch_error = None
+        job.options_json = {**(job.options_json or {}), 'planSkipped': True}
+        from plugins.bank.service import diagnostics
+        diagnostics.event('queue_book_skipped', stage='queue', planId=plan_id,
+                          taskId=job.run_id, textbookId=scope.local_textbook_id, reason=reason)
 
 
 async def _round_work_open(db, jobs):
@@ -897,11 +930,13 @@ async def session_log(db, plan_id, session_no=None):
             QbQuestionImportIntake.task_id.in_(ids)))).all()) if ids else collections.Counter()
         imports=(await db.execute(select(QbQuestionImport.status,QbQuestionImport.accepted_count,
             QbQuestionImport.quarantined_count).where(QbQuestionImport.task_id.in_(ids)))).all() if ids else []
+        linked = select(QbSyncIssueTask.issue_id).where(QbSyncIssueTask.task_id.in_(ids))
         live=await db.scalar(select(func.count()).select_from(QbSyncIssue).where(
-            QbSyncIssue.latest_task_id.in_(ids),QbSyncIssue.status!='resolved')) if ids else 0
+            or_(QbSyncIssue.issue_id.in_(linked), QbSyncIssue.latest_task_id.in_(ids)),
+            QbSyncIssue.status!='resolved')) if ids else 0
         summary=cycle.summary_json or {}
         # A finished round reports what was open when it ended; the live count is separate.
-        issues=summary['openIssueCountAtEnd'] if 'openIssueCountAtEnd' in summary else live
+        issues=summary.get('openIssueCountAtEnd') if cycle.status != 'running' else live
         rounds.append({'cycleNo':cycle.cycle_no,'roundNo':cycle.round_no,'legacy':bool(cycle.legacy),
                        'status':cycle.status,'endReason':cycle.end_reason,'targetCount':len(cycle.targets or []),
                        'skippedCount':summary.get('skippedCount'),'problemCount':summary.get('problemCount'),
@@ -910,7 +945,7 @@ async def session_log(db, plan_id, session_no=None):
                        'imports':{'count':len(imports),'completed':sum(1 for r in imports if r.status=='completed'),
                                   'accepted':sum(int(r.accepted_count or 0) for r in imports),
                                   'quarantined':sum(int(r.quarantined_count or 0) for r in imports)},
-                       'openIssueCount':int(issues or 0),'openIssueCountNow':int(live or 0),
+                       'openIssueCount':int(issues) if issues is not None else None,'openIssueCountNow':int(live or 0),
                        'openIssuesAtEnd':summary.get('openIssuesAtEnd'),
                        'newQuestionCount':summary.get('newQuestionCount'),'newRelationCount':summary.get('newRelationCount'),
                        'decision':summary.get('decision'),'note':summary.get('note')})
@@ -940,7 +975,15 @@ async def settle_supplements(db, plan_id, now):
         QbSyncSupplement.status=='running').with_for_update())).all()
     still_open=False
     for row in rows:
-        job=await db.get(QbSyncJob,row.task_id) if row.task_id else None
+        # Creation commits the execution before the response/link update. Find
+        # it by its durable supplement identity after a crash in that interval.
+        latest=await db.scalar(select(QbSyncJob).where(QbSyncJob.task_module=='question',
+            QbSyncJob.options_json['supplementId'].as_integer()==row.supplement_id)
+            .order_by(QbSyncJob.run_id.desc()).limit(1))
+        job=latest or (await db.get(QbSyncJob,row.task_id) if row.task_id else None)
+        if latest:
+            from plugins.bank.service.plan_control import relink_supplement
+            await relink_supplement(db, row, latest)
         if job is None:
             # A supplement whose execution was never created (an old failed
             # create) is closed after a grace period instead of blocking the
@@ -952,10 +995,6 @@ async def settle_supplements(db, plan_id, now):
                 continue
             still_open=True
             continue
-        # Follow resumes and retries of the same supplement to the latest execution.
-        latest=await db.scalar(select(QbSyncJob).where(QbSyncJob.task_module=='question',
-            QbSyncJob.options_json['supplementId'].as_integer()==row.supplement_id).order_by(QbSyncJob.run_id.desc()).limit(1))
-        job=latest or job
         if (job.status not in TERMINAL or job.active_slot is not None
                 or (job.options_json or {}).get('planResumePending')
                 or (job.options_json or {}).get('autoResumePending')):
