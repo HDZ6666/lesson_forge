@@ -52,6 +52,40 @@ async def test_source_resume_is_a_new_linked_execution_in_the_same_round(bank_db
     assert new.options_json['autoCycleNo'] == cycle_no and new.options_json['planSourceResumeOf'] == old_id
     plan = await bank_db.get(QbSyncPlan, pid, populate_existing=True)
     assert plan.cycle_state == 'running', 'the queued resume keeps the round open'
+    from plugins.bank.service import task_executions
+    payload = [{'logicalTaskId': new.logical_task_id or new.run_id}]
+    await task_executions.attach_summary(bank_db, payload)
+    assert payload[0]['executionCount'] == 1 and payload[0]['executionRecordCount'] == 2, 'queued linked execution is not counted until it starts'
+    old = await bank_db.get(QbSyncJob, old_id, populate_existing=True)
+    old_scope = await bank_db.scalar(select(QbSyncJobScope).where(QbSyncJobScope.run_id == old_id))
+    assert (old.status, old.started_at is not None, old_scope.collector_run_id) == ('blocked', True, 1000 + old_id)
+
+
+@pytest.mark.asyncio
+async def test_source_block_before_any_saved_page_retries_as_linked_execution(bank_db, monkeypatch):
+    """R01: nothing saved to continue, so a linked retry, never an in-place rewrite or a stuck round."""
+    pid, jobs = await setup(bank_db, monkeypatch)
+    old_id = jobs[0].run_id
+    await finish_book(bank_db, jobs[0], status='blocked', complete=False, error='题目列表返回验证/防护')
+    scope = await bank_db.scalar(select(QbSyncJobScope).where(QbSyncJobScope.run_id == old_id))
+    scope.snapshot_locked_at = None
+    jobs[0].options_json = {**jobs[0].options_json, 'planSourceResumePending': True}
+    await finish_book(bank_db, jobs[1])
+
+    class Verified:
+        def health(self):
+            return {'ok': True, 'sourceControl': {'paused': False}}
+    plan = await bank_db.get(QbSyncPlan, pid)
+    plan.next_check_at = None
+    await bank_db.commit()
+    await sync_plans.tick_plan(bank_db, pid, client=Verified())
+    rows = (await bank_db.scalars(select(QbSyncJob).where(QbSyncJob.task_module == 'question')
+                                  .execution_options(populate_existing=True))).all()
+    linked = [r for r in rows if (r.options_json or {}).get('planSourceResumeOf') == old_id]
+    assert len(linked) == 1 and linked[0].status == 'queued'
+    assert (linked[0].logical_task_id or linked[0].run_id) == (rows[0].logical_task_id or old_id)
+    old = await bank_db.get(QbSyncJob, old_id, populate_existing=True)
+    assert old.status == 'blocked' and not old.options_json.get('planSourceResumePending')
 
 
 @pytest.mark.asyncio

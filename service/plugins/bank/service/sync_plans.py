@@ -712,11 +712,17 @@ async def _recover_round_collection(db, plan, states, jobs, scopes, eligible, no
                     inherited.update(resumeFirst=True, planSourceResumeOf=job.run_id,
                                      syncMode=options.get('syncMode') or 'incremental')
                     job_id, state_id = job.run_id, state.state_id
-                    resumed = await SyncTaskService.create_question(db, {
-                        'versionId': scope.local_version_id, 'textbookId': scope.local_textbook_id,
-                        'listConcurrency': options.get('listConcurrency', 8),
-                        'limitTo1000Pages': bool(options.get('limitTo1000Pages'))},
-                        'automatic', automatic_options=inherited, resume_task_id=job_id)
+                    if scope.collector_run_id and scope.snapshot_locked_at and not scope.snapshot_complete:
+                        resumed = await SyncTaskService.create_question(db, {
+                            'versionId': scope.local_version_id, 'textbookId': scope.local_textbook_id,
+                            'listConcurrency': options.get('listConcurrency', 8),
+                            'limitTo1000Pages': bool(options.get('limitTo1000Pages'))},
+                            'automatic', automatic_options=inherited, resume_task_id=job_id)
+                    else:
+                        # Blocked before anything was saved: nothing to continue,
+                        # so a linked retry of the same task starts the book again.
+                        resumed = await SyncTaskService.retry_question(
+                            db, job_id, 'automatic', execution_options=inherited)
                     job = await db.get(QbSyncJob, job_id, populate_existing=True)
                     state = await db.get(QbSyncBookState, state_id, populate_existing=True)
                     state.last_task_id = resumed.get('taskId') or resumed['runId']
