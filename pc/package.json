@@ -8,7 +8,7 @@
   "scripts": {
     "dev": "vite",
     "build:prod": "vite build",
-    "build:docker": "vite build --mode docker",
+    "build:docker": "vite build --mode production",
     "build:stage": "vite build --mode staging",
     "test:plugin": "node tests/plugins/run-plugin-tests.js",
     "preview": "vite preview"

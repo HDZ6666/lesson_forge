@@ -36,14 +36,23 @@
         >
           <template #prefix><svg-icon icon-class="validCode" class="el-input__icon input-icon" /></template>
         </el-input>
-        <div class="login-code">
-          <img :src="codeUrl" @click="getCode" class="login-code-img"/>
-        </div>
+        <button
+          type="button"
+          class="login-code"
+          :disabled="captchaLoading"
+          aria-label="刷新验证码"
+          @click="getCode"
+        >
+          <img v-if="codeUrl" :src="codeUrl" alt="验证码" class="login-code-img" @error="handleCaptchaImageError" />
+          <span v-else>{{ captchaLoading ? '加载中…' : '加载失败，点击重试' }}</span>
+        </button>
+        <div v-if="captchaError" class="captcha-error" role="alert">{{ captchaError }}</div>
       </el-form-item>
       <el-checkbox v-model="loginForm.rememberMe" style="margin:0px 0px 25px 0px;">记住密码</el-checkbox>
       <el-form-item style="width:100%;">
         <el-button
           :loading="loading"
+          :disabled="captchaEnabled && (captchaLoading || !codeUrl)"
           size="large"
           type="primary"
           style="width:100%;"
@@ -93,6 +102,8 @@ const loginRules = {
 };
 
 const codeUrl = ref("");
+const captchaLoading = ref(false);
+const captchaError = ref("");
 const loading = ref(false);
 // 验证码开关
 const captchaEnabled = ref(true);
@@ -140,15 +151,36 @@ function handleLogin() {
   });
 }
 
-function getCode() {
-  getCodeImg().then(res => {
+async function getCode() {
+  if (captchaLoading.value) return;
+  captchaLoading.value = true;
+  captchaError.value = "";
+  codeUrl.value = "";
+  loginForm.value.code = "";
+  loginForm.value.uuid = "";
+  try {
+    const res = await getCodeImg();
+    if (!res || typeof res !== 'object' ||
+        (res.captchaEnabled !== false && (!res.img || !res.uuid))) {
+      throw new Error('验证码接口返回异常，请点击重试');
+    }
     captchaEnabled.value = res.captchaEnabled === undefined ? true : res.captchaEnabled;
     register.value = res.registerEnabled === undefined ? false : res.registerEnabled;
     if (captchaEnabled.value) {
       codeUrl.value = "data:image/png;base64," + res.img;
       loginForm.value.uuid = res.uuid;
     }
-  });
+  } catch (error) {
+    captchaError.value = error.message || '验证码加载失败，请点击重试';
+  } finally {
+    captchaLoading.value = false;
+  }
+}
+
+function handleCaptchaImageError() {
+  codeUrl.value = "";
+  loginForm.value.uuid = "";
+  captchaError.value = '验证码图片加载失败，请点击重试';
 }
 
 function getCookie() {
@@ -156,6 +188,7 @@ function getCookie() {
   const password = Cookies.get("password");
   const rememberMe = Cookies.get("rememberMe");
   loginForm.value = {
+    ...loginForm.value,
     username: username === undefined ? loginForm.value.username : username,
     password: password === undefined ? loginForm.value.password : decrypt(password),
     rememberMe: rememberMe === undefined ? false : Boolean(rememberMe)
@@ -208,10 +241,28 @@ getCookie();
   width: 33%;
   height: 40px;
   float: right;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--el-color-primary);
+  font: inherit;
+  font-size: 12px;
+  line-height: 18px;
+  cursor: pointer;
   img {
     cursor: pointer;
     vertical-align: middle;
   }
+}
+.captcha-error {
+  width: 100%;
+  color: var(--el-color-danger);
+  font-size: 12px;
+  line-height: 18px;
+  margin-top: 4px;
 }
 .el-login-footer {
   height: 40px;
